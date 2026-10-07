@@ -1,0 +1,41 @@
+# The repository's ruff settings plus the stricter families this example is held to.
+# Run ./lint.sh (it fixes what ruff can fix, formats, then fails on anything left).
+extend = "../../pyproject.toml"
+line-length = 100
+
+[lint]
+extend-select = [
+    "SIM",   # simplify; SIM115: a file opened outside a context manager (RAII)
+    "C4",    # comprehensions
+    "RET",   # return paths
+    "PIE",
+    "PT",    # pytest style
+    "RUF",   # ruff's own checks
+    "PL",    # pylint's checks
+    "ARG",   # unused arguments
+    "PERF",
+    "FURB",
+    "ISC",   # implicit string concatenation
+    "TRY",   # exception handling
+    "BLE",   # blind except
+    "G",     # logging format
+]
+ignore = [
+    "PLR0913",  # many keyword arguments: the drivers' knobs are keyword-only by design
+    "PLR0917",
+    "PLR2004",  # magic values: the layout constants are the point of the code
+    "PLR0914",  # local-variable count
+    "PLR0915",  # statement count
+    "PLC0415",  # imports inside functions (optional backends are imported where used)
+    "RUF001",   # unicode in strings: math notation in messages
+    "RUF002",   # unicode in docstrings
+    "RUF003",   # unicode in comments
+    "TRY003",   # messages built at the raise site
+    "ISC001",   # conflicts with the formatter
+]
+
+[lint.per-file-ignores]
+"tests/*.py" = ["PLR2004", "ARG001"]
+
+[format]
+quote-style = "double"
