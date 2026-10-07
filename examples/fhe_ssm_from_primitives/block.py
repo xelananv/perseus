@@ -4,6 +4,13 @@ Polynomials are evaluated at their minimal depth: the cubic gate as ``z (p0 + p1
 (three levels above ``z``), the cubic activation as ``q0 + q1 k + q2 k^2 + (q3 k) k^2`` (two
 levels above ``k``). Every linear is preceded by the hint the GPT-2 port uses before its
 projections (``geometry.SlotGeometry.hint``): refresh unless the linear's one product fits.
+
+The nonlinear parts (the two norms, the time-mix gate, the channel-mix activation times gate)
+run as sections (``geometry``'s ``section``): directly on a real layout, on the two real halves
+of a split pair, or lane-wise. On split pairs a section's inputs must carry half their value:
+the norm takes that as its mask gain, and the plaintexts that make the gate's ``z`` and the
+linears that make ``k`` and ``r`` are pre-halved in ``weights.encode_block``. The d_ffn-wide
+values are lists of ciphertexts (one per tile; a single one in the decode layout).
 """
 
 from __future__ import annotations
@@ -23,10 +30,47 @@ class BlockState:
     n_prev: Any
 
 
+def norm(geo, h, site, tag: str, form: str):
+    """RMSNorm of ``h`` as a section, the split's factor 2 absorbed by the masks."""
+    gain = geo.split_gain
+
+    def kernel(ops, g, xs):
+        return [rmsnorm(ops, g, xs[0], site, tag, form, gain=gain)]
+
+    return geo.section(kernel, [h])[0]
+
+
+def tm_gate(ops, z, w):
+    """``z (p0 + p1 z + p2 z^2)``."""
+    poly = ops.add(
+        ops.mult_pt(z, w.p1, key=w.key("p1")),
+        ops.mult_pt(ops.square(z), w.p2, key=w.key("p2")),
+    )
+    return ops.mult(z, ops.add_pt(poly, w.p0, key=w.key("p0")))
+
+
+def cm_gate(ops, k, r, w, j: int = 0):
+    """``(q0 + q1 k + q2 k^2 + q3 k^3) (r0 + r1 r + r2 r^2)`` on d_ffn tile ``j``."""
+
+    def key(name):
+        return w.key(name if len(w.q0) == 1 else f"{name}.{j}")
+
+    k2 = ops.square(k)
+    act = ops.add(ops.mult_pt(k, w.q1[j], key=key("q1")), ops.mult_pt(k2, w.q2[j], key=key("q2")))
+    act = ops.add(act, ops.mult(ops.mult_pt(k, w.q3[j], key=key("q3")), k2))
+    act = ops.add_pt(act, w.q0[j], key=key("q0"))
+    gate = ops.add(
+        ops.mult_pt(r, w.r1[j], key=key("r1")),
+        ops.mult_pt(ops.square(r), w.r2[j], key=key("r2")),
+    )
+    gate = ops.add_pt(gate, w.r0[j], key=key("r0"))
+    return ops.mult(act, gate)
+
+
 def time_mix(ops, geo, h, w, st: BlockState, form: str):
     """``h + W_out g``; updates ``st`` in place (``s``, ``n_prev`` not yet carried)."""
     with geo.step("tm.norm"):
-        n = rmsnorm(ops, geo, h, w.norm_tm, w.key("tm.norm"), form)
+        n = norm(geo, h, w.norm_tm, w.key("tm.norm"), form)
     with geo.step("tm.in"):
         um = ops.add(
             ops.mult_pt(n, w.mix, key=w.key("mix")),
@@ -36,35 +80,27 @@ def time_mix(ops, geo, h, w, st: BlockState, form: str):
     with geo.step("tm.gate"):
         s = ops.add(ops.mult_pt(st.s, w.a, key=w.key("a")), ops.mult_pt(x, w.b, key=w.key("b")))
         z = ops.add(ops.mult_pt(s, w.c, key=w.key("c")), ops.mult_pt(x, w.dd, key=w.key("dd")))
-        poly = ops.add(
-            ops.mult_pt(z, w.p1, key=w.key("p1")),
-            ops.mult_pt(ops.square(z), w.p2, key=w.key("p2")),
-        )
-        g = ops.mult(z, ops.add_pt(poly, w.p0, key=w.key("p0")))
+        g = geo.section(lambda o, _g, zs: [tm_gate(o, zs[0], w)], [z])[0]
     st.s, st.n_prev = s, n
     with geo.step("tm.out"):
         return ops.add(h, geo.linear(geo.hint(g), w.wout))
 
 
 def channel_mix(ops, geo, h, w, form: str):
-    """``h + W_v (act (.) gate)``."""
+    """``h + W_v (act (.) gate)``, tile by tile over d_ffn."""
     with geo.step("cm.norm"):
-        n = rmsnorm(ops, geo, h, w.norm_cm, w.key("cm.norm"), form)
+        n = norm(geo, h, w.norm_cm, w.key("cm.norm"), form)
     with geo.step("cm.kr"):
-        k, r = geo.linear_multi(geo.hint(n), [w.wk, w.wr])
+        ks, rs = geo.up(geo.hint(n), [w.wk, w.wr])
     with geo.step("cm.gate"):
-        k2 = ops.square(k)
-        act = ops.add(ops.mult_pt(k, w.q1, key=w.key("q1")), ops.mult_pt(k2, w.q2, key=w.key("q2")))
-        act = ops.add(act, ops.mult(ops.mult_pt(k, w.q3, key=w.key("q3")), k2))
-        act = ops.add_pt(act, w.q0, key=w.key("q0"))
-        gate = ops.add(
-            ops.mult_pt(r, w.r1, key=w.key("r1")),
-            ops.mult_pt(ops.square(r), w.r2, key=w.key("r2")),
-        )
-        gate = ops.add_pt(gate, w.r0, key=w.key("r0"))
-        ag = ops.mult(act, gate)
+        n_tiles = len(ks)
+
+        def kernel(o, _g, xs):
+            return [cm_gate(o, xs[j], xs[n_tiles + j], w, j) for j in range(n_tiles)]
+
+        ags = geo.section(kernel, [*ks, *rs])
     with geo.step("cm.v"):
-        return ops.add(h, geo.linear(geo.hint(ag), w.wv))
+        return ops.add(h, geo.down([geo.hint(a) for a in ags], w.wv))
 
 
 def ssm_block(ops, geo, h, w, st: BlockState, form: str = "perseus"):

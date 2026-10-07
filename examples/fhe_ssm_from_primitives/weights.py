@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+from typing import Any
 
 import numpy as np
 
@@ -141,15 +142,16 @@ def load_model(weights_npz: str, seeds_json: str, config_json: str, **kw) -> Mod
 
 @dataclasses.dataclass(frozen=True)
 class BlockWeights:
-    """The block's operands in one geometry: the linears as the geometry's weight objects,
-    every per-channel vector as a plaintext slot vector (lane or expanded layout)."""
+    """The block's operands in one geometry: the linears as the geometry's weight objects, every
+    d-wide per-channel vector as a plaintext slot vector, every d_ffn-wide one as a list of them
+    (one per tile)."""
 
     tag: str
-    win: object
-    wout: object
-    wk: object
-    wr: object
-    wv: object
+    win: Any
+    wout: Any
+    wk: Any
+    wr: Any
+    wv: Any
     a: np.ndarray
     b: np.ndarray
     mix: np.ndarray
@@ -159,13 +161,13 @@ class BlockWeights:
     p0: np.ndarray
     p1: np.ndarray
     p2: np.ndarray
-    q0: np.ndarray
-    q1: np.ndarray
-    q2: np.ndarray
-    q3: np.ndarray
-    r0: np.ndarray
-    r1: np.ndarray
-    r2: np.ndarray
+    q0: list[np.ndarray]
+    q1: list[np.ndarray]
+    q2: list[np.ndarray]
+    q3: list[np.ndarray]
+    r0: list[np.ndarray]
+    r1: list[np.ndarray]
+    r2: list[np.ndarray]
     norm_tm: NormSite
     norm_cm: NormSite
 
@@ -175,8 +177,13 @@ class BlockWeights:
 
 def encode_block(p: BlockParams, geo, tag: str, named: bool = True) -> BlockWeights:
     """``named=False`` leaves the linears' plaintexts unnamed (encoded at every use, nothing
-    cached by the runtime): the low-memory choice for a CPU pass over many blocks."""
-    lane, exp = geo.lane, geo.expanded
+    cached by the runtime): the low-memory choice for a CPU pass over many blocks.
+
+    On split pairs (``geo.split_gain = 0.5``) the operands that make the inputs of the two gate
+    sections are halved, exactly (a power of two): ``c`` and ``dd`` (they make ``z``) and
+    ``W_k``, ``W_r`` (they make ``k`` and ``r``), so the split's halves ``2 Re`` and ``2 Im``
+    carry the true values."""
+    lane, ffn, half = geo.lane, geo.ffn, float(geo.split_gain)
 
     def lin(w, name):
         return geo.weight(w, tag + name if named else None)
@@ -185,25 +192,25 @@ def encode_block(p: BlockParams, geo, tag: str, named: bool = True) -> BlockWeig
         tag=tag,
         win=lin(p.win, "win"),
         wout=lin(p.wout, "wout"),
-        wk=lin(p.wk, "wk"),
-        wr=lin(p.wr, "wr"),
+        wk=lin(p.wk * half, "wk"),
+        wr=lin(p.wr * half, "wr"),
         wv=lin(p.wv, "wv"),
         a=lane(p.a),
         b=lane(1.0 - p.a),
         mix=lane(p.mix),
         imix=lane(1.0 - p.mix),
-        c=lane(p.c),
-        dd=lane(p.dd),
+        c=lane(p.c * half),
+        dd=lane(p.dd * half),
         p0=lane(p.p0),
         p1=lane(p.p1),
         p2=lane(p.p2),
-        q0=exp(p.q0),
-        q1=exp(p.q1),
-        q2=exp(p.q2),
-        q3=exp(p.q3),
-        r0=exp(p.r0),
-        r1=exp(p.r1),
-        r2=exp(p.r2),
+        q0=ffn(p.q0),
+        q1=ffn(p.q1),
+        q2=ffn(p.q2),
+        q3=ffn(p.q3),
+        r0=ffn(p.r0),
+        r1=ffn(p.r1),
+        r2=ffn(p.r2),
         norm_tm=p.norm_tm,
         norm_cm=p.norm_cm,
     )

@@ -85,10 +85,12 @@ def newton_rsqrt(ops, v, y0: float, iters: int, form: str = "perseus"):
     return y
 
 
-def rmsnorm(ops, geo, x, site: NormSite, tag: str, form: str = "perseus"):
-    """``x / sqrt(mean(x^2) + eps)`` on the lanes, zero elsewhere."""
-    xs = geo.masked_scale(x, site.input_scale, tag)
-    xo = geo.masked_scale(x, site.output_scale, tag + ".out")
+def rmsnorm(ops, geo, x, site: NormSite, tag: str, form: str = "perseus", gain: float = 1.0):
+    """``u / sqrt(mean(u^2) + eps)`` on the lanes for ``u = gain x``, zero elsewhere. The gain
+    rides the two masks, so it costs nothing: a split pair hands the norm ``2a`` and ``2b`` and
+    ``gain = 0.5`` gives the norm of ``a`` and ``b`` exactly."""
+    xs = geo.masked_scale(x, gain * site.input_scale, tag)
+    xo = geo.masked_scale(x, gain * site.output_scale, tag + ".out")
     v = geo.sum_all(ops.square(xs))
     v = ops.add(v, site.sigma * site.eps)
     y = newton_rsqrt(ops, v, site.y0, site.iters, form)

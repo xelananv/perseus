@@ -143,40 +143,78 @@ def encode_tiled(W, N: int, d: int, name: str | None = None):
     ]
 
 
-def linear(ops, x, w: EncodedTile):
-    """y = x @ W for every conversation in x (the y = x @ W convention)."""
-    G, s, d = w.rows.shape
-    t = w.N // d
+def babies(ops, x, t: int, s: int):
+    """The ``s`` baby rotations of ``x`` by ``b*t`` from one hoisted decomposition, each copied
+    and realized once before the plaintext products (``diagonal::linear``'s ``x_b``)."""
     x = ops.copy(x)
-    babies = [x, *ops.rotate_many(x, [b * t for b in range(1, s)])]
-    for xb in babies:
+    out = [x, *ops.rotate_many(x, [b * t for b in range(1, s)])]
+    for xb in out:
         ops.realize(xb)
+    return out
+
+
+def _giant_group(ops, rx, w: EncodedTile, g: int):
+    """``sum_b rx[b] * diagonal(g, b)``: giant group ``g`` before its rotation."""
+    acc = None
+    for b, xb in enumerate(rx):
+        p = ops.mult_pt(xb, w.pt(g, b), key=w.key(g, b))
+        acc = p if acc is None else ops.add(acc, p)
+    return acc
+
+
+def apply_tiles(ops, rxs, tiles):
+    """``sum_i x_i @ W_i`` for prepared inputs ``rxs[i]`` (``babies``) and one tile per input.
+    Rotation is linear, so each giant group sums every input's products before its single
+    rotation by ``g*s*t``: ``G - 1`` giant rotations however many inputs are summed."""
+    if len(rxs) != len(tiles) or not tiles:
+        raise ValueError(f"{len(rxs)} prepared inputs for {len(tiles)} tiles")
+    G, s, d = tiles[0].rows.shape
+    t = tiles[0].N // d
+    if any(w.rows.shape != (G, s, d) or w.N != tiles[0].N for w in tiles):
+        raise ValueError("tiles of one sum must share N, d and the (G, s) split")
+    if any(len(rx) != s for rx in rxs):
+        raise ValueError(f"every prepared input needs {s} baby rotations")
     y = None
     for g in range(G):
         acc = None
-        for b in range(s):
-            p = ops.mult_pt(babies[b], w.pt(g, b), key=w.key(g, b))
-            acc = p if acc is None else ops.add(acc, p)
+        for rx, w in zip(rxs, tiles):
+            part = _giant_group(ops, rx, w, g)
+            acc = part if acc is None else ops.add(acc, part)
         if g:
             acc = ops.rotate(acc, g * s * t)
         y = acc if y is None else ops.add(y, acc)
     return y
 
 
+def linear(ops, x, w: EncodedTile):
+    """y = x @ W for every conversation in x (the y = x @ W convention)."""
+    _, s, d = w.rows.shape
+    return apply_tiles(ops, [babies(ops, x, w.N // d, s)], [w])
+
+
+def linear_multi(ops, xs, weights):
+    """Several wide matrices on the same input chunks (``encode_tiled`` each): the baby
+    rotations of every input chunk are made once and shared by every output tile of every
+    weight (``diagonal::linear_multi``'s "prepare x once"). Returns one list of output chunks
+    per weight."""
+    if not weights:
+        return []
+    for tiles in weights:
+        if len(tiles) != len(xs):
+            raise ValueError(f"{len(xs)} input chunks for {len(tiles)} tile rows")
+    _, s, d = weights[0][0][0].rows.shape
+    rxs = [babies(ops, x, weights[0][0][0].N // d, s) for x in xs]
+    return [
+        [apply_tiles(ops, rxs, [tiles[i][o] for i in range(len(xs))]) for o in range(len(tiles[0]))]
+        for tiles in weights
+    ]
+
+
 def linear_tiled(ops, xs, tiles):
     """A wide matrix as d x d tiles (``encode_tiled``): xs is the list of input chunks, the
     result the list of output chunks. Up: one input, several outputs; down: several inputs
     summed into one output."""
-    if len(xs) != len(tiles):
-        raise ValueError(f"{len(xs)} input chunks for {len(tiles)} tile rows")
-    out = []
-    for o in range(len(tiles[0])):
-        y = None
-        for i, x in enumerate(xs):
-            yi = linear(ops, x, tiles[i][o])
-            y = yi if y is None else ops.add(y, yi)
-        out.append(y)
-    return out
+    return linear_multi(ops, xs, [tiles])[0]
 
 
 def per_conversation_sum(ops, x, N: int, d: int):

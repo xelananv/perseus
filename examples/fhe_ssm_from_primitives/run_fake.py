@@ -1,19 +1,24 @@
 """Ticks of the fhe-ssm model on a numpy fake session against the float64 references.
 
-    python -m fhe_ssm_from_primitives.run_fake --weights W.npz --seeds S.json --config C.json \
-        --tokens 4 --blocks 24 [--rules runtime|stock] [--form perseus|depth2] [--out report.json]
+    python -m examples.fhe_ssm_from_primitives.run_fake --weights W.npz --seeds S.json \
+        --config C.json --tokens 4 --blocks 24 [--layout filled|decode] [--payload pairs|real] \
+        [--pair-route split|lane] [--conversations N] [--rules runtime|stock] \
+        [--form perseus|depth2] [--out report.json]
 
 Prints per tick the relative RMS error of the reply against the mirror (layout / protocol
 check) and against the exact forward (Newton approximation), the bootstrap count split into
 reactive refreshes, hints and the canonical carry, and the carried levels. ``--rules runtime``
 (the default) applies the runtime's level rules (runtime_fake.py), ``stock`` Perseus's fake as
 shipped; both default to the n32 decode preset (ceiling 46, landing 34, two primes per level).
-The times are the fake's own and say nothing about a GPU.
+The times are the fake's own and say nothing about a GPU. The default layout is the filled one
+with 64 conversations per ciphertext as split real/imaginary pairs; every conversation gets its
+own random token per tick, and the references run all of them as rows.
 """
 
 from __future__ import annotations
 
 import argparse
+import contextlib
 import hashlib
 import json
 import pathlib
@@ -27,7 +32,8 @@ import numpy as np
 import perseus
 from perseus.impl import fake
 
-from .model import FheSsmModel
+from .geometry import ROUTES
+from .model import LAYOUTS, PAYLOADS, FheSsmModel
 from .ref import ExactModel, MirrorModel, rel_err_rms
 from .runtime_fake import make_runtime_fake
 from .weights import load_model
@@ -36,7 +42,17 @@ RULES = ("runtime", "stock")
 RSS_UNIT = 1 if sys.platform == "darwin" else 1024
 
 
-def make_session(params, logn: int, *, rules="runtime", limit=46, bts_out=34, unit=2, strict=False):
+def make_session(
+    params,
+    logn: int,
+    *,
+    rules="runtime",
+    limit=46,
+    bts_out=34,
+    unit=2,
+    strict=False,
+    complex_payload=False,
+):
     if rules not in RULES:
         raise ValueError(f"rules must be one of {RULES}, got {rules!r}")
     make = make_runtime_fake if rules == "runtime" else fake.make_fake
@@ -53,7 +69,31 @@ def make_session(params, logn: int, *, rules="runtime", limit=46, bts_out=34, un
         unit=unit,
         strict=strict,
         rot_steps=(),
+        complex_payload=complex_payload,
     )
+
+
+@contextlib.contextmanager
+def bootstraps_by_step(fhe, ops):
+    """Count the fake's bootstraps by the step scope they fire in; the fake's own bootstrap is
+    restored on exit."""
+    counts: dict[str, int] = {}
+    shadowed = "bootstrap" in vars(fhe)
+    inner = fhe.bootstrap
+
+    def counted(ct):
+        label = getattr(ops, "step_label", None) or "?"
+        counts[label] = counts.get(label, 0) + 1
+        inner(ct)
+
+    fhe.bootstrap = counted
+    try:
+        yield counts
+    finally:
+        if shadowed:
+            fhe.bootstrap = inner
+        else:
+            del fhe.bootstrap
 
 
 def peak_rss_gb():
@@ -95,10 +135,23 @@ def run(
     strict=False,
     canonical_carry=True,
     resident_weights=False,
+    layout="filled",
+    payload="pairs",
+    pair_route="split",
     log=print,
 ):
+    """``token_ids``: ``(ticks, conversations)`` (or ``(ticks,)`` for one conversation)."""
+    ids = np.asarray(token_ids)
+    ids = ids[:, None] if ids.ndim == 1 else ids
     fhe, inf = make_session(
-        params, logn, rules=rules, limit=limit, bts_out=bts_out, unit=unit, strict=strict
+        params,
+        logn,
+        rules=rules,
+        limit=limit,
+        bts_out=bts_out,
+        unit=unit,
+        strict=strict,
+        complex_payload=layout == "filled" and payload == "pairs",
     )
     model = FheSsmModel(
         inf,
@@ -108,56 +161,65 @@ def run(
         newton_form=form,
         canonical_carry=canonical_carry,
         resident_weights=resident_weights,
+        layout=layout,
+        payload=payload,
+        pair_route=pair_route,
     )
+    n = ids.shape[1]
+    if not 1 <= n <= model.capacity:
+        raise ValueError(f"{n} conversations for a capacity of {model.capacity}")
     fhe.loaded_rot_steps = sorted(model.geo.rotation_steps())
     fhe._rot = set(fhe.loaded_rot_steps)
-    exact, mirror = ExactModel(params, 1), MirrorModel(params, 1, form)
-    by_step: dict[str, int] = {}
-    inner = fhe.bootstrap
-
-    def counted(ct):
-        label = getattr(model.rt.ops, "step_label", None) or "?"
-        by_step[label] = by_step.get(label, 0) + 1
-        inner(ct)
-
-    fhe.bootstrap = counted
-    model.start()
-    start_bootstraps = fhe.n_bootstraps
-    by_step.clear()
+    exact, mirror = ExactModel(params, n), MirrorModel(params, n, form)
     ticks = []
-    for pos, tok in enumerate(token_ids):
-        row = params.emb_row(tok)
-        b0, r0, c0 = fhe.n_bootstraps, fhe.n_reactive, len(fhe.calls)
-        rec = model.step(row, pos)
-        calls = fhe.calls[c0:]
-        t0 = time.time()
-        want_m, want_e = mirror.step(row[None])[0], exact.step(row[None])[0]
-        levels = model.levels()
-        tick = {
-            "pos": pos,
-            "token": int(tok),
-            "model_s": round(rec["decode_s"], 2),
-            "refs_s": round(time.time() - t0, 2),
-            "bootstraps": fhe.n_bootstraps - b0,
-            "reactive": fhe.n_reactive - r0,
-            "carry": 2 * model.n_layers if model.canonical_carry else 0,
-            "mult_cc": calls.count("mult_cc") + calls.count("square"),
-            "mult_pt": calls.count("mult_pt"),
-            "rotations": sum(1 for c in calls if c.startswith("rotate")),
-            "relErrRms_vs_mirror": rel_err_rms(rec["out"], want_m),
-            "relErrRms_vs_exact": rel_err_rms(rec["out"], want_e),
-            "out_level": rec["out_level"],
-            "state_level_max": max(max(lv) for lv in levels),
-            "levels": levels[:2] + ([levels[-1]] if model.n_layers > 2 else []),
-            "peak_rss_gb": peak_rss_gb(),
-        }
-        tick["hints"] = tick["bootstraps"] - tick["reactive"] - tick["carry"]
-        tick["bootstraps_by_step"], by_step = dict(by_step), {}
-        ticks.append(tick)
-        log(json.dumps({k: v for k, v in tick.items() if k != "levels"}))
+    with bootstraps_by_step(fhe, model.rt.ops) as by_step:
+        model.start()
+        start_bootstraps = fhe.n_bootstraps
+        by_step.clear()
+        for pos, toks in enumerate(ids):
+            rows = np.stack([params.emb_row(int(k)) for k in toks])
+            b0, r0, c0 = fhe.n_bootstraps, fhe.n_reactive, len(fhe.calls)
+            rec = model.step(rows, pos)
+            calls = fhe.calls[c0:]
+            t0 = time.time()
+            want_m, want_e = mirror.step(rows), exact.step(rows)
+            levels = model.levels()
+            per_conv = [rel_err_rms(rec["out"][k], want_e[k]) for k in range(n)]
+            tick = {
+                "pos": pos,
+                "tokens": [int(k) for k in toks],
+                "conversations": n,
+                "model_s": round(rec["decode_s"], 2),
+                "refs_s": round(time.time() - t0, 2),
+                "bootstraps": fhe.n_bootstraps - b0,
+                "reactive": fhe.n_reactive - r0,
+                "carry": 2 * model.n_layers if model.canonical_carry else 0,
+                "mult_cc": calls.count("mult_cc") + calls.count("square"),
+                "mult_pt": calls.count("mult_pt"),
+                "mult_scalar": calls.count("mult_sc") + calls.count("mult_const"),
+                "rotations": sum(1 for c in calls if c.startswith("rotate")),
+                "conjugations": calls.count("conjugate"),
+                "relErrRms_vs_mirror": rel_err_rms(rec["out"], want_m),
+                "relErrRms_vs_exact": rel_err_rms(rec["out"], want_e),
+                "relErrRms_vs_exact_worst_conversation": max(per_conv),
+                "out_level": rec["out_level"],
+                "state_level_max": max(max(lv) for lv in levels),
+                "levels": levels[:2] + ([levels[-1]] if model.n_layers > 2 else []),
+                "peak_rss_gb": peak_rss_gb(),
+            }
+            tick["hints"] = tick["bootstraps"] - tick["reactive"] - tick["carry"]
+            tick["bootstraps_by_step"] = dict(by_step)
+            by_step.clear()
+            ticks.append(tick)
+            log(json.dumps({k: v for k, v in tick.items() if k not in ("levels", "tokens")}))
     return {
         "instrument": f"perseus.impl.fake, {rules} level rules",
         "rules": rules,
+        "layout": layout,
+        "payload": payload if layout == "filled" else "real",
+        "pair_route": pair_route if layout == "filled" and payload == "pairs" else None,
+        "capacity": model.capacity,
+        "conversations": n,
         "logn": logn,
         "form": form,
         "limit": limit,
@@ -181,6 +243,15 @@ def main(argv=None):
     ap.add_argument("--blocks", type=int, default=None)
     ap.add_argument("--logn", type=int, default=16)
     ap.add_argument("--rules", default="runtime", choices=RULES)
+    ap.add_argument("--layout", default="filled", choices=LAYOUTS)
+    ap.add_argument("--payload", default="pairs", choices=PAYLOADS)
+    ap.add_argument("--pair-route", default="split", choices=ROUTES)
+    ap.add_argument(
+        "--conversations",
+        type=int,
+        default=None,
+        help="conversations per tick (default: the layout's capacity: 64 pairs, 32 real, 1)",
+    )
     ap.add_argument("--form", default="perseus", choices=("perseus", "depth2"))
     ap.add_argument("--limit", type=int, default=46)
     ap.add_argument("--bts-out", type=int, default=34)
@@ -198,10 +269,16 @@ def main(argv=None):
     a = ap.parse_args(argv)
     norm_kw = {"k": a.ms_norm_k, "frac": a.newton_frac, "min_iters": a.newton_min_iters}
     params = load_model(a.weights, a.seeds, a.config, n_layers=a.blocks, norm_kw=norm_kw)
-    ids = np.random.default_rng(a.seed).integers(0, params.vocab, size=a.tokens)
+    t = (1 << (a.logn - 1)) // params.d
+    capacity = 1 if a.layout == "decode" else (t if a.payload == "real" else 2 * t)
+    n = capacity if a.conversations is None else a.conversations
+    ids = np.random.default_rng(a.seed).integers(0, params.vocab, size=(a.tokens, n))
     rep = run(
         params,
         ids,
+        layout=a.layout,
+        payload=a.payload,
+        pair_route=a.pair_route,
         logn=a.logn,
         rules=a.rules,
         form=a.form,

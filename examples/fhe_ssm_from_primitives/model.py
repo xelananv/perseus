@@ -1,6 +1,6 @@
 """``FheSsmModel``: the recurrent LM as an ``ImplModel`` over one session (or the fake).
 
-A tick is one token per sequence: the client's embedding row enters as a fresh encode, the
+A tick is one token per conversation: the client's embedding rows enter as a fresh encode, the
 24 block stages run with their carried state, the final RMSNorm (with ``g_out``) is the reply
 the client decrypts and feeds to the tied output head in plaintext. Each block stage ends with
 the canonical carry of its two state ciphertexts, so every tick is the same op stream and one
@@ -12,6 +12,12 @@ names a K/V cache read (``cache.<name>-lvl=<level>``), so the planner seeds it a
 rather than at the previous stage's exit. Capture on a tick after the first, where the state is
 not zero.
 
+Layouts (``geometry.py``): ``layout="filled"`` with ``payload="pairs"`` (the default) holds 64
+conversations per ciphertext at ring 2^16, ``t = 32`` on each axis, the nonlinear sections split
+(``pair_route="split"``) or lane-wise (``"lane"``); ``payload="real"`` holds 32;
+``layout="decode"`` holds one sequence in the cachemir decode packing. Fewer conversations than
+the capacity are parked (``geometry.park``).
+
 Block numbering: 0..n_layers-1 the blocks, n_layers the tail (final norm + gain).
 """
 
@@ -21,10 +27,12 @@ import numpy as np
 
 from perseus.impl.driver import ImplModel
 
-from .block import BlockState, carry, ssm_block
-from .geometry import SlotGeometry
-from .norm import rmsnorm
+from .block import BlockState, carry, norm, ssm_block
+from .geometry import FilledGeometry, PairGeometry, SlotGeometry
 from .weights import BlockWeights, ModelParams, encode_block
+
+LAYOUTS = ("filled", "decode")
+PAYLOADS = ("pairs", "real")
 
 
 class FheSsmModel(ImplModel):
@@ -40,14 +48,27 @@ class FheSsmModel(ImplModel):
         newton_form="perseus",
         canonical_carry=True,
         resident_weights=True,
+        layout="filled",
+        payload="pairs",
+        pair_route="split",
     ):
         super().__init__(inf, core=core, unit=unit, profile=profile)
+        if layout not in LAYOUTS:
+            raise ValueError(f"layout must be one of {LAYOUTS}, got {layout!r}")
+        if payload not in PAYLOADS:
+            raise ValueError(f"payload must be one of {PAYLOADS}, got {payload!r}")
         self.params = params
         self.n_layers = int(params.n_layers if n_layers is None else n_layers)
         self.form = newton_form
         self.canonical_carry = bool(canonical_carry)
         self.resident = bool(resident_weights)
-        self.geo = SlotGeometry(self.rt)
+        self.layout, self.payload, self.pair_route = layout, payload, pair_route
+        self.geo: SlotGeometry | FilledGeometry | PairGeometry
+        if layout == "decode":
+            self.geo = SlotGeometry(self.rt)
+        else:
+            filled = FilledGeometry(self.rt, params.d, params.d_ffn)
+            self.geo = PairGeometry(filled, pair_route) if payload == "pairs" else filled
         self._bw: dict[int, BlockWeights] = {}
         self._gout = None
         self.state: list[BlockState] = []
@@ -76,13 +97,18 @@ class FheSsmModel(ImplModel):
         loaded = {int(s) % self.rt.dims.N for s in self.inf.fhe.loaded_rot_steps}
         return sorted(self.geo.rotation_steps() - loaded)
 
+    @property
+    def capacity(self) -> int:
+        """Conversations per ciphertext: 64 on pairs, 32 real, 1 in the decode layout."""
+        return int(self.geo.capacity)
+
     def start(self):
         """The initial state: zeros, landed by a bootstrap like every carried value (48
-        bootstraps per sequence for 24 blocks, once)."""
-        ops, zero = self.rt.ops, np.zeros(self.params.d)
+        bootstraps per ciphertext for 24 blocks, once)."""
+        ops, zero = self.rt.ops, np.zeros((1, self.params.d))
         self.state = []
         for _ in range(self.n_layers):
-            st = BlockState(ops.encode_token(zero), ops.encode_token(zero))
+            st = BlockState(self.geo.encode_rows(zero), self.geo.encode_rows(zero))
             ops.bootstrap(st.s)
             ops.bootstrap(st.n_prev)
             self.state.append(st)
@@ -113,7 +139,7 @@ class FheSsmModel(ImplModel):
             b = self.n_layers
             cap = self.enter_stage(b, pos)
             with self.rt.step("tail"):
-                n = rmsnorm(self.rt.ops, self.geo, h, self.params.norm_out, "out.norm", self.form)
+                n = norm(self.geo, h, self.params.norm_out, "out.norm", self.form)
                 out = self.rt.ops.mult_pt(n, self.geo.lane(self.params.g_out), key="out.g")
             self.exit_stage(b, cap)
             return out
@@ -122,14 +148,19 @@ class FheSsmModel(ImplModel):
         stages.append(("tail", "out.", tail_fn))
         return stages
 
-    def step(self, row, pos):
-        """One tick for one sequence: embedding row in, final-norm row out (decrypted)."""
+    def step(self, rows, pos):
+        """One tick: an embedding row per conversation in (``(n, d)``, or one ``(d,)`` row), the
+        final-norm rows out, decrypted, in the same shape."""
+        rows = np.asarray(rows, dtype=np.float64)
+        one = rows.ndim == 1
+        rows = rows[None] if one else rows
         self.token_begin(pos)
-        x = self.rt.ops.encode_token(np.asarray(row, dtype=np.float64))
+        x = self.geo.encode_rows(rows)
         out = self.run_stages(x, pos, self.token_stages(x, pos))
         self.token_tail(pos)
         rec = self.token_end(pos)
-        rec["out"] = self.rt.ops.decode_token(out)[: self.params.d]
+        got = self.geo.decode_rows(out, rows.shape[0])
+        rec["out"] = got[0] if one else got
         rec["out_level"] = self.rt.ops.level(out)
         return rec
 
