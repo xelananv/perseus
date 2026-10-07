@@ -122,6 +122,9 @@ def test_smoke_checks_pass_on_the_fake(payload, route):
     for tick in res["ticks"]["ticks"]:
         assert tick["relErrRms_vs_mirror"] < 1e-9
         assert tick["relErrRms_vs_exact"] < 1e-4
+        assert tick["logits_relErrRms_vs_exact"] < 1e-4
+        assert tick["top1_agree_vs_exact"] == 1.0
+        assert tick["projected_full_tick_s"] >= tick["seconds"]
 
 
 def test_smoke_stops_on_a_band_without_the_layouts_rotations():

@@ -5,7 +5,9 @@ three checks on it, each recorded even when an earlier one failed:
     roundtrip   every conversation encrypted and decrypted: the encryption noise
     linear      one 1024 x 1024 tile (block 0's W_in) on them, against numpy
     ticks       the model (``--blocks`` blocks) for two ticks, against the mirror (the same
-                kernels on numpy) and the trainer's closed-form forward
+                kernels on numpy) and the trainer's closed-form forward: the reply's error,
+                the logits' error and top-1 agreement on the tied head (the published run's
+                metrics), and the tick time scaled to 24 blocks (eager, unplanned)
 
     source scripts/local_env.sh      # the n32 chain's defaults
     python -m examples.fhe_ssm_from_primitives.gpu_smoke --weights W --seeds S --config C \\
@@ -73,17 +75,26 @@ def run_checks(inf, core, params, *, ticks=2, payload="pairs", route="split", se
 
     def tick_loop():
         mirror, exact = MirrorModel(params, n, model.form), ExactModel(params, n)
+        emb = np.asarray(params.emb, dtype=np.float64)
         model.start()
         per = []
         for pos in range(ticks):
             t0 = time.time()
             rec = model.step(rows[pos], pos)
+            seconds = time.time() - t0
+            want = exact.step(rows[pos])
+            got_logits, want_logits = rec["out"] @ emb.T, want @ emb.T
             per.append(
                 {
                     "pos": pos,
-                    "seconds": round(time.time() - t0, 2),
+                    "seconds": round(seconds, 2),
+                    "projected_full_tick_s": round(seconds * 24 / params.n_layers, 1),
                     "relErrRms_vs_mirror": rel_err_rms(rec["out"], mirror.step(rows[pos])),
-                    "relErrRms_vs_exact": rel_err_rms(rec["out"], exact.step(rows[pos])),
+                    "relErrRms_vs_exact": rel_err_rms(rec["out"], want),
+                    "logits_relErrRms_vs_exact": rel_err_rms(got_logits, want_logits),
+                    "top1_agree_vs_exact": float(
+                        np.mean(got_logits.argmax(axis=1) == want_logits.argmax(axis=1))
+                    ),
                     "out_level": rec["out_level"],
                     "bootstraps_total": model.rt.ops.n_bootstraps,
                 }
