@@ -58,6 +58,30 @@ would show. Both default to the n32 decode preset (ceiling 46, landing 34, two p
 into a depth measurement. `--form depth2` evaluates the Newton step as `1.5 y + ((-0.5 v) y) y^2`
 (two levels per step) instead of Perseus's `inv_sqrt_newton` (three); the polynomial is the same.
 
+## Measured on the fake (published weights)
+
+Three ticks of the 24-block model at ring 2^16, every lane a live conversation, the runtime's level
+rules (ceiling 46, landing 34, two primes per level), eager refreshes (no plan). Counts per tick:
+
+| arm | conversations | relErrRms vs mirror | vs the trainer's forward (worst conversation) | bootstraps | plaintext products | rotations | conjugations |
+|---|---|---|---|---|---|---|---|
+| pairs, split (default) | 64 | 6.1e-15 – 7.1e-15 | 5.7e-15 – 6.0e-15 (1.9e-14) | 1,968 | 345,265 | 14,372 | 265 |
+| pairs, lane | 64 | 6.0e-15 – 6.9e-15 | 5.7e-15 – 6.1e-15 (2.1e-14) | 2,817 | 344,737 | 13,882 | 5,637 |
+| real | 32 | 5.4e-15 – 8.2e-15 | 5.3e-15 – 1.2e-14 (5.7e-14) | 1,052 | 344,737 | 13,882 | 0 |
+
+The errors are float64 rounding: the fake computes in the clear, so these check the layout, the
+packing, the split and the kernels, not CKKS noise. The bootstrap counts are the fake's reactive
+refreshes plus the hints and the carry; a plan from Perseus's planner places them instead.
+
+## Colab
+
+`colab_check.ipynb` runs, on a Colab runtime: the tests and the lint, the published weights
+from Hugging Face (`colab.fetch_model`, hash-checked), and two ticks of the full model on the fake
+(`colab.fake_check`, about a minute per tick). On a GPU runtime it then builds Perseus's CUDA
+extension (`colab_build.py`: installs what is missing, runs the repository's build scripts, one
+log per step) and runs `gpu_smoke.py` on a live session sized for this model: an encryption round
+trip, one linear tile and two ticks of one block, against the same references.
+
 ## Layout
 
 **Filled** (`filling.py`, `geometry.FilledGeometry`): channel `i` of conversation `k` sits at slot
@@ -107,6 +131,6 @@ range. The parked outputs are dropped.
 
 ## Lint
 
-`./lint.sh` runs ruff (the repository's rules plus the stricter families in `ruff.toml`; it fixes
-what it can and formats) and mypy (`mypy.ini`), and fails on anything left. `./lint.sh --check`
+`python lint.py` runs ruff (the repository's rules plus the stricter families in `ruff.toml`; it fixes
+what it can and formats) and mypy (`mypy.ini`), and fails on anything left. `python lint.py --check`
 changes nothing.

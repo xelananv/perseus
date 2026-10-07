@@ -1,0 +1,154 @@
+"""The Colab build's decisions without a GPU: version parsing on real tool output, the plan for
+a fresh runtime and for a ready one (checked as explicit step lists and as invariants every
+plan must keep), the refusals, the step runner on harmless commands, and the NCCL prefix."""
+
+import sys
+
+import pytest
+from examples.fhe_ssm_from_primitives import colab_build as cb
+
+FRESH = {
+    "gpu": "Tesla T4, 7.5, 15360 MiB",
+    "nvcc": (12, 5),
+    "nvcc_home": "/usr/local/cuda-12.5",
+    "cuda_new": False,
+    "gcc": (11,),
+    "gcc12": False,
+    "cmake": (3, 31),
+    "libarchive": False,
+    "python_h": True,
+    "python": "3.12",
+    "pybind11": False,
+    "nccl_wheel": None,
+    "distro": "ubuntu2204",
+    "root": True,
+}
+READY = {
+    **FRESH,
+    "nvcc": (12, 8),
+    "nvcc_home": "/opt/cuda-12.8",
+    "gcc": (13,),
+    "libarchive": True,
+    "pybind11": True,
+    "nccl_wheel": "/x/nvidia/nccl",
+}
+
+
+@pytest.mark.parametrize(
+    ("text", "pattern", "want"),
+    [
+        ("Cuda compilation tools, release 12.5, V12.5.82\n", r"release (\d+)\.(\d+)", (12, 5)),
+        ("11\n", r"^(\d+)", (11,)),
+        ("cmake version 3.31.6\n\nCMake suite", r"version (\d+)\.(\d+)", (3, 31)),
+        ('NAME="Ubuntu"\nVERSION_ID="22.04"\n', r'^VERSION_ID="(\d+)\.(\d+)"', (22, 4)),
+        ("", r"release (\d+)\.(\d+)", None),
+        (None, r"release (\d+)\.(\d+)", None),
+    ],
+)
+def test_version_parsing(text, pattern, want):
+    assert cb.version(text, pattern) == want
+
+
+def names(steps):
+    return [s.name for s in steps]
+
+
+def by_name(steps, name):
+    return next(s for s in steps if s.name == name)
+
+
+def test_fresh_runtime_gets_every_install():
+    steps = cb.plan(FRESH, 2, "/n")
+    assert names(steps) == [
+        "nvidia-repo",
+        "apt",
+        "pip",
+        "nccl",
+        "submodule",
+        "deps",
+        "core",
+        "import",
+    ]
+    assert "ubuntu2204" in by_name(steps, "nvidia-repo").cmd[-1]
+    apt = by_name(steps, "apt").cmd
+    for pkg in (cb.CUDA_PKG, "libarchive-dev", "gcc-12", "g++-12"):
+        assert pkg in apt
+    assert {"pybind11", "nvidia-nccl-cu12"} <= set(by_name(steps, "pip").cmd)
+    env = by_name(steps, "deps").env
+    assert env["CUDA_HOME"] == cb.CUDA_HOME_NEW
+    assert (env["CC"], env["CXX"]) == ("gcc-12", "g++-12")
+
+
+def test_ready_runtime_installs_nothing():
+    steps = cb.plan(READY, 8, "/n")
+    assert names(steps) == ["nccl", "submodule", "deps", "core", "import"]
+    env = by_name(steps, "core").env
+    assert env["CUDA_HOME"] == "/opt/cuda-12.8"
+    assert (env["CC"], env["CHAIN"], env["JOBS"]) == ("gcc", "n32", "8")
+
+
+@pytest.mark.parametrize(
+    "probe", [FRESH, READY, {**FRESH, "cuda_new": True}, {**READY, "python_h": False}]
+)
+def test_every_plan_keeps_the_invariants(probe):
+    steps = cb.plan(probe, 4, "/n")
+    assert names(steps)[-4:] == ["submodule", "deps", "core", "import"]
+    deps, core = by_name(steps, "deps"), by_name(steps, "core")
+    assert deps.env["NATIVE_SIZE"] == "32"
+    assert core.env["PYTHON"] == sys.executable
+    for s in (deps, core):
+        assert s.env["NCCL_HOME"] == "/n"
+        assert s.env["PATH"].startswith(s.env["CUDA_HOME"] + "/bin:")
+    apt = by_name(steps, "apt").cmd if "apt" in names(steps) else []
+    assert ("gcc-12" in apt or probe["gcc12"]) == (deps.env["CC"] == "gcc-12")
+    assert (f"python{probe['python']}-dev" in apt) == (not probe["python_h"])
+
+
+@pytest.mark.parametrize(
+    ("change", "message"),
+    [({"gpu": None}, "no GPU"), ({"root": False}, "root"), ({"distro": None}, "distribution")],
+)
+def test_refusals(change, message):
+    with pytest.raises(SystemExit, match=message):
+        cb.plan({**FRESH, **change}, 2, "/n")
+
+
+def test_runner_stops_at_the_first_failure_and_shows_its_log(tmp_path):
+    out: list[str] = []
+    steps = [
+        cb.Step("one", [sys.executable, "-c", "print('first')"]),
+        cb.Step("two", [sys.executable, "-c", "import sys; print('boom'); sys.exit(3)"]),
+        cb.Step("three", [sys.executable, "-c", "print('never')"]),
+    ]
+    assert not cb.run(steps, tmp_path, echo=out.append)
+    assert (tmp_path / "one.log").read_text().strip() == "first"
+    assert "boom" in (tmp_path / "two.log").read_text()
+    assert not (tmp_path / "three.log").exists()
+    assert any("boom" in line for line in out)
+    assert cb.run(steps[:1], tmp_path / "ok", echo=out.append)
+
+
+def test_nccl_prefix_links_the_wheel(tmp_path, monkeypatch):
+    wheel = tmp_path / "wheel"
+    (wheel / "lib").mkdir(parents=True)
+    (wheel / "include").mkdir()
+    (wheel / "lib" / "libnccl.so.2").write_text("lib")
+    (wheel / "include" / "nccl.h").write_text("hdr")
+    monkeypatch.setattr(cb, "_module_dir", lambda _name: str(wheel))
+    home = cb.link_nccl(str(tmp_path / "home"))
+    assert (home / "lib" / "libnccl.so").read_text() == "lib"
+    assert (home / "lib" / "libnccl.so.2").resolve() == (wheel / "lib" / "libnccl.so.2").resolve()
+    assert (home / "include" / "nccl.h").read_text() == "hdr"
+    cb.link_nccl(str(tmp_path / "home"))  # idempotent
+    monkeypatch.setattr(cb, "_module_dir", lambda _name: None)
+    with pytest.raises(SystemExit, match="nvidia-nccl-cu12"):
+        cb.link_nccl(str(tmp_path / "other"))
+
+
+def test_env_file_carries_the_build_toolchain(tmp_path):
+    steps = cb.plan(FRESH, 2, "/n")
+    text = cb.write_env(steps, tmp_path / "env.sh").read_text()
+    assert f'export CUDA_HOME="{cb.CUDA_HOME_NEW}"' in text
+    assert 'export NCCL_HOME="/n"' in text
+    assert 'export CC="gcc-12"' in text
+    assert "LD_LIBRARY_PATH" in text
