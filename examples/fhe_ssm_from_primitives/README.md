@@ -73,6 +73,33 @@ The errors are float64 rounding: the fake computes in the clear, so these check 
 packing, the split and the kernels, not CKKS noise. The bootstrap counts are the fake's reactive
 refreshes plus the hints and the carry; a plan from Perseus's planner places them instead.
 
+## Run on a GPU: eager, capture, plan, planned
+
+Needs a GPU of compute capability 8.0 or newer (FIDESlib32bits's `CKKS/Discard.cu` uses a PTX
+instruction older GPUs lack) and, per Perseus's README, 48 GB or more; the build is
+`colab_build.py` on any Ubuntu machine with root (it is not Colab-specific: `--logs DIR`).
+
+```bash
+source scripts/local_env.sh                    # the n32 chain's defaults
+M="--weights pbd430a_weights.npz --seeds pbd430a_seeds.json --config pbd430a_config.json"
+python -m examples.fhe_ssm_from_primitives.gpu_smoke $M --blocks 1 --out smoke.json
+python -m examples.fhe_ssm_from_primitives.gpu_run $M --mode eager --ticks 2 --out eager.json
+python -m examples.fhe_ssm_from_primitives.gpu_run $M --mode capture --graph-dir graphs/fhe_ssm --out capture.json
+python -m examples.fhe_ssm_from_primitives.plan --graph-dir graphs/fhe_ssm --name fhe_ssm     # CPU only
+python -m examples.fhe_ssm_from_primitives.gpu_run $M --mode planned --plan-dir bootstrap_placements/fhe_ssm \
+    --tokens tokens.json --ticks 8 --out planned.json
+```
+
+`gpu_run.py` checks every tick against the mirror and the closed form (reply, logits, top-1 on
+the tied head) and rewrites its report after each tick. The capture records tick 1 (tick 0's
+carried state is zero); `plan.py` runs Perseus's placer with the n32 recipe of
+`examples/gpt2_from_primitives/make_plan.sh` (read back from that file by the tests) and stamps
+the capture's contract into every plan, so a planned run in a different environment refuses
+it. `--tokens` teacher-forces a serve run's token record, e.g. the published 148-tick run's
+(fhe-ssm repository, `results/dense-demo-s31/pod_longrun_20260919/pod_pull/s37/serve_LONG/tokens.json`).
+The linears encode every diagonal plaintext on the CPU at its use (about 345,000 per tick): a
+full eager tick is slow; the C++ `diagonal::linear` is the planned replacement.
+
 ## Colab
 
 `colab_check.ipynb` runs, on a Colab runtime: the tests and the lint, the published weights

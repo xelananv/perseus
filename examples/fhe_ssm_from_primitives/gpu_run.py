@@ -1,0 +1,193 @@
+# SPDX-License-Identifier: MIT
+"""Ticks of the model on a live session (or on the fake) in one of Perseus's three modes:
+
+    eager      refreshes fire where the levels run out (reactive), plus the port's hints
+    capture    as eager, and every stage's graph is recorded on tick ``--capture-tick`` (default
+               1: tick 0's carried state is zero) for the planner (plan.py)
+    planned    every stage runs under its plan (``block_<b>_placement.json``, b = 0..24)
+
+    source scripts/local_env.sh      # the n32 chain's defaults
+    python -m examples.fhe_ssm_from_primitives.gpu_run --weights W --seeds S --config C \\
+        --mode eager|capture|planned [--graph-dir DIR] [--plan-dir DIR] [--ticks 4] [--blocks 24] \\
+        [--tokens tokens.json] [--scales shipped] [--out run.json] [--fake]
+
+Every tick is checked against the mirror (the same kernels and folds on numpy) and the
+trainer's closed form: the reply's error, the logits' error and top-1 agreement on the tied
+head. The report is rewritten after every tick, so an interrupted run keeps what it measured.
+``--tokens`` teacher-forces a serve run's token record (prompts then generations, as
+calibrate.py reads it); without it every conversation gets random tokens.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+import numpy as np
+
+from . import filling
+from . import scales as scales_mod
+from .calibrate import streams_from_record
+from .gpu_smoke import open_session
+from .model import PAYLOADS, FheSsmModel
+from .ref import ExactModel, MirrorModel, rel_err_rms
+from .weights import load_model
+
+MODES = ("eager", "capture", "planned")
+
+
+def write_json(path: Path, doc: dict) -> None:
+    """Atomic: the report on disk is always a whole one."""
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(doc, f, indent=1, default=str)
+    tmp.replace(path)
+
+
+def token_rows(params, streams, pos):
+    return np.asarray(params.emb[[s[pos] for s in streams]], dtype=np.float64)
+
+
+def tick_record(model, rows, pos, mirror, exact, emb, before):
+    """One tick: the model against both references, its time and its refreshes."""
+    t0 = time.time()
+    rec = model.step(rows, pos)
+    seconds = time.time() - t0
+    want = exact.step(rows)
+    got_logits, want_logits = rec["out"] @ emb.T, want @ emb.T
+    per_conv = [rel_err_rms(got_logits[k], want_logits[k]) for k in range(len(rows))]
+    return {
+        "pos": pos,
+        "seconds": round(seconds, 2),
+        "relErrRms_vs_mirror": rel_err_rms(rec["out"], mirror.step(rows)),
+        "relErrRms_vs_exact": rel_err_rms(rec["out"], want),
+        "logits_relErrRms_vs_exact": rel_err_rms(got_logits, want_logits),
+        "logits_relErrRms_worst_conversation": max(per_conv),
+        "top1_agree_vs_exact": float(
+            np.mean(got_logits.argmax(axis=1) == want_logits.argmax(axis=1))
+        ),
+        "bootstraps": model.rt.ops.n_bootstraps - before,
+        "out_level": rec["out_level"],
+        "free_gb": rec.get("free_gb"),
+    }
+
+
+def fake_session(params, payload):
+    """(inf, core) of the numpy fake with the runtime's level rules and the layout's band."""
+    from perseus.impl import fake
+
+    from .runtime_fake import make_runtime_fake
+
+    _fhe, inf = make_runtime_fake(
+        N=32768,
+        hid=params.d,
+        dim=params.d,
+        H=1,
+        H_real=1,
+        E=params.d_ffn,
+        E_real=params.d_ffn,
+        rot_steps=filling.rotation_steps(32768, params.d),
+        complex_payload=payload == "pairs",
+    )
+    return contextlib.nullcontext(inf), fake.core
+
+
+def gpu_session(params):
+    """(the session, a context manager whose value has ``.inf``; perseus._core)."""
+    from perseus import _core
+
+    return open_session(params), _core
+
+
+def run(a) -> dict:
+    params = load_model(a.weights, a.seeds, a.config, n_layers=a.blocks)
+    folds = scales_mod.resolve(a.scales, params.n_layers)
+    if a.mode == "capture":
+        os.environ["FHE_GRAPH_CAPTURE_TOKEN"] = str(a.capture_tick)
+    session, core = fake_session(params, a.payload) if a.fake else gpu_session(params)
+    out = Path(a.out)
+    report: dict = {"mode": a.mode, "fake": a.fake, "blocks": params.n_layers, "ticks": []}
+    with session as s:
+        inf = s if a.fake else s.inf
+        model = FheSsmModel(
+            inf,
+            params,
+            core=core,
+            payload=a.payload,
+            pair_route=a.pair_route,
+            resident_weights=False,
+            scales=folds,
+        )
+        missing = model.rotation_audit()
+        report["rotation_audit_missing"] = missing[:16]
+        if missing:
+            write_json(out, report)
+            raise SystemExit(f"rotation keys missing from the session: {missing[:8]}")
+        n = model.capacity
+        ticks = max(a.ticks, a.capture_tick + 1) if a.mode == "capture" else a.ticks
+        if a.tokens:
+            with open(a.tokens, encoding="utf-8") as f:
+                streams = streams_from_record(json.load(f))[:n]
+            if len(streams) < n:
+                raise SystemExit(f"{a.tokens} holds {len(streams)} conversations, the layout {n}")
+        else:
+            rng = np.random.default_rng(a.seed)
+            streams = [list(rng.integers(0, params.vocab, ticks)) for _ in range(n)]
+        if any(len(st) < ticks for st in streams):
+            raise SystemExit(f"the token streams hold fewer than {ticks} tokens")
+        if a.mode == "capture":
+            model.set_capture(a.graph_dir)
+        elif a.mode == "planned":
+            model.load_plans(a.plan_dir)
+            report["plans"] = sorted(model.plans or {})
+        report.update(
+            conversations=n, scales=a.scales, tokens=a.tokens or f"random (seed {a.seed})"
+        )
+        mirror = MirrorModel(params, n, model.form, scales=folds)
+        exact = ExactModel(params, n)
+        emb = np.asarray(params.emb, dtype=np.float64)
+        model.start()
+        for pos in range(ticks):
+            before = model.rt.ops.n_bootstraps
+            rows = token_rows(params, streams, pos)
+            rec = tick_record(model, rows, pos, mirror, exact, emb, before)
+            report["ticks"].append(rec)
+            write_json(out, report)
+            print(json.dumps(rec), flush=True)
+    return report
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--weights", required=True)
+    ap.add_argument("--seeds", required=True)
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--mode", default="eager", choices=MODES)
+    ap.add_argument("--graph-dir", default="graphs/fhe_ssm")
+    ap.add_argument("--plan-dir", default="bootstrap_placements/fhe_ssm")
+    ap.add_argument("--capture-tick", type=int, default=1)
+    ap.add_argument("--ticks", type=int, default=4)
+    ap.add_argument("--blocks", type=int, default=None)
+    ap.add_argument("--payload", default="pairs", choices=PAYLOADS)
+    ap.add_argument("--pair-route", default="split", choices=("split", "lane"))
+    ap.add_argument("--scales", default="shipped", help="'shipped' (default), 'none', or a file")
+    ap.add_argument("--tokens", default=None, help="a serve run's token record (teacher-forced)")
+    ap.add_argument("--seed", type=int, default=7)
+    ap.add_argument("--fake", action="store_true", help="the numpy fake instead of a GPU session")
+    ap.add_argument("--out", default="gpu_run.json")
+    a = ap.parse_args(argv)
+    if a.capture_tick < 0:
+        ap.error("--capture-tick must be >= 0")
+    if a.fake and a.mode == "planned":
+        ap.error("planned mode needs a GPU session: the fake cannot execute a plan")
+    run(a)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

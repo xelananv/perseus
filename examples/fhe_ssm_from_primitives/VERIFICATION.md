@@ -30,6 +30,8 @@ seconds), and `python lint.py --check` the static checks (ruff with `ruff.toml`,
 | the folds | exponents 0, mid, 14 | the folded kernels equal the unfolded ones times 2^e, bit for bit | the whole model with folds against the mirror with the same folds and against the unfolded closed form, all three arms | `test_folded_kernels_are_the_unfolded_ones_times_two_to_the_e`, `test_folded_model_matches_mirror_and_unfolded_exact` |
 | `scales.measure` | a window after tick 0; empty, negative and too-long windows | a hand-rolled loop over the closed form | every observed family present | `test_measure_window_matches_a_hand_rolled_loop` |
 | the shipped scales | — | recomputed from the file's own recorded maxima | held-out margin at least 1; no local paths | `test_shipped_scales_are_sane_and_public` |
+| `gpu_run` (on the fake) | eager and capture; a capture tick past `--ticks`; planned refused on the fake; token records with too few conversations or tokens | the mirror and the closed form per tick | whole report files only (atomic writes), the capture's contract file written | `test_gpu_run_and_plan.py` |
+| `plan` | the recipe; unset, changed and meaningful-empty overrides; a dense plan | the recipe written out | Perseus's own make_plan.sh, parsed; the stamped contract read back through `perseus.plan.contract` | `test_recipe_is_perseus_own`, `test_stamp_writes_the_capture_contract` |
 | the decode layout | one sequence | the mirror | the trainer's forward | `test_fhe_ssm_fake.py` |
 
 ## Mutation checks
@@ -47,5 +49,6 @@ The tests were run against deliberately broken code, one break at a time:
 ## What the fake cannot check
 
 Noise, timing and memory: the fake computes in float64 and counts levels, products, rotations and
-bootstraps; it never encrypts. `gpu_smoke.py` runs the same checks on a live session, and only
-`gpu_smoke.open_session` and `colab_build`'s execution are untested here (they need a GPU).
+bootstraps; it never encrypts. `gpu_smoke.py` and `gpu_run.py` run the same checks on a live session; untested here (they need a
+GPU): `gpu_smoke.open_session`, `colab_build`'s execution, a capture's graphs, the planner on
+them and a planned run.
