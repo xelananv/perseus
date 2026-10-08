@@ -25,6 +25,11 @@ seconds), and `python lint.py --check` the static checks (ruff with `ruff.toml`,
 | `colab.fake_check` | pairs and real | its verdict | its thresholds against the report | `test_fake_check_passes_on_a_consistent_checkpoint` |
 | `gpu_smoke.run_checks` | the three arms; a band without the layout's rotations; a failing step | every check passes on the fake | it stops on a missing rotation and records a failure without hiding the other checks | `test_colab_and_smoke.py` |
 | `colab_build.plan` | a fresh runtime, a ready one, CUDA installed earlier, no Python headers; no GPU, no root, unknown distribution | the expected step lists | invariants every plan keeps | `test_colab_build.py` |
+| `scales.exponent` | 0, negative, NaN, infinity, tiny (capped at 14), huge (never negative), the exact boundary, 200 random values | the rule's closed form | a brute-force search over 0..14 | `test_scales.py` |
+| `scales.choose` | values already past the target, tiny products whose lift exceeds one exponent's cap, nothing observed | the rule (each family's limit, the product's limit on a + b) | a brute-force search over all (a, b), 300 random cases | `test_choose_matches_brute_force_on_the_channel_mix` |
+| the folds | exponents 0, mid, 14 | the folded kernels equal the unfolded ones times 2^e, bit for bit | the whole model with folds against the mirror with the same folds and against the unfolded closed form, all three arms | `test_folded_kernels_are_the_unfolded_ones_times_two_to_the_e`, `test_folded_model_matches_mirror_and_unfolded_exact` |
+| `scales.measure` | a window after tick 0; empty, negative and too-long windows | a hand-rolled loop over the closed form | every observed family present | `test_measure_window_matches_a_hand_rolled_loop` |
+| the shipped scales | — | recomputed from the file's own recorded maxima | held-out margin at least 1; no local paths | `test_shipped_scales_are_sane_and_public` |
 | the decode layout | one sequence | the mirror | the trainer's forward | `test_fhe_ssm_fake.py` |
 
 ## Mutation checks

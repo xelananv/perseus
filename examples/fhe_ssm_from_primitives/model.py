@@ -30,6 +30,7 @@ from perseus.impl.driver import ImplModel
 
 from .block import BlockState, carry, norm, ssm_block
 from .geometry import FilledGeometry, PairGeometry, SlotGeometry
+from .scales import BlockScales
 from .weights import BlockWeights, ModelParams, encode_block
 
 LAYOUTS = ("filled", "decode")
@@ -52,6 +53,7 @@ class FheSsmModel(ImplModel):
         layout="filled",
         payload="pairs",
         pair_route="split",
+        scales=None,
     ):
         super().__init__(inf, core=core, unit=unit, profile=profile)
         if layout not in LAYOUTS:
@@ -64,6 +66,9 @@ class FheSsmModel(ImplModel):
         self.canonical_carry = bool(canonical_carry)
         self.resident = bool(resident_weights)
         self.layout, self.payload, self.pair_route = layout, payload, pair_route
+        self.scales: list[BlockScales] | None = None if scales is None else list(scales)
+        if self.scales is not None and len(self.scales) < self.n_layers:
+            raise ValueError(f"{len(self.scales)} blocks of scales for {self.n_layers} blocks")
         self.geo: SlotGeometry | FilledGeometry | PairGeometry
         if layout == "decode":
             self.geo = SlotGeometry(self.rt)
@@ -77,10 +82,11 @@ class FheSsmModel(ImplModel):
     def block_weights(self, b):
         """The block's operands; with ``resident_weights`` encoded once and named for the
         runtime's caches, else rebuilt per use and unnamed (a CPU pass over many blocks)."""
+        sc = None if self.scales is None else self.scales[b]
         if not self.resident:
-            return encode_block(self.params.block(b), self.geo, f"b{b}.", named=False)
+            return encode_block(self.params.block(b), self.geo, f"b{b}.", named=False, scales=sc)
         if b not in self._bw:
-            self._bw[b] = encode_block(self.params.block(b), self.geo, f"b{b}.")
+            self._bw[b] = encode_block(self.params.block(b), self.geo, f"b{b}.", scales=sc)
         return self._bw[b]
 
     def preload(self):

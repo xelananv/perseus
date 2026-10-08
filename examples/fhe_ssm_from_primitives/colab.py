@@ -123,11 +123,22 @@ def fetch_model(dest, *, download=None) -> dict[str, Path]:
 
 
 def fake_check(
-    paths, *, ticks=2, blocks=None, payload="pairs", route="split", logn=16, seed=7, log=print
+    paths,
+    *,
+    ticks=2,
+    blocks=None,
+    payload="pairs",
+    route="split",
+    scales="shipped",
+    logn=16,
+    seed=7,
+    log=print,
 ) -> dict:
     """``ticks`` ticks of the model on the numpy fake with every lane a live conversation,
-    against both references; returns the driver's report and a verdict."""
+    against both references; ``scales``: 'shipped', 'none' or a file (scales.resolve).
+    Returns the driver's report and a verdict."""
     from . import run_fake
+    from . import scales as scales_mod
     from .weights import load_model
 
     params = load_model(
@@ -136,7 +147,10 @@ def fake_check(
     t = (1 << (logn - 1)) // params.d
     n = 2 * t if payload == "pairs" else t
     ids = np.random.default_rng(seed).integers(0, params.vocab, size=(ticks, n))
-    rep = run_fake.run(params, ids, logn=logn, payload=payload, pair_route=route, log=log)
+    folds = scales_mod.resolve(scales, params.n_layers)
+    rep = run_fake.run(
+        params, ids, logn=logn, payload=payload, pair_route=route, scales=folds, log=log
+    )
     worst_mirror = max(tk["relErrRms_vs_mirror"] for tk in rep["ticks"])
     worst_exact = max(tk["relErrRms_vs_exact_worst_conversation"] for tk in rep["ticks"])
     verdict = {

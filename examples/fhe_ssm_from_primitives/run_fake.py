@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import dataclasses
 import hashlib
 import json
 import pathlib
@@ -33,6 +34,7 @@ import numpy as np
 import perseus
 from perseus.impl import fake
 
+from . import scales as scales_mod
 from .geometry import ROUTES
 from .model import LAYOUTS, PAYLOADS, FheSsmModel
 from .ref import ExactModel, MirrorModel, rel_err_rms
@@ -139,9 +141,11 @@ def run(
     layout="filled",
     payload="pairs",
     pair_route="split",
+    scales=None,
     log=print,
 ):
-    """``token_ids``: ``(ticks, conversations)`` (or ``(ticks,)`` for one conversation)."""
+    """``token_ids``: ``(ticks, conversations)`` (or ``(ticks,)`` for one conversation);
+    ``scales``: the power-of-two folds per block (scales.py), or None."""
     ids = np.asarray(token_ids)
     ids = ids[:, None] if ids.ndim == 1 else ids
     fhe, inf = make_session(
@@ -165,13 +169,14 @@ def run(
         layout=layout,
         payload=payload,
         pair_route=pair_route,
+        scales=scales,
     )
     n = ids.shape[1]
     if not 1 <= n <= model.capacity:
         raise ValueError(f"{n} conversations for a capacity of {model.capacity}")
     fhe.loaded_rot_steps = sorted(model.geo.rotation_steps())
     fhe._rot = set(fhe.loaded_rot_steps)
-    exact, mirror = ExactModel(params, n), MirrorModel(params, n, form)
+    exact, mirror = ExactModel(params, n), MirrorModel(params, n, form, scales=scales)
     ticks = []
     with bootstraps_by_step(fhe, model.rt.ops) as by_step:
         model.start()
@@ -219,6 +224,9 @@ def run(
         "layout": layout,
         "payload": payload if layout == "filled" else "real",
         "pair_route": pair_route if layout == "filled" and payload == "pairs" else None,
+        "scales": None
+        if scales is None
+        else [dataclasses.astuple(x) for x in scales[: model.n_layers]],
         "capacity": model.capacity,
         "conversations": n,
         "logn": logn,
@@ -247,6 +255,11 @@ def main(argv=None):
     ap.add_argument("--layout", default="filled", choices=LAYOUTS)
     ap.add_argument("--payload", default="pairs", choices=PAYLOADS)
     ap.add_argument("--pair-route", default="split", choices=ROUTES)
+    ap.add_argument(
+        "--scales",
+        default="shipped",
+        help="power-of-two folds: 'shipped' (scales_pbd430a.json, default), 'none', or a file",
+    )
     ap.add_argument(
         "--conversations",
         type=int,
@@ -277,6 +290,7 @@ def main(argv=None):
     rep = run(
         params,
         ids,
+        scales=scales_mod.resolve(a.scales, params.n_layers),
         layout=a.layout,
         payload=a.payload,
         pair_route=a.pair_route,
@@ -293,6 +307,9 @@ def main(argv=None):
     for name in ("weights", "seeds", "config"):
         path = getattr(a, name)
         rep[name] = {"path": path, "sha256": sha256(path)}
+    if a.scales.lower() != "none":
+        path = scales_mod.SHIPPED if a.scales == "shipped" else a.scales
+        rep["scales_file"] = {"path": str(path), "sha256": sha256(path)}
     if a.out:
         with open(a.out, "w", encoding="utf-8") as f:
             json.dump(rep, f, indent=1, default=float)

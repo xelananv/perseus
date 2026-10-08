@@ -31,6 +31,7 @@ import traceback
 import numpy as np
 
 from . import filling
+from . import scales as scales_mod
 from .model import PAYLOADS, FheSsmModel
 from .ref import ExactModel, MirrorModel, rel_err_rms
 
@@ -47,11 +48,20 @@ def _free_gb(core):
         return None
 
 
-def run_checks(inf, core, params, *, ticks=2, payload="pairs", route="split", seed=3, log=print):
-    """The three checks on session ``inf`` (``core``: its data-plane module). Returns a dict
-    with one entry per check; a failed check records its error and the rest still run."""
+def run_checks(
+    inf, core, params, *, ticks=2, payload="pairs", route="split", scales=None, seed=3, log=print
+):
+    """The three checks on session ``inf`` (``core``: its data-plane module); ``scales``: the
+    power-of-two folds per block (scales.py), or None. Returns a dict with one entry per
+    check; a failed check records its error and the rest still run."""
     model = FheSsmModel(
-        inf, params, core=core, payload=payload, pair_route=route, resident_weights=False
+        inf,
+        params,
+        core=core,
+        payload=payload,
+        pair_route=route,
+        resident_weights=False,
+        scales=scales,
     )
     missing = model.rotation_audit()
     results: dict = {"rotation_audit": {"n_missing": len(missing), "missing": missing[:16]}}
@@ -75,7 +85,8 @@ def run_checks(inf, core, params, *, ticks=2, payload="pairs", route="split", se
         return {"relErrRms": rel_err_rms(geo.decode_rows(y, n), rows[0] @ w)}
 
     def tick_loop():
-        mirror, exact = MirrorModel(params, n, model.form), ExactModel(params, n)
+        mirror = MirrorModel(params, n, model.form, scales=scales)
+        exact = ExactModel(params, n)
         emb = np.asarray(params.emb, dtype=np.float64)
         model.start()
         per = []
@@ -152,13 +163,23 @@ def main(argv=None):
     ap.add_argument("--ticks", type=int, default=2)
     ap.add_argument("--payload", default="pairs", choices=PAYLOADS)
     ap.add_argument("--pair-route", default="split", choices=("split", "lane"))
+    ap.add_argument(
+        "--scales",
+        default="shipped",
+        help="power-of-two folds: 'shipped' (scales_pbd430a.json, default), 'none', or a file",
+    )
     ap.add_argument("--fake", action="store_true", help="run the checks on the numpy fake")
     ap.add_argument("--out", default=None)
     a = ap.parse_args(argv)
     from .weights import load_model
 
     params = load_model(a.weights, a.seeds, a.config, n_layers=a.blocks)
-    kw = {"ticks": a.ticks, "payload": a.payload, "route": a.pair_route}
+    kw = {
+        "ticks": a.ticks,
+        "payload": a.payload,
+        "route": a.pair_route,
+        "scales": scales_mod.resolve(a.scales, params.n_layers),
+    }
     t0 = time.time()
     if a.fake:
         from perseus.impl import fake

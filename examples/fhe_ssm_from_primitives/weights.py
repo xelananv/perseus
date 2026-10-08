@@ -18,6 +18,7 @@ from typing import Any
 import numpy as np
 
 from .norm import NormSite
+from .scales import BlockScales
 
 VECTORS_TM = ("mix", "c", "dd", "p0", "p1", "p2")
 VECTORS_CM = ("q0", "q1", "q2", "q3", "r0", "r1", "r2")
@@ -176,15 +177,24 @@ class BlockWeights:
         return self.tag + name
 
 
-def encode_block(p: BlockParams, geo, tag: str, named: bool = True) -> BlockWeights:
+def encode_block(
+    p: BlockParams, geo, tag: str, named: bool = True, scales: BlockScales | None = None
+) -> BlockWeights:
     """``named=False`` leaves the linears' plaintexts unnamed (encoded at every use, nothing
     cached by the runtime): the low-memory choice for a CPU pass over many blocks.
 
     On split pairs (``geo.split_gain = 0.5``) the operands that make the inputs of the two gate
     sections are halved, exactly (a power of two): ``c`` and ``dd`` (they make ``z``) and
     ``W_k``, ``W_r`` (they make ``k`` and ``r``), so the split's halves ``2 Re`` and ``2 Im``
-    carry the true values."""
+    carry the true values.
+
+    ``scales`` (scales.py) lifts the time-mix gate by G = 2^gate_tm (p0, p1, p2 times G, W_out
+    divided by G), the channel-mix activation by A = 2^act_cm (q0..q3 times A) and its gate by
+    B = 2^gate_cm (r0, r1, r2 times B; W_v divided by A B): exact, so the block computes the same
+    function with larger refreshed values."""
     lane, ffn, half = geo.lane, geo.ffn, float(geo.split_gain)
+    sc = scales or BlockScales()
+    G, A, B = float(2**sc.gate_tm), float(2**sc.act_cm), float(2**sc.gate_cm)
 
     def lin(w, name):
         return geo.weight(w, tag + name if named else None)
@@ -192,26 +202,26 @@ def encode_block(p: BlockParams, geo, tag: str, named: bool = True) -> BlockWeig
     return BlockWeights(
         tag=tag,
         win=lin(p.win, "win"),
-        wout=lin(p.wout, "wout"),
+        wout=lin(p.wout / G, "wout"),
         wk=lin(p.wk * half, "wk"),
         wr=lin(p.wr * half, "wr"),
-        wv=lin(p.wv, "wv"),
+        wv=lin(p.wv / (A * B), "wv"),
         a=lane(p.a),
         b=lane(1.0 - p.a),
         mix=lane(p.mix),
         imix=lane(1.0 - p.mix),
         c=lane(p.c * half),
         dd=lane(p.dd * half),
-        p0=lane(p.p0),
-        p1=lane(p.p1),
-        p2=lane(p.p2),
-        q0=ffn(p.q0),
-        q1=ffn(p.q1),
-        q2=ffn(p.q2),
-        q3=ffn(p.q3),
-        r0=ffn(p.r0),
-        r1=ffn(p.r1),
-        r2=ffn(p.r2),
+        p0=lane(p.p0 * G),
+        p1=lane(p.p1 * G),
+        p2=lane(p.p2 * G),
+        q0=ffn(p.q0 * A),
+        q1=ffn(p.q1 * A),
+        q2=ffn(p.q2 * A),
+        q3=ffn(p.q3 * A),
+        r0=ffn(p.r0 * B),
+        r1=ffn(p.r1 * B),
+        r2=ffn(p.r2 * B),
         norm_tm=p.norm_tm,
         norm_cm=p.norm_cm,
     )

@@ -118,6 +118,47 @@ range. The parked outputs are dropped.
 **Decode** (`geometry.SlotGeometry`): one token per ciphertext in the cachemir decode packing
 (channel `i` at slot `i*t`), Perseus's GPT-2 decode layout.
 
+## Scale folds (`scales.py`, `calibrate.py`)
+
+A CKKS bootstrap adds a roughly constant absolute error per slot, about `2.2e-5 * 2^CF` on the
+n32 chain (`perseus/plan/btserr.py`); a value refreshed while it is much smaller than its band
+loses its precision. In this model the time-mix gate's pieces (`p1 z`, `p2 z^2`, the gate's
+output; typical size 1e-3 to 1e-2) and the channel-mix activation times gate before `W_v`
+(typical size 1e-3) are refreshed far below the default CF 6 band. Three exponents per block
+lift them, each folded into constants the block multiplies anyway and undone in the next linear,
+all exact powers of two:
+
+| exponent | folds | limited by the products it scales |
+|---|---|---|
+| `gate_tm` = g | `p0, p1, p2` times `2^g`, `W_out` divided by `2^g` | `p1 z`, `p2 z^2`, the gate's output |
+| `act_cm` = a | `q0..q3` times `2^a` | `q1 k`, `q2 k^2`, `q3 k`, `(q3 k) k^2` |
+| `gate_cm` = b | `r0, r1, r2` times `2^b`; `W_v` divided by `2^(a+b)` | `r1 r`, `r2 r^2`; and the product before `W_v` by `a + b` |
+
+Each exponent is the largest with `kappa * 2^e * max <= 32` (kappa = 2, Perseus's planner margin;
+32, the amplitude up to which CF 6 stays near its floor in Perseus's measured table), the maxima
+taken with the closed-form forward over token streams. `scales_pbd430a.json` is calibrated on the
+published 148-tick run's 64 prompts and generations (fhe-ssm repository,
+`results/dense-demo-s31/pod_longrun_20260919/pod_pull/s37/serve_LONG/tokens.json`), ticks 0-73,
+and checked on ticks 74-148: no held-out maximum exceeds its target (smallest margin 1.68 of 2).
+The drivers use it by default (`--scales shipped`; `--scales none` turns the folds off):
+
+```bash
+python -m examples.fhe_ssm_from_primitives.calibrate --weights pbd430a_weights.npz \
+    --seeds pbd430a_seeds.json --config pbd430a_config.json --tokens tokens.json --out scales.json
+```
+
+Predicted with Perseus's measured accuracy table (noise of the table's size added at every
+bootstrap of the fake; random tokens, 3 ticks, 64 conversations; a prediction, not a GPU
+measurement):
+
+| bootstrap setting | logits relErrRms vs the closed form | top-1 agreement |
+|---|---|---|
+| CF 6 everywhere (no plan), no folds | 0.33 - 0.41 | 38 - 44 % |
+| CF 6 everywhere (no plan), folds | 0.015 - 0.020 | 97 - 98 % |
+| CF chosen per refresh, folds | 0.0028 - 0.0034 | 100 % |
+
+So run this model with the folds; for its full fidelity, also under a plan.
+
 ## What is folded (all exact)
 
 - The norm gains `g1`, `g2` into the rows of `W_in`, `W_k`, `W_r`; `alpha_res` into `W_out`;
