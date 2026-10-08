@@ -5,6 +5,7 @@ read from that file; its overrides; the contract stamp read back through Perseus
 module."""
 
 import json
+import os
 import re
 from pathlib import Path
 
@@ -50,7 +51,10 @@ def small_fake(monkeypatch):
 
 @pytest.mark.usefixtures("small_fake")
 @pytest.mark.parametrize("mode", ["eager", "capture"])
-def test_runner_modes_on_the_fake(tmp_path, mode):
+def test_runner_modes_on_the_fake(tmp_path, monkeypatch, mode):
+    # set through monkeypatch so the runner's own writes are undone after the test
+    monkeypatch.setenv("FHE_GRAPH_DIR", "before")
+    monkeypatch.setenv("FHE_GRAPH_CAPTURE_TOKEN", "before")
     out = tmp_path / "run.json"
     argv = [*checkpoint(tmp_path), "--fake", "--mode", mode, "--ticks", "2",
             "--graph-dir", str(tmp_path / "graphs"), "--out", str(out)]  # fmt: skip
@@ -67,10 +71,14 @@ def test_runner_modes_on_the_fake(tmp_path, mode):
     assert not list(tmp_path.glob("*.tmp"))  # every write was whole
     if mode == "capture":
         assert (tmp_path / "graphs" / "capture_env.json").exists()
+        assert os.environ["FHE_GRAPH_DIR"] == str(tmp_path / "graphs")
+        assert os.environ["FHE_GRAPH_CAPTURE_TOKEN"] == "1"
 
 
 @pytest.mark.usefixtures("small_fake")
-def test_capture_runs_past_the_capture_tick(tmp_path):
+def test_capture_runs_past_the_capture_tick(tmp_path, monkeypatch):
+    monkeypatch.setenv("FHE_GRAPH_DIR", "before")
+    monkeypatch.setenv("FHE_GRAPH_CAPTURE_TOKEN", "before")
     out = tmp_path / "run.json"
     argv = [*checkpoint(tmp_path), "--fake", "--mode", "capture", "--ticks", "1",
             "--capture-tick", "2", "--graph-dir", str(tmp_path / "g"), "--out", str(out)]  # fmt: skip
@@ -160,3 +168,7 @@ def test_planning_without_a_capture_is_refused(tmp_path):
         plan.main(["--graph-dir", str(tmp_path), "--name", "x"])
     with pytest.raises(SystemExit, match=r"capture_env\.json"):
         plan.stamp(tmp_path, [])
+
+
+def test_the_capture_environment_does_not_leak_between_tests():
+    assert os.environ.get("FHE_GRAPH_DIR") in (None, "before")

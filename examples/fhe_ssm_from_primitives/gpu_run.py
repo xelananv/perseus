@@ -108,6 +108,8 @@ def run(a) -> dict:
     params = load_model(a.weights, a.seeds, a.config, n_layers=a.blocks)
     folds = scales_mod.resolve(a.scales, params.n_layers)
     if a.mode == "capture":
+        # before the session opens, as Perseus's own runner (gpt2_from_primitives/run_decode.py)
+        os.environ["FHE_GRAPH_DIR"] = str(a.graph_dir)
         os.environ["FHE_GRAPH_CAPTURE_TOKEN"] = str(a.capture_tick)
     session, core = fake_session(params, a.payload) if a.fake else gpu_session(params)
     out = Path(a.out)
