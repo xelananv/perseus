@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """One fhe-ssm block on the ops protocol (the circuit of gpu_real_model_x.cu's layer loop).
 
 Polynomials are evaluated at their minimal depth: the cubic gate as ``z (p0 + p1 z + p2 z^2)``

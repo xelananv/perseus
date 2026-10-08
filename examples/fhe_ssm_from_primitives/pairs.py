@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Two conversations per slot: ``x = a + i b`` carries conversation ``k`` on the real axis and
 ``k + t`` on the imaginary axis (the dev branch's token-pair packing).
 

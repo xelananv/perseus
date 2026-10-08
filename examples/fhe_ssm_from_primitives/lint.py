@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Lint, format and type-check this example: fix what the tools can fix, then fail on anything
 left (the repository's ruff rules plus ``ruff.toml``'s, and ``mypy.ini``). The tools come from
 ``$RUFF`` / ``$MYPY``, else from PATH; mypy checks against the interpreter running this script,

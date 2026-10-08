@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The Colab build's decisions without a GPU: version parsing on real tool output, the plan for
 a fresh runtime and for a ready one (checked as explicit step lists and as invariants every
 plan must keep), the refusals, the step runner on harmless commands, and the NCCL prefix."""

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """A smoke test of the port on a live session: open a Perseus session sized for this model
 (d = 1,024, d_ffn = 4,096, ring 2^16, complex slots, the filled layout's rotation keys) and run
 three checks on it, each recorded even when an earlier one failed:

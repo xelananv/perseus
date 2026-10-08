@@ -134,3 +134,10 @@ range. The parked outputs are dropped.
 `python lint.py` runs ruff (the repository's rules plus the stricter families in `ruff.toml`; it fixes
 what it can and formats) and mypy (`mypy.ini`), and fails on anything left. `python lint.py --check`
 changes nothing.
+
+## License
+
+This directory (`examples/fhe_ssm_from_primitives/`) is under the MIT license (`LICENSE` here;
+each file carries `SPDX-License-Identifier: MIT`). It runs on Perseus, which is not: Perseus is
+under the repository's Business Source License 1.1 (`../../LICENSE`; free for non-commercial use,
+GPLv2 from 2030-08-18), and its terms apply to running this example on it.

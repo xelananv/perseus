@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """How values and per-channel constants meet a ciphertext in the layouts the kernels run on.
 
 Every geometry offers the same protocol, so ``block.py`` and ``norm.py`` are written once:

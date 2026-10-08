@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Build Perseus's CUDA extension (the n32 chain) on a Google Colab GPU runtime (Ubuntu, root)
 and check that it imports.
 

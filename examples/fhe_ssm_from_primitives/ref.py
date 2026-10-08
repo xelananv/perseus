@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Float64 references for one or more sequences (rows of ``[B, d]``).
 
 ``exact_step`` is spec_decode/plain_recurrent.py statement by statement with the closed-form

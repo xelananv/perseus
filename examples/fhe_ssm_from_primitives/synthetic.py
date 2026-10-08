@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """A random checkpoint in the trainer's state-dict names, with Newton seeds fitted to a
 mean-square window: what the tests (and a GPU-free smoke run) use instead of the real weights.
 The shapes follow the real model's ratios (d_ffn = 4 d); the sizes are the caller's."""

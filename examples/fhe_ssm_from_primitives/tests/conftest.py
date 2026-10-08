@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Put the repository root on sys.path so the tests import ``examples.fhe_ssm_from_primitives``
 the way the repository's own tests import ``examples.gpt2_from_primitives``."""
 

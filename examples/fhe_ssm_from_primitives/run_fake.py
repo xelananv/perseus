@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Ticks of the fhe-ssm model on a numpy fake session against the float64 references.
 
     python -m examples.fhe_ssm_from_primitives.run_fake --weights W.npz --seeds S.json \

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The fhe-ssm port on the CPU: the norm against its closed form, every kernel on the numpy
 fake against the same kernel on NumpyOps (layout / protocol), the whole model against the
 exact forward (Newton approximation), the rotation band, the hint threshold under the stock and

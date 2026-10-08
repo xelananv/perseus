@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The fake driver end to end on a synthetic checkpoint written to disk, for each arm. Its report
 is checked two ways: the errors it computes against the references, and its counts against an
 independent tally (the per-step bootstrap counts must add up to the totals, the totals to their

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The filled layout on the numpy fake: 32 conversations per ciphertext (real) and 64 as
 real/imaginary pairs (split and lane routes).
 

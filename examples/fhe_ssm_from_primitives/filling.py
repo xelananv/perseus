@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Many conversations per ciphertext: Perseus's filling (token-interleaved) layout on the ops protocol.
 
 Channel ``i`` of conversation ``k`` sits at slot ``i*t + k`` with ``t = N / d`` (the dev branch's

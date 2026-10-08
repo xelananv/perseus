@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The checkpoint (``<tag>_weights.npz``, the trainer's state dict) and the exported Newton
 seeds (``<tag>_seeds.json``) -> the operands one block needs.
 

@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The Colab helpers and the GPU smoke checks, without a network or a GPU: the download is a
 local copy (checked against a good and a corrupted file), the smoke checks run on the fake (on
 the real layout's band, and on a band that lacks the layout's rotations)."""

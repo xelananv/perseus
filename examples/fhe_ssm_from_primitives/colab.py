@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """What the Colab notebook (``colab_check.ipynb``) runs, as functions the tests can call too:
 fetch the published checkpoint, describe the machine, and check the port on the numpy fake at the
 full size of the model.

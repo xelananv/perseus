@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """RMSNorm from primitives: ``x / sqrt(mean(x^2) + eps)``, the inverse square root by Newton.
 
 The served circuit (hpc_gpu_port/experimental/gpu_real_model_x.cu, ``rmsnorm``; flags

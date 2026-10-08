@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Perseus's numpy fake with the runtime's level rules on a composite chain.
 
 ``perseus.impl.fake`` charges a product's rescale at once: the output lands at degree 1,

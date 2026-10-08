@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """``FheSsmModel``: the recurrent LM as an ``ImplModel`` over one session (or the fake).
 
 A tick is one token per conversation: the client's embedding rows enter as a fresh encode, the

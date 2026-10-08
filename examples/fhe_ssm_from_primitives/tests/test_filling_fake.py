@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """Perseus's filling layout on the numpy fake at the real shape (2^16 ring: N = 32,768 slots, d = 1,024):
 32 conversations per ciphertext (real) and 64 as real/imaginary pairs, through one 1024 x 1024 tile,
 a tiled 1024 -> 4096 -> 1024 pair, and the norm's per-conversation statistic."""

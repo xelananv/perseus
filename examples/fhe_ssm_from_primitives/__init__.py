@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 """The fhe-ssm recurrent language model (tag ``pbd430a``) on ``perseus.impl``.
 
 One block is a time-mix followed by a channel-mix, both residual, every nonlinearity a learned
