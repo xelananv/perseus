@@ -67,6 +67,35 @@ def _module_dir(name: str) -> str | None:
     return next(iter(spec.submodule_search_locations))
 
 
+#: FIDESlib32bits's CKKS/Discard.cu emits the PTX ``discard.global.L2`` instruction, which ptxas
+#: accepts only for sm_80 and newer (a Colab T4, 7.5, fails there after ~11 minutes of build)
+MIN_CAP = (8, 0)
+#: Perseus's README: "a GPU with 48 GB or more of memory" for its encrypted runs
+README_GB = 48
+
+
+def parse_gpu(text: str | None) -> tuple[str, tuple[int, int], int] | None:
+    """``(name, compute capability, MiB)`` from nvidia-smi's first CSV line
+    (``name, compute_cap, memory.total``), or None when it does not parse."""
+    line = (text or "").strip().splitlines()[0] if (text or "").strip() else ""
+    parts = [x.strip() for x in line.split(",")]
+    cap = version(parts[1], r"^(\d+)\.(\d+)$") if len(parts) >= 3 else None
+    mib = version(parts[2], r"^(\d+) MiB$") if cap else None
+    if cap is None or mib is None:
+        return None
+    return parts[0], (cap[0], cap[1]), mib[0]
+
+
+def notes(p: dict) -> list[str]:
+    """What the build will run into on this machine that is not worth refusing for."""
+    gpu = parse_gpu(p.get("gpu"))
+    if gpu is None or gpu[2] >= README_GB * 1024:
+        return []
+    return [
+        f"{gpu[0]} has {gpu[2] / 1024:.0f} GB; Perseus asks for {README_GB} GB, so the session's keys may not fit"
+    ]
+
+
 def probe() -> dict:
     """What decides the plan: the GPU, the toolchain's versions, the distribution."""
     os_release = Path("/etc/os-release")
@@ -103,14 +132,29 @@ class Step:
     env: dict[str, str] = field(default_factory=dict)
 
 
+def require(p: dict) -> None:
+    """Refuse a machine the build cannot succeed on: no GPU, a GPU older than FIDESlib32bits
+    supports, no root (the toolchain is installed with apt)."""
+    if not p.get("gpu"):
+        raise SystemExit("no GPU visible: Runtime > Change runtime type > a GPU, then rerun")
+    gpu = parse_gpu(p["gpu"])
+    if gpu is None:
+        raise SystemExit(f"cannot read the GPU's compute capability from {p['gpu']!r}")
+    if gpu[1] < MIN_CAP:
+        raise SystemExit(
+            f"{gpu[0]} is compute capability {gpu[1][0]}.{gpu[1][1]}; FIDESlib32bits needs "
+            f"{MIN_CAP[0]}.{MIN_CAP[1]} or newer (its CKKS/Discard.cu uses the PTX discard "
+            "instruction): pick an L4, A100 or newer runtime"
+        )
+    if not p.get("root"):
+        raise SystemExit("this script installs system packages: run it as root (Colab does)")
+
+
 def plan(p: dict, jobs: int, nccl_home: str) -> list[Step]:
     """The build for probe ``p``: only the installs this machine needs, then the repository's
     scripts with the toolchain made explicit. ``nccl_home`` is the prefix ``link_nccl``
     fills."""
-    if not p.get("gpu"):
-        raise SystemExit("no GPU visible: Runtime > Change runtime type > a GPU, then rerun")
-    if not p.get("root"):
-        raise SystemExit("this script installs system packages: run it as root (Colab does)")
+    require(p)
     steps: list[Step] = []
     nvcc_ok = p.get("nvcc") is not None and p["nvcc"] >= CUDA_MIN
     need_cuda = not nvcc_ok and not p.get("cuda_new")
@@ -255,6 +299,8 @@ def main(argv=None) -> int:
     p = probe()
     print(f"probe: {p}")
     steps = plan(p, a.jobs, a.nccl_home)
+    for note in notes(p):
+        print(f"note: {note}")
     if a.dry_run:
         for s in steps:
             print(f"{s.name}: {' '.join(s.cmd)}" + (f"  env {s.env}" if s.env else ""))

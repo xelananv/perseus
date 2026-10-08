@@ -9,7 +9,7 @@ import pytest
 from examples.fhe_ssm_from_primitives import colab_build as cb
 
 FRESH = {
-    "gpu": "Tesla T4, 7.5, 15360 MiB",
+    "gpu": "NVIDIA L4, 8.9, 23034 MiB",
     "nvcc": (12, 5),
     "nvcc_home": "/usr/local/cuda-12.5",
     "cuda_new": False,
@@ -26,6 +26,7 @@ FRESH = {
 }
 READY = {
     **FRESH,
+    "gpu": "NVIDIA A100-SXM4-80GB, 8.0, 81920 MiB",
     "nvcc": (12, 8),
     "nvcc_home": "/opt/cuda-12.8",
     "gcc": (13,),
@@ -107,7 +108,13 @@ def test_every_plan_keeps_the_invariants(probe):
 
 @pytest.mark.parametrize(
     ("change", "message"),
-    [({"gpu": None}, "no GPU"), ({"root": False}, "root"), ({"distro": None}, "distribution")],
+    [
+        ({"gpu": None}, "no GPU"),
+        ({"gpu": "Tesla T4, 7.5, 15360 MiB"}, "needs 8.0 or newer"),
+        ({"gpu": "garbled"}, "compute capability"),
+        ({"root": False}, "root"),
+        ({"distro": None}, "distribution"),
+    ],
 )
 def test_refusals(change, message):
     with pytest.raises(SystemExit, match=message):
@@ -153,3 +160,32 @@ def test_env_file_carries_the_build_toolchain(tmp_path):
     assert 'export NCCL_HOME="/n"' in text
     assert 'export CC="gcc-12"' in text
     assert "LD_LIBRARY_PATH" in text
+
+
+@pytest.mark.parametrize(
+    ("text", "want"),
+    [
+        ("Tesla T4, 7.5, 15360 MiB", ("Tesla T4", (7, 5), 15360)),
+        ("NVIDIA L4, 8.9, 23034 MiB\n", ("NVIDIA L4", (8, 9), 23034)),
+        (
+            "NVIDIA H100 80GB HBM3, 9.0, 81559 MiB\nNVIDIA H100 80GB HBM3, 9.0, 81559 MiB",
+            ("NVIDIA H100 80GB HBM3", (9, 0), 81559),
+        ),
+        (
+            "NVIDIA RTX PRO 6000 Blackwell, 12.0, 97887 MiB",
+            ("NVIDIA RTX PRO 6000 Blackwell", (12, 0), 97887),
+        ),
+        ("", None),
+        (None, None),
+        ("Tesla T4, [N/A], 15360 MiB", None),
+    ],
+)
+def test_gpu_parsing(text, want):
+    assert cb.parse_gpu(text) == want
+
+
+def test_memory_note_below_the_readme_figure():
+    assert len(cb.notes(FRESH)) == 1  # an L4, 22 GB
+    assert "may not fit" in cb.notes(FRESH)[0]
+    assert cb.notes(READY) == []  # 80 GB
+    assert cb.notes({"gpu": None}) == []
