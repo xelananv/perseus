@@ -18,6 +18,7 @@ option(CACHEMIR_CLIENT_ONLY "Build only perseus._client (OpenFHE, no CUDA toolch
 option(CACHEMIR_BUILD_CLIENT "Build the perseus._client pybind11 module" ${CACHEMIR_CLIENT_ONLY})
 if(NOT CACHEMIR_CLIENT_ONLY)
     enable_language(CUDA)
+    find_package(CUDAToolkit REQUIRED)   # CUDA::cufft for the device encoder
 endif()
 
 if(POLICY CMP0144)
@@ -121,6 +122,8 @@ add_library(cachemir_lib STATIC
     src/packing/cachemir/cachemir_rot_indices.cu
     src/packing/diagonal/diagonal_linear_utils.cu
     src/packing/diagonal/diagonal_norm_utils.cu
+    src/encode/gpu_encode.cu
+    src/encode/gpu_encode_bridge.cu
     src/packing/diagonal/diagonal_rot_indices.cu
     src/packing/cachemir_filling/cachemir_filling_kv_cache.cu
     src/packing/cachemir_filling/cachemir_filling_complex_io.cu
@@ -148,7 +151,7 @@ add_library(cachemir_lib STATIC
     src/app/pipeline.cu
 )
 target_include_directories(cachemir_lib PUBLIC include ${_openfhe_incdirs})
-target_link_libraries(cachemir_lib PUBLIC fideslib::fideslib OpenMP::OpenMP_CXX)
+target_link_libraries(cachemir_lib PUBLIC fideslib::fideslib OpenMP::OpenMP_CXX CUDA::cufft)   # cufft: the device encoder (src/encode)
 if(LibArchive_FOUND)
     target_link_libraries(cachemir_lib PUBLIC LibArchive::LibArchive)
     # LibArchive::LibArchive marks its include dir SYSTEM; nvcc drops imported-target
@@ -202,6 +205,7 @@ if(CACHEMIR_BUILD_PYTHON)
         src/bindings/serial.cu
         src/bindings/session.cu
         src/bindings/bts.cu
+        src/bindings/encode.cu
     )
     target_link_libraries(_core PRIVATE cachemir_lib)
     target_compile_options(_core PRIVATE

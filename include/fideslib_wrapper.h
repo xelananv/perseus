@@ -752,6 +752,13 @@ struct CKKSContext {
             sig.slots, sig.period, sig.live_exact, sig.stride_exact, sig.window_exact,
             sig.offset_exact);
     }
+    // A plaintext known to be dense and aperiodic without a slot scan: the port's block-constant
+    // weight diagonals made on the device (gpu_encode_bridge.cu) carry no host values to analyze.
+    void tag_plaintext_top(const Ptx& pt) const {
+        if (!pt) return;
+        std::lock_guard<std::mutex> lk(tags_mtx);
+        pt_tags[(const void*)pt.get()] = packtag::PackTag::top(static_cast<int>(cc->GetRingDimension() / 2));
+    }
     void tag_plaintext(const Ptx& pt, const std::vector<std::complex<double>>& values) const {
         if (!pt) return;
         const PackSignature sig = analyze_packing(values);

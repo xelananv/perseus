@@ -46,6 +46,7 @@ struct GroupJob {
     int s = 0;                      // baby steps (32 for d = 1024)
     int level = 0;                  // the plaintexts' level (prime-granular, as encode_like_params gives it)
     double sf = 0.0;                // ScalingFactorReal(level)
+    bool skip_ntt = false;          // test hook: leave the limbs in COEFF form (parity against the CPU encode)
 };
 
 constexpr int kMaxBatch = 256;      // W_k + W_r: 8 output tiles x 32 babies share one set of babies

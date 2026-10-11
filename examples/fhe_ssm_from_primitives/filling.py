@@ -102,9 +102,12 @@ class EncodedTile:
     N: int
     rows: np.ndarray
     name: str | None = None
+    dev: int | None = (
+        None  # the tile's id on the device encoder (apply_tiles' device route), or None
+    )
 
     @classmethod
-    def encode(cls, W, N: int, name: str | None = None):
+    def encode(cls, W, N: int, name: str | None = None, dev_ops=None):
         W = np.asarray(W)
         d = W.shape[0]
         if W.shape != (d, d):
@@ -112,7 +115,10 @@ class EncodedTile:
         _, s, G = tile_params(N, d)
         j = np.arange(d)
         k = np.arange(G)[:, None, None] * s + np.arange(s)[None, :, None]
-        return cls(N, W[(j + k) % d, j], name)
+        # dev_ops: an ops with a device encoder -> the d x d tile goes resident there once; its
+        # diagonals are then made on the device at each use (rows stay for the mirror and the fake)
+        dev = dev_ops.register_tile(name or "tile", W) if dev_ops is not None else None
+        return cls(N, W[(j + k) % d, j], name, dev)
 
     @property
     def d(self) -> int:
@@ -126,8 +132,8 @@ class EncodedTile:
         return None if self.name is None else f"{self.name}.{g}.{b}"
 
 
-def encode_tiled(W, N: int, d: int, name: str | None = None):
-    """A (d_in, d_out) matrix as [input chunk][output chunk] tiles."""
+def encode_tiled(W, N: int, d: int, name: str | None = None, dev_ops=None):
+    """A (d_in, d_out) matrix as [input chunk][output chunk] tiles (``dev_ops``: see EncodedTile.encode)."""
     d_in, d_out = np.shape(W)
     if d_in % d or d_out % d:
         raise ValueError(f"W {np.shape(W)} does not tile into {d} x {d}")
@@ -137,6 +143,7 @@ def encode_tiled(W, N: int, d: int, name: str | None = None):
                 W[i * d : (i + 1) * d, o * d : (o + 1) * d],
                 N,
                 None if name is None else f"{name}.{i}.{o}",
+                dev_ops=dev_ops,
             )
             for o in range(d_out // d)
         ]
@@ -175,12 +182,29 @@ def apply_tiles(ops, rxs, tiles):
         raise ValueError("tiles of one sum must share N, d and the (G, s) split")
     if any(len(rx) != s for rx in rxs):
         raise ValueError(f"every prepared input needs {s} baby rotations")
+    device = all(w.dev is not None for w in tiles) and getattr(ops, "gpu_encode", False)
     y = None
     for g in range(G):
         acc = None
-        for rx, w in zip(rxs, tiles):
-            part = _giant_group(ops, rx, w, g)
-            acc = part if acc is None else ops.add(acc, part)
+        if device:
+            # one batched device encode for every (tile, baby) of this giant index, then the
+            # products in exactly the CPU route's order (the recorded op stream is the same)
+            ids = [w.dev for w in tiles for _ in range(s)]
+            baby = [b for _ in tiles for b in range(s)]
+            names = [w.key(g, b) or f"tile.{g}.{b}" for w in tiles for b in range(s)]
+            pts = ops.encode_group(ids, baby, g, s, rxs[0][0], names)
+            try:
+                for i, rx in enumerate(rxs):
+                    for b, xb in enumerate(rx):
+                        p = ops.mult_ptx(xb, pts[i * s + b])
+                        acc = p if acc is None else ops.add(acc, p)
+            finally:
+                for pt in pts:
+                    ops.evict_ptx(pt)
+        else:
+            for rx, w in zip(rxs, tiles):
+                part = _giant_group(ops, rx, w, g)
+                acc = part if acc is None else ops.add(acc, part)
         if g:
             acc = ops.rotate(acc, g * s * t)
         y = acc if y is None else ops.add(y, acc)

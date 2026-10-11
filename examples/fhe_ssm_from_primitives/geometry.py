@@ -191,7 +191,8 @@ class FilledGeometry:
         return [self.lane(v[j * self.d : (j + 1) * self.d]) for j in range(self.n_tiles)]
 
     def weight(self, w, name):
-        return filling.encode_tiled(w, self.N, self.d, name)
+        dev_ops = self.ops if getattr(self.ops, "gpu_encode", False) else None
+        return filling.encode_tiled(w, self.N, self.d, name, dev_ops=dev_ops)
 
     def linear(self, x, w):
         return filling.linear_tiled(self.ops, [x], w)[0]

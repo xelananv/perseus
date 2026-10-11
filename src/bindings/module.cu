@@ -54,6 +54,7 @@ void bind_pipeline(py::module_& m);     // 6
 void bind_serial(py::module_& m);       // 7
 void bind_session(py::module_& m);      // 9
 void bind_bts(py::module_& m);          // 10 (independent: FIDESlib bootstrap stages)
+void bind_encode(py::module_& m);       // 11 (the device encoder, gpu_encode_bridge.h)
 
 namespace {
 // Tag types for the typed exception hierarchy (never thrown; py::exception keys on them).
@@ -249,4 +250,5 @@ PYBIND11_MODULE(_core, m) {
 
     bind_session(m);      // 9
     bind_bts(m);          // 10
+    bind_encode(m);       // 11
 }
