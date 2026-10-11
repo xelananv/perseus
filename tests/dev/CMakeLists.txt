@@ -24,6 +24,17 @@ set_target_properties(gpu_encode_layout_probe PROPERTIES
 target_compile_options(gpu_encode_layout_probe PRIVATE
     $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp -lineinfo -g>)   # host line info for the probe's backtraces
 
+# The encoder's parity probe (COEFF integers, EVAL words, a product) — same shape as the layout probe.
+add_executable(gpu_encode_probe gpu_encode_probe.cu)
+target_link_libraries(gpu_encode_probe PRIVATE cachemir_lib)
+target_include_directories(gpu_encode_probe PRIVATE
+    ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src)
+set_target_properties(gpu_encode_probe PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+target_compile_options(gpu_encode_probe PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp -lineinfo -g>)
+
 if(TARGET test_rotation_ext_moddown)
     target_include_directories(test_rotation_ext_moddown PRIVATE
         ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src)
