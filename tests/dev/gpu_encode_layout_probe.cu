@@ -38,7 +38,7 @@ uint32_t brev16(uint32_t k) {
 // COEFF-form residues of an OpenFHE plaintext, per tower, natural order (what the encoder produces).
 std::vector<std::vector<uint64_t>> coeff_residues(const lbcrypto::Plaintext& pt) {
     lbcrypto::DCRTPoly el = pt->GetElement<lbcrypto::DCRTPoly>();
-    el.SetFormat(lbcrypto::Format::COEFFICIENT);
+    el.SetFormat(Format::COEFFICIENT);   // OpenFHE's Format is a global enum
     std::vector<std::vector<uint64_t>> out;
     for (const auto& tower : el.GetAllElements()) {
         const auto& v = tower.GetValues();
@@ -49,21 +49,28 @@ std::vector<std::vector<uint64_t>> coeff_residues(const lbcrypto::Plaintext& pt)
     return out;
 }
 
-// An RNSPoly whose limb l holds `res[l]` written at index idx(k); NTT'd on its own stream, synced.
-FIDESlib::CKKS::RNSPoly build_poly(FIDESlib::CKKS::ContextData& cd,
-                                   const std::vector<std::vector<uint64_t>>& res, bool reversed) {
-    const int nlimbs = static_cast<int>(res.size());
-    FIDESlib::CKKS::RNSPoly poly(cd, nlimbs - 1, false, false);
-    for (int l = 0; l < nlimbs; ++l) {
+// Fill `poly` (constructed by the caller: FIDESlib polys are not returned by value here) with
+// `res[l]` written at index idx(k) through the library's own load(data, moduli), then NTT it on its
+// own stream and sync.
+void fill_poly(FIDESlib::CKKS::RNSPoly& poly, FIDESlib::CKKS::ContextData& cd,
+               const std::vector<std::vector<uint64_t>>& res, const std::vector<uint64_t>& moduli,
+               bool reversed) {
+    std::vector<std::vector<uint64_t>> data(res.size());
+    for (size_t l = 0; l < res.size(); ++l) {
         const size_t N = res[l].size();
-        std::vector<uint32_t> h(N);
-        for (size_t k = 0; k < N; ++k) h[reversed ? brev16(static_cast<uint32_t>(k)) : k] = static_cast<uint32_t>(res[l][k]);
-        auto& limb = poly.GPU[cd.limbGPUid[l].x].limb[cd.limbGPUid[l].y];
-        std::get<FIDESlib::CKKS::Limb<uint32_t>>(limb).load_convert(h);
+        data[l].assign(N, 0);
+        for (size_t k = 0; k < N; ++k) data[l][reversed ? brev16(static_cast<uint32_t>(k)) : k] = res[l][k];
     }
-    poly.NTT(cd.batch, true);   // the default algorithm (ALGO_SHOUP), as the library's own loads use
+    std::fprintf(stderr, "[probe] fill: %zu limbs x %zu words, reversed=%d\n", data.size(), data.empty() ? 0 : data[0].size(), (int)reversed);
+    // load() grows with constant=false, i.e. limbs WITH their aux buffers — the NTT needs them
+    // (loadConstant's constant=true limbs have none: 'illegal memory access' in the NTT; cf.
+    // RNSPoly::loadCoeffExpand, which grows with constant=false before its INTT/NTT)
+    poly.load(data, moduli);
     cudaDeviceSynchronize();
-    return poly;
+    std::fprintf(stderr, "[probe] loaded (level %d); NTT batch=%d\n", poly.getLevel(), cd.batch);
+    poly.NTT(cd.batch, true);
+    cudaDeviceSynchronize();
+    std::fprintf(stderr, "[probe] NTT done\n");
 }
 
 size_t mismatches(const std::vector<std::vector<uint64_t>>& a, const std::vector<std::vector<uint64_t>>& b) {
@@ -99,39 +106,40 @@ int main(int argc, char** argv) {
     Ptx ref = cc->MakeCKKSPackedPlaintext(x, 1, L);
     auto& ref_o = std::any_cast<lbcrypto::Plaintext&>(ref->cpu);
     // the library's own import of the same plaintext = the target layout
-    FIDESlib::CKKS::Plaintext gp_ref(fctx, FIDESlib::CKKS::GetRawPlainText(occ, ref_o));
-    FIDESlib::CKKS::RawPlainText raw_ref;
+    FIDESlib::CKKS::RawPlainText raw_in = FIDESlib::CKKS::GetRawPlainText(occ, ref_o);   // carries the moduli
+    FIDESlib::CKKS::Plaintext gp_ref(fctx, raw_in);
+    FIDESlib::CKKS::RawPlainText raw_ref;   // store() fills the limbs (library order), not the moduli
     gp_ref.store(raw_ref);
     const auto res = coeff_residues(ref_o);
     std::printf("{\"probe\":\"layout\",\"level\":%u,\"nlimbs\":%zu,\"N\":%zu,\"ref_limbs\":%d,\"sf\":%.6e}\n", L,
                 res.size(), res.empty() ? 0 : res[0].size(), raw_ref.numRes, ref_o->GetScalingFactor());
 
     // A. which order reproduces the library's limbs after its NTT
+    std::fflush(stdout);
     size_t mm_nat = 0, mm_rev = 0;
+    // level -1, own stream (as the encoder's polys will be); load() grows them
+    FIDESlib::CKKS::RNSPoly p_nat(cd, -1, false, false);
+    fill_poly(p_nat, cd, res, raw_in.moduli, false);
     {
-        auto p_nat = build_poly(cd, res, false);
         std::vector<std::vector<uint64_t>> out;
         p_nat.store(out);
         mm_nat = mismatches(out, raw_ref.sub_0);
     }
-    FIDESlib::CKKS::RNSPoly p_rev = build_poly(cd, res, true);
+    FIDESlib::CKKS::RNSPoly p_rev(cd, -1, false, false);
+    fill_poly(p_rev, cd, res, raw_in.moduli, true);
     {
         std::vector<std::vector<uint64_t>> out;
         p_rev.store(out);
         mm_rev = mismatches(out, raw_ref.sub_0);
     }
     const size_t total = res.size() * (res.empty() ? 0 : res[0].size());
+    std::fflush(stdout);
     std::printf("{\"probe\":\"order\",\"mismatch_natural\":%zu,\"mismatch_bitrev16\":%zu,\"of\":%zu}\n", mm_nat, mm_rev, total);
 
     // B. the wrap: a device plaintext from the matching order, through the facade's EvalMult
     const bool use_rev = mm_rev <= mm_nat;
     auto gp2 = std::make_shared<FIDESlib::CKKS::Plaintext>(fctx);
-    if (use_rev) {
-        gp2->c0.swap(p_rev);
-    } else {
-        auto p2 = build_poly(cd, res, false);
-        gp2->c0.swap(p2);
-    }
+    gp2->c0.swap(use_rev ? p_rev : p_nat);
     gp2->NoiseFactor = ref_o->GetScalingFactor();
     gp2->NoiseLevel = ref_o->GetNoiseScaleDeg();
     gp2->slots = n;
