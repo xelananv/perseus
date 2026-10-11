@@ -109,6 +109,10 @@ def run_checks(
                     ),
                     "out_level": rec["out_level"],
                     "bootstraps_total": model.rt.ops.n_bootstraps,
+                    # the runtime's count (deliberate + reactive + iterations); None on the fake
+                    "runtime_bootstraps_total": getattr(
+                        getattr(inf, "fhe", None), "total_bootstraps", None
+                    ),
                 }
             )
         return {"ticks": per}

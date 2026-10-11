@@ -55,9 +55,14 @@ def token_rows(params, streams, pos):
 
 def tick_record(model, rows, pos, mirror, exact, emb, before):
     """One tick: the model against both references, its time and its refreshes."""
+    # the runtime's own count (deliberate + reactive + iterations), where it exposes one: the
+    # port's n_bootstraps counts only its explicit hints and carries
+    fhe = getattr(model.inf, "fhe", None)
+    rt0 = getattr(fhe, "total_bootstraps", None)
     t0 = time.time()
     rec = model.step(rows, pos)
     seconds = time.time() - t0
+    rt1 = getattr(fhe, "total_bootstraps", None)
     want = exact.step(rows)
     got_logits, want_logits = rec["out"] @ emb.T, want @ emb.T
     per_conv = [rel_err_rms(got_logits[k], want_logits[k]) for k in range(len(rows))]
@@ -72,6 +77,7 @@ def tick_record(model, rows, pos, mirror, exact, emb, before):
             np.mean(got_logits.argmax(axis=1) == want_logits.argmax(axis=1))
         ),
         "bootstraps": model.rt.ops.n_bootstraps - before,
+        "runtime_bootstraps": None if rt0 is None or rt1 is None else int(rt1) - int(rt0),
         "out_level": rec["out_level"],
         "free_gb": rec.get("free_gb"),
     }
