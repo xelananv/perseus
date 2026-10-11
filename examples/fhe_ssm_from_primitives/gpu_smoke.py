@@ -130,11 +130,12 @@ def run_checks(
 
 def open_session(params, *, logn=16, auto_bts_level=46):
     """A Perseus session for this model on the n32 chain: the model's own sizes (no padding),
-    complex slots, and the filled layout's rotation steps as extra keys. Needs the CUDA
+    complex slots, the diagonal packing (its ``pack_tokens`` is the filled layout's encode,
+    filling.py) and the filled layout's rotation steps as extra keys. Needs the CUDA
     extension (perseus._core); a context manager (``with open_session(...) as s:``)."""
     for k, v in SMOKE_ENV.items():
         os.environ.setdefault(k, v)
-    from perseus import session
+    from perseus import _backend, session
     from perseus.profile import SessionProfile
 
     prof = SessionProfile.custom_n32()
@@ -146,6 +147,9 @@ def open_session(params, *, logn=16, auto_bts_level=46):
     opts.dim = opts.hidDim = params.d
     opts.expanded = opts.expDim = params.d_ffn
     opts.numHeads = opts.numHeadsReal = 16
+    # the default, Cachemir, packs one token per ciphertext: every conversation but the first
+    # was dropped at the encode (rented A6000, 2026-10-11)
+    opts.packing_kind = _backend.default().PackingKind.Diagonal
     ck = opts.ckks
     ck.logN = logn
     ck.ckks_complex_payload = True
