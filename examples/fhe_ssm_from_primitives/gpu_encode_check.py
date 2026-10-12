@@ -78,8 +78,16 @@ def main(argv=None):
         ops = FheOps(inf, _core, unit=2)
         N, d = inf.slots, a.d
         t, s, G = filling.tile_params(N, d)
-        report.update({"N": N, "t": t, "s": s, "G": G, "gpu_encode": bool(ops.gpu_encode),
-                       "open_seconds": round(time.time() - t0, 1)})
+        report.update(
+            {
+                "N": N,
+                "t": t,
+                "s": s,
+                "G": G,
+                "gpu_encode": bool(ops.gpu_encode),
+                "open_seconds": round(time.time() - t0, 1),
+            }
+        )
         print(json.dumps({k: v for k, v in report.items() if k != "cells"}), flush=True)
         if not ops.gpu_encode:
             raise SystemExit("the session has no device encoder")
@@ -94,12 +102,14 @@ def main(argv=None):
             report["bench"] = []
             for n_tiles, g in ((1, 3), (4, 5), (8, 17)):
                 Ws = [rng.uniform(-0.3, 0.3, (d, d)) for _ in range(n_tiles)]
-                devs = [filling.EncodedTile.encode(W, N, f"b{i}", dev_ops=ops) for i, W in enumerate(Ws)]
+                devs = [
+                    filling.EncodedTile.encode(W, N, f"b{i}", dev_ops=ops) for i, W in enumerate(Ws)
+                ]
                 ids = [w.dev for w in devs for _ in range(s)]
                 baby = [b for _ in devs for b in range(s)]
                 names = [w.key(g, b) for w in devs for b in range(s)]
                 st0 = dict(_core.gpu_encode_stats(inf))
-                pts = ops.encode_group(ids, baby, g, s, x, names)   # warm-up (plans, module load)
+                pts = ops.encode_group(ids, baby, g, s, x, names)  # warm-up (plans, module load)
                 ops.decrypt_slots(ops.mult_ptx(x, pts[-1]))
                 for pt in pts:
                     ops.evict_ptx(pt)
@@ -108,16 +118,26 @@ def main(argv=None):
                     pts = ops.encode_group(ids, baby, g, s, x, names)
                     for pt in pts:
                         ops.evict_ptx(pt)
-                ops.decrypt_slots(ops.mult_ptx(x, pts[-1]))   # the fence (the evicted polys are gone;
+                ops.decrypt_slots(
+                    ops.mult_ptx(x, pts[-1])
+                )  # the fence (the evicted polys are gone;
                 # this product is on a fresh group of the same shape)
                 wall = time.time() - t1
                 st1 = dict(_core.gpu_encode_stats(inf))
                 B = len(ids)
-                row = {"B": B, "g": g, "groups": a.bench, "plaintexts": a.bench * B,
-                       "wall_s": round(wall, 4), "wall_ms_per_plaintext": round(1e3 * wall / (a.bench * B), 4),
-                       "device_ms_per_plaintext": {k: round((st1[k] - st0[k]) / (st1["plaintexts"] - st0["plaintexts"]), 4)
-                                                   for k in ("k1_ms", "fft_ms", "k2_ms", "ntt_ms")},
-                       "timing_env": os.environ.get("FHE_GPU_ENCODE_TIMING", "")}
+                row = {
+                    "B": B,
+                    "g": g,
+                    "groups": a.bench,
+                    "plaintexts": a.bench * B,
+                    "wall_s": round(wall, 4),
+                    "wall_ms_per_plaintext": round(1e3 * wall / (a.bench * B), 4),
+                    "device_ms_per_plaintext": {
+                        k: round((st1[k] - st0[k]) / (st1["plaintexts"] - st0["plaintexts"]), 4)
+                        for k in ("k1_ms", "fft_ms", "k2_ms", "ntt_ms")
+                    },
+                    "timing_env": os.environ.get("FHE_GPU_ENCODE_TIMING", ""),
+                }
                 print(json.dumps(row), flush=True)
                 report["bench"].append(row)
             _core.release_tiles(inf)
@@ -130,7 +150,10 @@ def main(argv=None):
 
         def one_group(tiles_W, g, babies_checked):
             """tiles_W: the tiles sharing this group's babies (B = len * s)."""
-            devs = [filling.EncodedTile.encode(W, N, f"t{i}", dev_ops=ops) for i, W in enumerate(tiles_W)]
+            devs = [
+                filling.EncodedTile.encode(W, N, f"t{i}", dev_ops=ops)
+                for i, W in enumerate(tiles_W)
+            ]
             cpus = [filling.EncodedTile.encode(W, N, f"c{i}") for i, W in enumerate(tiles_W)]
             ids = [w.dev for w in devs for _ in range(s)]
             baby = [b for _ in devs for b in range(s)]
@@ -138,8 +161,14 @@ def main(argv=None):
             t1 = time.time()
             pts = ops.encode_group(ids, baby, g, s, x, names)
             enc_s = time.time() - t1
-            cell = {"B": len(ids), "g": g, "encode_wall_s": round(enc_s, 4), "pt_level": int(pts[0].level),
-                    "ct_level": lx, "checks": []}
+            cell = {
+                "B": len(ids),
+                "g": g,
+                "encode_wall_s": round(enc_s, 4),
+                "pt_level": int(pts[0].level),
+                "ct_level": lx,
+                "checks": [],
+            }
             worst = {"rel_dev": 0.0, "rel_cpu": 0.0, "max_dev_minus_cpu": 0.0, "level_mismatch": 0}
             try:
                 for i, (W, wc) in enumerate(zip(tiles_W, cpus)):
@@ -153,23 +182,32 @@ def main(argv=None):
                         j = np.arange(d)
                         diag = np.roll(W[(j + g * s + b) % d, j], g * s)
                         want = rows * diag[None, :]
-                        c = {"tile": i, "b": b,
-                             "rel_dev_vs_exact": rel_err_rms(r_dev, want),
-                             "rel_cpu_vs_exact": rel_err_rms(r_cpu, want),
-                             "max_abs_dev_minus_cpu": float(np.max(np.abs(r_dev - r_cpu))),
-                             "max_abs_exact": float(np.max(np.abs(want))),
-                             "level_dev": ops.level(y_dev), "level_cpu": ops.level(y_cpu)}
+                        c = {
+                            "tile": i,
+                            "b": b,
+                            "rel_dev_vs_exact": rel_err_rms(r_dev, want),
+                            "rel_cpu_vs_exact": rel_err_rms(r_cpu, want),
+                            "max_abs_dev_minus_cpu": float(np.max(np.abs(r_dev - r_cpu))),
+                            "max_abs_exact": float(np.max(np.abs(want))),
+                            "level_dev": ops.level(y_dev),
+                            "level_cpu": ops.level(y_cpu),
+                        }
                         cell["checks"].append(c)
                         worst["rel_dev"] = max(worst["rel_dev"], c["rel_dev_vs_exact"])
                         worst["rel_cpu"] = max(worst["rel_cpu"], c["rel_cpu_vs_exact"])
-                        worst["max_dev_minus_cpu"] = max(worst["max_dev_minus_cpu"], c["max_abs_dev_minus_cpu"])
+                        worst["max_dev_minus_cpu"] = max(
+                            worst["max_dev_minus_cpu"], c["max_abs_dev_minus_cpu"]
+                        )
                         worst["level_mismatch"] += int(c["level_dev"] != c["level_cpu"])
             finally:
                 for pt in pts:
                     ops.evict_ptx(pt)
             cell["worst"] = worst
-            cell["pass"] = (worst["max_dev_minus_cpu"] <= 1e-9 and worst["rel_dev"] <= 1e-8
-                            and worst["level_mismatch"] == 0)
+            cell["pass"] = (
+                worst["max_dev_minus_cpu"] <= 1e-9
+                and worst["rel_dev"] <= 1e-8
+                and worst["level_mismatch"] == 0
+            )
             print(json.dumps({k: v for k, v in cell.items() if k != "checks"}), flush=True)
             report["cells"].append(cell)
             return cell["pass"]
@@ -186,7 +224,16 @@ def main(argv=None):
         _core.release_tiles(inf)
     report["pass"] = bool(ok)
     report["total_seconds"] = round(time.time() - t0, 1)
-    print(json.dumps({"stats": report["stats"], "pass": report["pass"], "total_seconds": report["total_seconds"]}), flush=True)
+    print(
+        json.dumps(
+            {
+                "stats": report["stats"],
+                "pass": report["pass"],
+                "total_seconds": report["total_seconds"],
+            }
+        ),
+        flush=True,
+    )
     if a.out:
         with open(a.out, "w", encoding="utf-8") as f:
             json.dump(report, f, indent=1, default=str)

@@ -15,7 +15,6 @@ primitive). With ``key=`` they go through the runtime's caches instead:
 from __future__ import annotations
 
 import contextlib
-import math
 import os
 
 import numpy as np
