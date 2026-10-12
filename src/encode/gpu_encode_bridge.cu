@@ -19,7 +19,7 @@ Bridge::Bridge(Inference& inf) : inf_(inf) {
     auto& fctx = std::any_cast<FIDESlib::CKKS::Context&>(inf.cc()->gpu);
     const int n = inf.slots;
     const int d = inf.size.dim;   // the port opens its session with dim = hidDim = d (gpu_smoke.open_session)
-    enc_ = std::make_unique<GpuEncoder>(*fctx, n, d);
+    enc_ = std::make_unique<GpuEncoder>(fctx, n, d);   // the shared_ptr itself: Plaintext(Context&) wants it
 }
 
 Bridge::~Bridge() { release_tiles(); }

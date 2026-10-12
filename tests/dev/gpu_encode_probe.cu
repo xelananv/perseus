@@ -105,7 +105,7 @@ int main(int argc, char** argv) {
     for (auto& v : W) v = U(rng);
     for (auto& v : y) v = U(rng);
 
-    gpu_encode::GpuEncoder enc(cd, n, d);
+    gpu_encode::GpuEncoder enc(fctx, n, d);
     gpu_encode::TileHandle tile = enc.register_tile(W, d);
     const double sf = cc->ScalingFactorReal(L);
     gpu_encode::GroupJob job;
@@ -119,23 +119,35 @@ int main(int argc, char** argv) {
     // CPU references for every diagonal of the group
     std::vector<Ptx> refs(B);
     for (int b = 0; b < B; ++b) refs[b] = cc->MakeCKKSPackedPlaintext(diagonal_slots(W, d, n, g, s, b), 1, L);
-    const auto& q = cd.prime;   // PrimeRecord: .p
+    // ABI: ContextData fields after `precom` are at other offsets in a non-NCCL TU (Context.cuh:164);
+    // `param` is before the shift.
+    const auto& q = cd.param.primes;   // PrimeRecord: .p
     std::printf("{\"probe\":\"setup\",\"level\":%u,\"g\":%d,\"B\":%d,\"sf\":%.6e,\"q0\":%lu,\"q1\":%lu}\n", L, g, B, sf,
                 (unsigned long)q[0].p, (unsigned long)q[1].p);
     std::fflush(stdout);
 
-    // 1. COEFF parity
+    // 1. COEFF parity. The integer m = llround(sf * c) differs by one unit wherever cuFFT's and
+    //    FFTSpecialInv's fp64 summation orders land on opposite sides of a rounding boundary; the
+    //    relative error that matters is in the infinity norm, max|m_dev - m_cpu| / max|m_cpu| (one
+    //    unit against |m| ~ 0.3 sf ~ 2^52), not per coefficient (a 1-unit difference on a tiny
+    //    coefficient is the same rounding noise).
     job.skip_ntt = true;
     auto coeff = enc.encode_group(job);
     cudaDeviceSynchronize();
     std::map<int64_t, size_t> hist;   // |integer difference| -> count
-    size_t total = 0, res_equal = 0, res_total = 0;
+    size_t total = 0, res_equal = 0, res_total = 0, limbs_cpu = 0, limbs_dev = 0;
     double max_rel = 0.0;
+    int64_t max_diff = 0, max_int = 0;
+    std::vector<std::vector<std::vector<uint64_t>>> coeff_dev(B);   // kept for the EVAL self-check
     for (int b = 0; b < B; ++b) {
-        std::vector<std::vector<uint64_t>> dev;
+        auto& dev = coeff_dev[b];
         coeff[b]->c0.store(dev);
         auto& ref_o = std::any_cast<lbcrypto::Plaintext&>(refs[b]->cpu);
         const auto cpu = coeff_residues(ref_o);
+        if (b == 0) {
+            limbs_cpu = cpu.size();
+            limbs_dev = dev.size();
+        }
         const size_t N = cpu[0].size();
         for (size_t k = 0; k < N; ++k) {
             const int64_t mc = crt2_centred(cpu[0][k], q[0].p, cpu[1][k], q[1].p);
@@ -143,6 +155,8 @@ int main(int argc, char** argv) {
             const int64_t dd = std::llabs(mc - md);
             ++hist[std::min<int64_t>(dd, 100)];
             ++total;
+            max_diff = std::max<int64_t>(max_diff, dd);
+            max_int = std::max<int64_t>(max_int, std::llabs(mc));
             if (mc != 0) max_rel = std::max(max_rel, (double)dd / std::fabs((double)mc));
         }
         for (size_t l = 0; l < cpu.size() && l < dev.size(); ++l)
@@ -151,33 +165,47 @@ int main(int argc, char** argv) {
                 ++res_total;
             }
     }
-    std::printf("{\"probe\":\"coeff\",\"coefficients\":%zu,\"exact\":%zu,\"diff1\":%zu,\"diff2_9\":%zu,\"diff10plus\":%zu,"
-                "\"max_rel_vs_int\":%.3e,\"residues_equal\":%zu,\"of\":%zu}\n",
-                total, hist[0], hist[1],
-                [&] { size_t c = 0; for (int64_t v = 2; v < 10; ++v) c += hist[v]; return c; }(),
-                [&] { size_t c = 0; for (auto& [v, cnt] : hist) if (v >= 10) c += cnt; return c; }(),
-                max_rel, res_equal, res_total);
+    const double rel_inf = max_int ? (double)max_diff / (double)max_int : 0.0;
+    const size_t diff10plus = [&] { size_t c = 0; for (auto& [v, cnt] : hist) if (v >= 10) c += cnt; return c; }();
+    std::printf("{\"probe\":\"coeff\",\"limbs_cpu\":%zu,\"limbs_dev\":%zu,\"coefficients\":%zu,\"exact\":%zu,\"diff1\":%zu,"
+                "\"diff2_9\":%zu,\"diff10plus\":%zu,\"max_abs_diff_units\":%lld,\"max_abs_int\":%lld,\"rel_inf\":%.3e,"
+                "\"max_rel_per_coeff\":%.3e,\"residues_equal\":%zu,\"of\":%zu}\n",
+                limbs_cpu, limbs_dev, total, hist[0], hist[1],
+                [&] { size_t c = 0; for (int64_t v = 2; v < 10; ++v) c += hist[v]; return c; }(), diff10plus,
+                (long long)max_diff, (long long)max_int, rel_inf, max_rel, res_equal, res_total);
     std::fflush(stdout);
 
-    // 2. EVAL parity
+    // 2. EVAL parity. (a) self-consistency: the device's EVAL words must equal the library's own NTT of
+    //    the device's COEFF residues (RNSPoly::load + NTT, the path parity step 0 validated) — this is
+    //    what checks the grow/aux/stream choreography. (b) against the CPU reference's EVAL words:
+    //    informational only, since one differing coefficient changes every word after the NTT.
     job.skip_ntt = false;
     auto evalp = enc.encode_group(job);
     cudaDeviceSynchronize();
-    size_t eq = 0, tot = 0;
+    const FIDESlib::CKKS::RawPlainText raw0 =
+        FIDESlib::CKKS::GetRawPlainText(occ, std::any_cast<lbcrypto::Plaintext&>(refs[0]->cpu));   // the moduli
+    size_t eq_self = 0, eq_ref = 0, tot = 0;
     for (int b = 0; b < B; ++b) {
         std::vector<std::vector<uint64_t>> dev;
         evalp[b]->c0.store(dev);
+        FIDESlib::CKKS::RNSPoly lib(cd, -1, false, false);
+        lib.load(coeff_dev[b], raw0.moduli);
+        lib.NTT(cd.param.batch, true);
+        cudaDeviceSynchronize();
+        std::vector<std::vector<uint64_t>> self;
+        lib.store(self);
         auto& ref_o = std::any_cast<lbcrypto::Plaintext&>(refs[b]->cpu);
         FIDESlib::CKKS::Plaintext gp_ref(fctx, FIDESlib::CKKS::GetRawPlainText(occ, ref_o));
         FIDESlib::CKKS::RawPlainText raw;
         gp_ref.store(raw);
-        for (size_t l = 0; l < raw.sub_0.size() && l < dev.size(); ++l)
-            for (size_t k = 0; k < raw.sub_0[l].size(); ++k) {
-                eq += (raw.sub_0[l][k] == dev[l][k]);
+        for (size_t l = 0; l < dev.size(); ++l)
+            for (size_t k = 0; k < dev[l].size(); ++k) {
+                eq_self += (l < self.size() && k < self[l].size() && self[l][k] == dev[l][k]);
+                eq_ref += (l < raw.sub_0.size() && k < raw.sub_0[l].size() && raw.sub_0[l][k] == dev[l][k]);
                 ++tot;
             }
     }
-    std::printf("{\"probe\":\"eval\",\"words_equal\":%zu,\"of\":%zu}\n", eq, tot);
+    std::printf("{\"probe\":\"eval\",\"words_equal_self\":%zu,\"words_equal_cpu_ref\":%zu,\"of\":%zu}\n", eq_self, eq_ref, tot);
     std::fflush(stdout);
 
     // 3. product through the facade, wrapped as the bridge wraps it
@@ -200,12 +228,16 @@ int main(int argc, char** argv) {
         }
         cc->EvictDevicePlaintext(handle);
     }
-    std::printf("{\"probe\":\"product\",\"max_abs_dev_minus_ref\":%.3e,\"max_abs_dev_minus_plain\":%.3e,\"max_abs_plain\":%.3e}\n",
-                max_dev_ref, max_dev_plain, max_plain);
+    std::printf("{\"probe\":\"product\",\"max_abs_dev_minus_ref\":%.3e,\"rel_dev_minus_ref\":%.3e,\"max_abs_dev_minus_plain\":%.3e,"
+                "\"max_abs_plain\":%.3e}\n",
+                max_dev_ref, max_plain > 0 ? max_dev_ref / max_plain : 0.0, max_dev_plain, max_plain);
     const auto& st = enc.stats();
     std::printf("{\"probe\":\"stats\",\"plaintexts\":%lu,\"batches\":%lu,\"k1_ms\":%.3f,\"fft_ms\":%.3f,\"k2_ms\":%.3f,\"ntt_ms\":%.3f}\n",
                 (unsigned long)st.plaintexts, (unsigned long)st.batches, st.k1_ms, st.fft_ms, st.k2_ms, st.ntt_ms);
-    const bool ok = (hist[0] + hist[1] + [&] { size_t c = 0; for (int64_t v = 2; v < 10; ++v) c += hist[v]; return c; }()) == total
-                    && max_rel < 1e-13 && max_dev_ref < 1e-9;
+    // gates: no integer off by 10 or more units, infinity-norm relative error <= 1e-13, the device's EVAL
+    // words identical to the library's NTT of its own coefficients, the product within 1e-9 of the
+    // CPU-encoded plaintext's
+    const bool ok = diff10plus == 0 && rel_inf <= 1e-13 && eq_self == tot && tot > 0 && max_dev_ref < 1e-9;
+    std::printf("{\"probe\":\"verdict\",\"pass\":%s}\n", ok ? "true" : "false");
     return ok ? 0 : 1;
 }
