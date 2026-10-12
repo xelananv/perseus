@@ -1,0 +1,394 @@
+// SPDX-License-Identifier: MIT
+// gpu_mag_probe.cu — see include/gpu_mag_probe.h.
+#include "gpu_mag_probe.h"
+
+#include <CKKS/Ciphertext.cuh>
+#include <CKKS/Context.cuh>
+#include <CKKS/Limb.cuh>
+#include <CKKS/LimbPartition.cuh>
+#include <CKKS/Plaintext.cuh>
+#include <CKKS/RNSPoly.cuh>
+
+#include <cuda_runtime.h>
+#include <cufft.h>
+
+#include <chrono>
+#include <cmath>
+#include <stdexcept>
+#include <string>
+#include <variant>
+
+namespace gpu_encode {
+
+namespace {
+
+constexpr int kMaxLimbs = 64;   // FIDESlib's MAXP
+constexpr int kThreads = 256;
+
+void check(cudaError_t e, const char* what) {
+    if (e != cudaSuccess) throw std::runtime_error(std::string("gpu_mag_probe: ") + what + ": " + cudaGetErrorString(e));
+}
+void check_fft(cufftResult r, const char* what) {
+    if (r != CUFFT_SUCCESS) throw std::runtime_error(std::string("gpu_mag_probe: ") + what + ": cufft error " + std::to_string(int(r)));
+}
+
+// Garner constants: cinv[i*kMaxLimbs + j] = q_i^{-1} mod q_j (i < j); Pd[i] = prod_{l<i} q_l as a double
+// (inf once past 2^1024: a digit there means a value beyond any sane magnitude, reported as inf).
+__constant__ uint32_t c_cinv[kMaxLimbs * kMaxLimbs];
+__constant__ double c_Pd[kMaxLimbs + 1];
+
+__device__ __forceinline__ uint32_t barrett64(uint64_t a, uint64_t q, uint64_t mu) {
+    const uint64_t r = a - __umul64hi(a, mu) * q;
+    return static_cast<uint32_t>(r >= q ? r - q : r);
+}
+
+struct DecParams {
+    void* const* c0;   // limb pointer tables (device): c0, c1, secret, destination
+    void* const* c1;
+    void* const* s;
+    void* const* out;
+    uint64_t q[kMaxLimbs];
+    uint64_t mu[kMaxLimbs];
+};
+
+// d_l = c0_l + c1_l * s_l (mod q_l), pointwise in the EVAL layout. grid (N / kThreads, nlimbs).
+__global__ void k_decrypt(DecParams p, int N) {
+    const int i = blockIdx.x * blockDim.x + threadIdx.x;
+    const int l = blockIdx.y;
+    if (i >= N) return;
+    const uint32_t* c0 = static_cast<const uint32_t*>(p.c0[l]);
+    const uint32_t* c1 = static_cast<const uint32_t*>(p.c1[l]);
+    const uint32_t* s = static_cast<const uint32_t*>(p.s[l]);
+    uint32_t* out = static_cast<uint32_t*>(p.out[l]);
+    const uint64_t prod = static_cast<uint64_t>(c1[i]) * s[i] + c0[i];   // < 2^57
+    out[i] = barrett64(prod, p.q[l], p.mu[l]);
+}
+
+struct GarnerParams {
+    void* const* m;    // the scratch poly's limb table after the INTT (natural COEFF order)
+    uint64_t q[kMaxLimbs];
+    uint64_t mu[kMaxLimbs];
+};
+
+// Every coefficient j of the decrypted polynomial as a double in scale units: mixed-radix digits
+// (exact, 32-bit), sign from the top digit, the double from the digits. Also the block maxima of
+// |c_j| over the stride-aligned j (the coefficients OpenFHE's sparse decode reads) and the same
+// without j = 0. grid N / kThreads.
+__global__ void k_garner(GarnerParams p, int nlimbs, int N, int gap, double inv_scale,
+                         double* __restrict__ coef, double* __restrict__ pmax, double* __restrict__ pmax_ac) {
+    __shared__ double s_max[kThreads], s_max_ac[kThreads];
+    const int j = blockIdx.x * blockDim.x + threadIdx.x;
+    double value = 0.0;
+    if (j < N) {
+        uint32_t t[kMaxLimbs];
+        for (int l = 0; l < nlimbs; ++l) {
+            const uint64_t ql = p.q[l];
+            uint64_t x = static_cast<const uint32_t*>(p.m[l])[j];
+            for (int i = 0; i < l; ++i) {
+                // t_i < q_i, and q_0 (28 bits) can exceed twice a 26.5-bit q_l: a full reduction, not
+                // one conditional subtract
+                const uint64_t ti = barrett64(t[i], ql, p.mu[l]);
+                x = (x >= ti) ? (x - ti) : (x + ql - ti);
+                x = barrett64(x * c_cinv[i * kMaxLimbs + l], ql, p.mu[l]);
+            }
+            t[l] = static_cast<uint32_t>(x);
+        }
+        const bool neg = t[nlimbs - 1] > (p.q[nlimbs - 1] >> 1);
+        double v = neg ? 1.0 : 0.0;
+        for (int l = 0; l < nlimbs; ++l) {
+            const uint64_t d = neg ? (p.q[l] - 1 - t[l]) : t[l];
+            if (d) v += static_cast<double>(d) * c_Pd[l];     // c_Pd may be inf: a nonzero digit there is inf
+        }
+        value = (neg ? -v : v) * inv_scale;
+        coef[j] = value;
+    }
+    const bool aligned = (j < N) && ((j % gap) == 0);
+    const double a = aligned ? fabs(value) : 0.0;
+    s_max[threadIdx.x] = a;
+    s_max_ac[threadIdx.x] = (j == 0) ? 0.0 : a;
+    __syncthreads();
+    for (int st = kThreads / 2; st > 0; st >>= 1) {
+        if (threadIdx.x < st) {
+            s_max[threadIdx.x] = fmax(s_max[threadIdx.x], s_max[threadIdx.x + st]);
+            s_max_ac[threadIdx.x] = fmax(s_max_ac[threadIdx.x], s_max_ac[threadIdx.x + st]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        pmax[blockIdx.x] = s_max[0];
+        pmax_ac[blockIdx.x] = s_max_ac[0];
+    }
+}
+
+// X_k = (c_{k gap} + i c_{k gap + n}) zeta^{k gap}, k < slots: the input of the inverse DFT of size
+// `slots` whose output is the decoded slot vector in permuted order.
+__global__ void k_twist_sub(const double* __restrict__ coef, const cufftDoubleComplex* __restrict__ tw,
+                            int n, int gap, int slots, cufftDoubleComplex* __restrict__ X) {
+    const int k = blockIdx.x * blockDim.x + threadIdx.x;
+    if (k >= slots) return;
+    const int j = k * gap;
+    const double re = coef[j], im = coef[j + n];
+    const cufftDoubleComplex w = tw[j];
+    X[k] = make_cuDoubleComplex(re * w.x - im * w.y, re * w.y + im * w.x);
+}
+
+// One block: max|Y|, mean Re Y, max|Y - mean| over `slots` values, the coefficient maxima from the
+// block partials; writes Result `out`. Launched with kStatsThreads threads.
+constexpr int kStatsThreads = 1024;
+__global__ void k_stats(const cufftDoubleComplex* __restrict__ Y, int slots, const double* __restrict__ pmax,
+                        const double* __restrict__ pmax_ac, int nblocks, GpuMagProbe::Result* out) {
+    __shared__ double s_a[kStatsThreads], s_b[kStatsThreads];
+    __shared__ double s_mean;
+    double mx = 0.0, sum = 0.0;
+    for (int k = threadIdx.x; k < slots; k += blockDim.x) {
+        const cufftDoubleComplex y = Y[k];
+        mx = fmax(mx, hypot(y.x, y.y));
+        sum += y.x;
+    }
+    s_a[threadIdx.x] = mx;
+    s_b[threadIdx.x] = sum;
+    __syncthreads();
+    for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+        if (threadIdx.x < st) {
+            s_a[threadIdx.x] = fmax(s_a[threadIdx.x], s_a[threadIdx.x + st]);
+            s_b[threadIdx.x] += s_b[threadIdx.x + st];
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        out->max_abs = s_a[0];
+        s_mean = s_b[0] / slots;
+        out->mean = s_mean;
+    }
+    __syncthreads();
+    const double mean = s_mean;
+    double dv = 0.0;
+    for (int k = threadIdx.x; k < slots; k += blockDim.x) {
+        const cufftDoubleComplex y = Y[k];
+        dv = fmax(dv, hypot(y.x - mean, y.y));
+    }
+    double cm = 0.0, cma = 0.0;
+    for (int b = threadIdx.x; b < nblocks; b += blockDim.x) {
+        cm = fmax(cm, pmax[b]);
+        cma = fmax(cma, pmax_ac[b]);
+    }
+    s_a[threadIdx.x] = dv;
+    s_b[threadIdx.x] = cm;
+    __shared__ double s_c[kStatsThreads];
+    s_c[threadIdx.x] = cma;
+    __syncthreads();
+    for (int st = blockDim.x / 2; st > 0; st >>= 1) {
+        if (threadIdx.x < st) {
+            s_a[threadIdx.x] = fmax(s_a[threadIdx.x], s_a[threadIdx.x + st]);
+            s_b[threadIdx.x] = fmax(s_b[threadIdx.x], s_b[threadIdx.x + st]);
+            s_c[threadIdx.x] = fmax(s_c[threadIdx.x], s_c[threadIdx.x + st]);
+        }
+        __syncthreads();
+    }
+    if (threadIdx.x == 0) {
+        out->max_dev = s_a[0];
+        out->max_coeff = s_b[0];
+        out->max_coeff_ac = s_c[0];
+    }
+}
+
+uint64_t inv_mod(uint64_t a, uint64_t m) {   // a^{-1} mod m, m prime
+    uint64_t e = m - 2, r = 1;
+    a %= m;
+    while (e) {
+        if (e & 1) r = (uint64_t)((__uint128_t)r * a % m);
+        a = (uint64_t)((__uint128_t)a * a % m);
+        e >>= 1;
+    }
+    return r;
+}
+
+}  // namespace
+
+struct GpuMagProbe::Impl {
+    FIDESlib::CKKS::Context& ctx;
+    FIDESlib::CKKS::ContextData& cc;
+    int N, n;
+    std::shared_ptr<FIDESlib::CKKS::Plaintext> secret;
+    std::shared_ptr<FIDESlib::CKKS::Plaintext> scratch;   // one poly at the top level, level set per probe
+    void* const* s_table = nullptr;                        // the secret's limb pointer table
+    void* const* d_table = nullptr;                        // the scratch's
+    std::vector<uint64_t> q, mu;
+    double* coef = nullptr;                 // N doubles
+    double* pmax = nullptr;                 // N / kThreads
+    double* pmax_ac = nullptr;
+    cufftDoubleComplex* tw = nullptr;       // n: zeta^k
+    cufftDoubleComplex* X = nullptr;        // n
+    Result* results = nullptr;              // device, capacity
+    size_t capacity = 0, count = 0;
+    std::vector<std::pair<int, cufftHandle>> plans;
+    cudaStream_t s0 = nullptr;              // the legacy default stream
+
+    cufftHandle plan_for(int size) {
+        for (auto& [sz, h] : plans)
+            if (sz == size) return h;
+        cufftHandle h;
+        check_fft(cufftPlan1d(&h, size, CUFFT_Z2Z, 1), "cufftPlan1d");
+        check_fft(cufftSetStream(h, s0), "cufftSetStream");
+        plans.emplace_back(size, h);
+        return h;
+    }
+};
+
+GpuMagProbe::GpuMagProbe(FIDESlib::CKKS::Context& ctx, int n_slots, std::shared_ptr<FIDESlib::CKKS::Plaintext> secret)
+    : impl_(new Impl{ctx, *ctx, 0, n_slots}) {
+    using FIDESlib::CKKS::Limb;
+    Impl& I = *impl_;
+    I.N = 1 << I.cc.param.logN;
+    if (2 * I.n != I.N) throw std::invalid_argument("gpu_mag_probe: slots must be N/2");
+    if (!secret || secret->c0.GPU.size() != 1) throw std::invalid_argument("gpu_mag_probe: secret key poly missing or multi-device");
+    I.secret = std::move(secret);
+    const int nprimes = I.cc.param.L + 1;
+    if (nprimes > kMaxLimbs) throw std::invalid_argument("gpu_mag_probe: too many primes");
+    if (static_cast<int>(I.secret->c0.GPU[0].limb.size()) < nprimes)
+        throw std::invalid_argument("gpu_mag_probe: the secret key poly must carry every limb of the chain");
+    for (int l = 0; l < nprimes; ++l) {
+        if (!std::holds_alternative<Limb<uint32_t>>(I.secret->c0.GPU[0].limb[l]))
+            throw std::runtime_error("gpu_mag_probe: 32-bit limbs only");
+        const auto& lb = std::get<Limb<uint32_t>>(I.secret->c0.GPU[0].limb[l]);
+        if (lb.primeid != l) throw std::runtime_error("gpu_mag_probe: secret limb order");
+        I.q.push_back(I.cc.param.primes.at(l).p);
+        I.mu.push_back(~0ull / I.q.back());
+    }
+    I.s_table = I.secret->c0.GPU[0].limbptr.data;
+    // the scratch poly: every limb of the chain, with aux (the INTT needs them)
+    I.scratch = std::make_shared<FIDESlib::CKKS::Plaintext>(I.ctx);
+    I.scratch->c0.grow(nprimes - 1, false, false);
+    if (static_cast<int>(I.scratch->c0.GPU[0].limb.size()) < nprimes) throw std::runtime_error("gpu_mag_probe: scratch poly did not grow");
+    I.d_table = I.scratch->c0.GPU[0].limbptr.data;
+    // Garner constants
+    std::vector<uint32_t> cinv(kMaxLimbs * kMaxLimbs, 0);
+    for (int i = 0; i < nprimes; ++i)
+        for (int j = i + 1; j < nprimes; ++j) cinv[i * kMaxLimbs + j] = static_cast<uint32_t>(inv_mod(I.q[i] % I.q[j], I.q[j]));
+    std::vector<double> Pd(kMaxLimbs + 1, INFINITY);
+    long double acc = 1.0L;
+    for (int i = 0; i <= nprimes; ++i) {
+        Pd[i] = (acc > 1.7e308L) ? INFINITY : static_cast<double>(acc);
+        if (i < nprimes) acc *= static_cast<long double>(I.q[i]);
+    }
+    check(cudaMemcpyToSymbol(c_cinv, cinv.data(), sizeof(uint32_t) * cinv.size()), "cinv upload");
+    check(cudaMemcpyToSymbol(c_Pd, Pd.data(), sizeof(double) * Pd.size()), "Pd upload");
+    // twist zeta^k, k < n, zeta = exp(2 pi i / 4n)
+    std::vector<cufftDoubleComplex> tw(I.n);
+    for (int k = 0; k < I.n; ++k) {
+        const long double ang = 2.0L * 3.141592653589793238462643383279502884L * k / (4.0L * I.n);
+        tw[k].x = static_cast<double>(std::cos(ang));
+        tw[k].y = static_cast<double>(std::sin(ang));
+    }
+    check(cudaMalloc(&I.tw, sizeof(cufftDoubleComplex) * I.n), "cudaMalloc tw");
+    check(cudaMemcpy(I.tw, tw.data(), sizeof(cufftDoubleComplex) * I.n, cudaMemcpyHostToDevice), "upload tw");
+    check(cudaMalloc(&I.X, sizeof(cufftDoubleComplex) * I.n), "cudaMalloc X");
+    check(cudaMalloc(&I.coef, sizeof(double) * I.N), "cudaMalloc coef");
+    const int nblocks = (I.N + kThreads - 1) / kThreads;
+    check(cudaMalloc(&I.pmax, sizeof(double) * nblocks), "cudaMalloc pmax");
+    check(cudaMalloc(&I.pmax_ac, sizeof(double) * nblocks), "cudaMalloc pmax_ac");
+    I.capacity = 1 << 16;
+    check(cudaMalloc(&I.results, sizeof(Result) * I.capacity), "cudaMalloc results");
+}
+
+GpuMagProbe::~GpuMagProbe() {
+    Impl& I = *impl_;
+    cudaDeviceSynchronize();
+    for (auto& [sz, h] : I.plans) cufftDestroy(h);
+    if (I.tw) cudaFree(I.tw);
+    if (I.X) cudaFree(I.X);
+    if (I.coef) cudaFree(I.coef);
+    if (I.pmax) cudaFree(I.pmax);
+    if (I.pmax_ac) cudaFree(I.pmax_ac);
+    if (I.results) cudaFree(I.results);
+    cudaGetLastError();
+}
+
+size_t GpuMagProbe::probe(const FIDESlib::CKKS::Ciphertext& ct) {
+    Impl& I = *impl_;
+    const auto t0 = std::chrono::steady_clock::now();
+    if (I.count == I.capacity) throw std::runtime_error("gpu_mag_probe: fetch() before issuing more than 65536 probes");
+    const int nlimbs = ct.c0.getLevel() + 1;
+    if (nlimbs < 1 || nlimbs > static_cast<int>(I.q.size())) throw std::runtime_error("gpu_mag_probe: ciphertext level out of range");
+    if (ct.c0.GPU.size() != 1 || ct.c1.GPU.size() != 1) throw std::runtime_error("gpu_mag_probe: multi-device ciphertext");
+    int slots = ct.slots;
+    if (slots <= 0 || slots > I.n) slots = I.n;
+    if (I.n % slots) throw std::runtime_error("gpu_mag_probe: slots must divide N/2");
+    const int gap = I.n / slots;
+    const double scale = ct.NoiseFactor;
+    if (!(scale > 0.0)) throw std::runtime_error("gpu_mag_probe: ciphertext without a scale");
+
+    DecParams dp{};
+    dp.c0 = ct.c0.GPU[0].limbptr.data;
+    dp.c1 = ct.c1.GPU[0].limbptr.data;
+    dp.s = I.s_table;
+    dp.out = I.d_table;
+    GarnerParams gp{};
+    gp.m = I.d_table;
+    for (int l = 0; l < nlimbs; ++l) {
+        dp.q[l] = gp.q[l] = I.q[l];
+        dp.mu[l] = gp.mu[l] = I.mu[l];
+    }
+    const int nblocks = (I.N + kThreads - 1) / kThreads;
+    k_decrypt<<<dim3(nblocks, nlimbs), kThreads, 0, I.s0>>>(dp, I.N);
+    check(cudaGetLastError(), "k_decrypt launch");
+    I.scratch->c0.setLevel(nlimbs - 1);
+    I.scratch->c0.INTT(I.cc.param.batch, true);
+    k_garner<<<nblocks, kThreads, 0, I.s0>>>(gp, nlimbs, I.N, gap, 1.0 / scale, I.coef, I.pmax, I.pmax_ac);
+    check(cudaGetLastError(), "k_garner launch");
+    k_twist_sub<<<(slots + kThreads - 1) / kThreads, kThreads, 0, I.s0>>>(I.coef, I.tw, I.n, gap, slots, I.X);
+    check(cudaGetLastError(), "k_twist_sub launch");
+    if (slots > 1) check_fft(cufftExecZ2Z(I.plan_for(slots), I.X, I.X, CUFFT_INVERSE), "cufftExecZ2Z");
+    k_stats<<<1, kStatsThreads, 0, I.s0>>>(I.X, slots, I.pmax, I.pmax_ac, nblocks, I.results + I.count);
+    check(cudaGetLastError(), "k_stats launch");
+    stats_.items += 1;
+    stats_.enqueue_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    return I.count++;
+}
+
+std::vector<std::vector<uint64_t>> GpuMagProbe::debug_decrypt(const FIDESlib::CKKS::Ciphertext& ct, bool swap_components) {
+    Impl& I = *impl_;
+    const int nlimbs = ct.c0.getLevel() + 1;
+    DecParams dp{};
+    dp.c0 = swap_components ? ct.c1.GPU[0].limbptr.data : ct.c0.GPU[0].limbptr.data;
+    dp.c1 = swap_components ? ct.c0.GPU[0].limbptr.data : ct.c1.GPU[0].limbptr.data;
+    dp.s = I.s_table;
+    dp.out = I.d_table;
+    for (int l = 0; l < nlimbs; ++l) {
+        dp.q[l] = I.q[l];
+        dp.mu[l] = I.mu[l];
+    }
+    const int nblocks = (I.N + kThreads - 1) / kThreads;
+    k_decrypt<<<dim3(nblocks, nlimbs), kThreads, 0, I.s0>>>(dp, I.N);
+    check(cudaGetLastError(), "k_decrypt launch");
+    I.scratch->c0.setLevel(nlimbs - 1);
+    I.scratch->c0.INTT(I.cc.param.batch, true);
+    check(cudaDeviceSynchronize(), "debug sync");
+    std::vector<std::vector<uint64_t>> out;
+    I.scratch->c0.store(out);
+    check(cudaDeviceSynchronize(), "debug store sync");
+    return out;
+}
+
+std::vector<std::vector<uint64_t>> GpuMagProbe::debug_secret_limbs() {
+    Impl& I = *impl_;
+    std::vector<std::vector<uint64_t>> out;
+    I.secret->c0.store(out);
+    check(cudaDeviceSynchronize(), "debug secret store");
+    return out;
+}
+
+std::vector<GpuMagProbe::Result> GpuMagProbe::fetch() {
+    Impl& I = *impl_;
+    const auto t0 = std::chrono::steady_clock::now();
+    std::vector<Result> out(I.count);
+    if (I.count) {
+        check(cudaStreamSynchronize(I.s0), "fetch sync");
+        check(cudaMemcpy(out.data(), I.results, sizeof(Result) * I.count, cudaMemcpyDeviceToHost), "fetch copy");
+    }
+    I.count = 0;
+    stats_.fetch_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    return out;
+}
+
+}  // namespace gpu_encode

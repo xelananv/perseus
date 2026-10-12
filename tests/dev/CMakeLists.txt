@@ -46,3 +46,13 @@ if(TARGET test_ks_digit_intt)
     target_include_directories(test_ks_digit_intt PRIVATE
         ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src)
 endif()
+
+# The device magnitude probe of the graph capture against the host path's numbers (gpu_mag_probe.h).
+add_executable(gpu_mag_probe_check gpu_mag_probe_check.cu)
+target_link_libraries(gpu_mag_probe_check PRIVATE cachemir_lib)
+target_include_directories(gpu_mag_probe_check PRIVATE
+    ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src)
+set_target_properties(gpu_mag_probe_check PROPERTIES
+    CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+target_compile_options(gpu_mag_probe_check PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-g>)

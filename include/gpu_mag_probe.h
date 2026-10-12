@@ -1,0 +1,74 @@
+// SPDX-License-Identifier: MIT
+// gpu_mag_probe.h — the graph capture's magnitude probe on the device.
+//
+// The capture prices every recorded node by three statistics of its decrypted value: the slot
+// magnitude max|z|, the Re-mean and max|z - mean| (the offset arm), and the largest plaintext
+// coefficient with and without the X^0 term (what EvalMod's range constraint is on). The host path
+// copies each ciphertext down and decrypts it with OpenFHE: at ring 2^16 that is ~35 ms per node and
+// ~29k nodes per block, i.e. the capture's wall. Here the same numbers are computed where the
+// ciphertext already is: d = c0 + c1*s per limb (the secret key resident on the device in the
+// library's own EVAL layout), the library's inverse NTT, an exact mixed-radix reconstruction of every
+// coefficient to a double in scale units, one inverse cuFFT for the slots (the capture's statistics
+// are invariant under the slot permutation, so the special FFT's output order is not needed), and
+// two reductions. Sparse-slot ciphertexts decode as OpenFHE does: the coefficients at stride N/2/slots
+// through a transform of size `slots`.
+//
+// Everything runs on the legacy default stream, which orders after every ciphertext operation that
+// produced the value and before every one that may change it in place.
+#pragma once
+
+#include <cstdint>
+#include <memory>
+#include <vector>
+
+namespace FIDESlib::CKKS {
+class Ciphertext;
+class Plaintext;
+class ContextData;
+using Context = std::shared_ptr<ContextData>;
+}  // namespace FIDESlib::CKKS
+
+namespace gpu_encode {
+
+class GpuMagProbe {
+  public:
+    struct Result {
+        double max_abs = 0.0;       // max |z| over the decoded slots
+        double mean = 0.0;          // mean of Re z
+        double max_dev = 0.0;       // max |z - mean|
+        double max_coeff = 0.0;     // max |coefficient| (scale units), all 2*slots coefficients
+        double max_coeff_ac = 0.0;  // the same without coefficient X^0
+    };
+    struct Stats {
+        uint64_t items = 0;
+        double enqueue_ms = 0;      // host time spent issuing the probes
+        double fetch_ms = 0;        // host time spent waiting at fetch (the device work)
+    };
+
+    // `secret`: the secret key polynomial imported like any plaintext (Plaintext(ctx, GetRawPlainText))
+    // at the top level, EVAL form, all limbs.
+    GpuMagProbe(FIDESlib::CKKS::Context& ctx, int n_slots, std::shared_ptr<FIDESlib::CKKS::Plaintext> secret);
+    ~GpuMagProbe();
+    GpuMagProbe(const GpuMagProbe&) = delete;
+    GpuMagProbe& operator=(const GpuMagProbe&) = delete;
+
+    // Issue the probe of `ct` (EVAL form, any level, any noise degree); returns the index its result
+    // will have in the next fetch().
+    size_t probe(const FIDESlib::CKKS::Ciphertext& ct);
+    // Wait for every probe issued since the last fetch and return their results in issue order.
+    std::vector<Result> fetch();
+    const Stats& stats() const { return stats_; }
+
+    // Diagnostics: the decrypted polynomial's residues per limb after the INTT (natural order, host
+    // vectors), with the ciphertext components in the stored order or swapped; and the secret key's
+    // limbs as imported.
+    std::vector<std::vector<uint64_t>> debug_decrypt(const FIDESlib::CKKS::Ciphertext& ct, bool swap_components);
+    std::vector<std::vector<uint64_t>> debug_secret_limbs();
+
+  private:
+    struct Impl;
+    std::unique_ptr<Impl> impl_;
+    Stats stats_;
+};
+
+}  // namespace gpu_encode

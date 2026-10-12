@@ -124,6 +124,7 @@ add_library(cachemir_lib STATIC
     src/packing/diagonal/diagonal_norm_utils.cu
     src/encode/gpu_encode.cu
     src/encode/gpu_encode_bridge.cu
+    src/encode/gpu_mag_probe.cu
     src/packing/diagonal/diagonal_rot_indices.cu
     src/packing/cachemir_filling/cachemir_filling_kv_cache.cu
     src/packing/cachemir_filling/cachemir_filling_complex_io.cu
