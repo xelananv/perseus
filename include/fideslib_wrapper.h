@@ -1220,6 +1220,17 @@ struct CKKSContext {
         name_pt(pt, name, false);
     }
 
+    // pt_vars and pt_tags are keyed by the facade object's address. The device encoder makes and
+    // drops one facade plaintext per diagonal, so addresses recur within a capture; a plaintext
+    // leaving the session takes its name and tag with it (gpu_encode_bridge.cu: evict).
+    void forget_pt(const Ptx& pt) {
+        if (!pt) return;
+        const void* key = static_cast<const void*>(pt.get());
+        pt_vars.erase(key);
+        std::lock_guard<std::mutex> lk(tags_mtx);
+        pt_tags.erase(key);
+    }
+
     std::string next_ct(const std::string& prefix = "v") {
         return prefix + "_" + std::to_string(++graph_ct_counter);
     }
@@ -1701,8 +1712,10 @@ struct CKKSContext {
     // with the secret key resident on the device, the library's INTT, an exact mixed-radix
     // reconstruction of the coefficients and one inverse cuFFT (include/gpu_mag_probe.h).
     // Replaces the D2H snapshot + host decrypt per node (~35 ms each at ring 2^16, 93 % of a
-    // capture block); borrows and copy-inheritance resolve at drain exactly as before. On any
-    // failure the probe switches itself off and the node takes the host path.
+    // capture block); borrows and copy-inheritance resolve at drain exactly as before. A failure
+    // while issuing a probe switches the probe off and the node takes the host path; a failure at
+    // fetch (the device work itself) aborts the capture, since a graph with nodes that carry no
+    // magnitude would plan silently worse.
     static bool mag_gpu_enabled() {
         static const bool on = [] {
             const char* e = std::getenv("FHE_MAG_GPU");
@@ -1714,7 +1727,13 @@ struct CKKSContext {
     struct PendingGpuMag { std::size_t node_idx; long ordinal; };
     std::vector<PendingGpuMag> mag_gpu_pending;
     bool mag_gpu_failed = false;
+    // Zero a host buffer before it is freed; the volatile stores are not elided.
+    static void wipe_u64(std::vector<uint64_t>& v) {
+        volatile uint64_t* p = v.data();
+        for (std::size_t i = 0; i < v.size(); ++i) p[i] = 0;
+    }
     void mag_gpu_init() {
+        if (!keys.secretKey) throw std::runtime_error("the session holds no secret key");
         auto& occ = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(cc->cpu);
         auto& skImpl = std::any_cast<const lbcrypto::PrivateKey<lbcrypto::DCRTPoly>&>(keys.secretKey->pimpl);
         const int slots = static_cast<int>(cc->GetRingDimension() / 2);
@@ -1725,7 +1744,14 @@ struct CKKSContext {
         spt->GetElement<lbcrypto::DCRTPoly>() = skImpl->GetPrivateElement();
         FIDESlib::CKKS::RawPlainText raw = FIDESlib::CKKS::GetRawPlainText(occ, spt);
         auto& fctx = std::any_cast<FIDESlib::CKKS::Context&>(cc->gpu);
-        auto gs = std::make_shared<FIDESlib::CKKS::Plaintext>(fctx, raw);
+        auto gs = std::make_shared<FIDESlib::CKKS::Plaintext>(fctx, raw);   // uploaded synchronously
+        // the host copies of the key (raw.sub_0 and the OpenFHE plaintext raw.originalPlainText
+        // shares with spt) are zeroed before they are freed; the device copy is the probe's to zero
+        for (auto& limb : raw.sub_0) wipe_u64(limb);
+        raw.sub_0.clear();
+        raw.originalPlainText.reset();
+        spt->GetElement<lbcrypto::DCRTPoly>().SetValuesToZero();
+        spt.reset();
         mag_gpu = std::make_unique<gpu_encode::GpuMagProbe>(fctx, slots, gs);
     }
     bool mag_gpu_probe(const Ctx& ct, std::size_t node_idx, long ordinal) {
@@ -1869,10 +1895,13 @@ struct CKKSContext {
                 try {
                     res = mag_gpu->fetch();
                 } catch (const std::exception& e) {
-                    std::fprintf(stderr, "[mag_gpu] fetch failed: %s\n", e.what());
-                    res.clear();
+                    throw std::runtime_error("[mag_gpu] fetch failed, the capture has no magnitudes for " +
+                                             std::to_string(mag_gpu_pending.size()) + " node(s): " + e.what());
                 }
-                for (std::size_t i = 0; i < mag_gpu_pending.size() && i < res.size(); ++i) {
+                if (res.size() != mag_gpu_pending.size())
+                    throw std::runtime_error("[mag_gpu] " + std::to_string(res.size()) + " result(s) for " +
+                                             std::to_string(mag_gpu_pending.size()) + " pending node(s)");
+                for (std::size_t i = 0; i < mag_gpu_pending.size(); ++i) {
                     MagStats m;
                     m.max_abs = res[i].max_abs;
                     m.has_stats = true; m.mean = res[i].mean; m.max_dev = res[i].max_dev;
