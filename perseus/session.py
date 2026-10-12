@@ -60,7 +60,10 @@ class Session:
             if hasattr(_core, "drop_gpu_encoder"):
                 # the device encoder's tiles, metadata plaintexts, streams and plans: released
                 # while `inf` is alive (at interpreter exit they would outlive the context)
-                _core.drop_gpu_encoder(inf)
+                try:
+                    _core.drop_gpu_encoder(inf)
+                except TypeError:             # not a runtime Inference (a test double)
+                    pass
             if hasattr(_core, "close_session"):
                 try:
                     _core.close_session(inf)      # weights, caches, rotation keys
