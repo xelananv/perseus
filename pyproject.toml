@@ -102,7 +102,7 @@ perseus = [
 default-groups = ["dev"]
 
 [tool.pytest.ini_options]
-testpaths = ["tests"]
+testpaths = ["tests", "examples/fhe_ssm_from_primitives/tests"]
 pythonpath = ["."]
 addopts = "-ra -m 'not gpu'"
 markers = [

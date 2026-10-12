@@ -12,29 +12,6 @@ endforeach()
 # test_rotation_ext_moddown reaches the FIDESlib-native GPU API (Ciphertext::rotate(idx, moddown),
 # GenCryptoContextGPU, ...) which is NOT part of the installed OpenFHE-compat headers, so it needs
 # the FIDESlib source tree on its include path. Scoped to this one target.
-# Device-encoder groundwork: a plain executable (no gtest) probing FIDESlib's limb order and the
-# device-plaintext wrap on the library itself (examples/fhe_ssm_from_primitives's GPU encoder).
-add_executable(gpu_encode_layout_probe gpu_encode_layout_probe.cu)
-target_link_libraries(gpu_encode_layout_probe PRIVATE cachemir_lib)
-target_include_directories(gpu_encode_layout_probe PRIVATE
-    ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src)
-set_target_properties(gpu_encode_layout_probe PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-target_compile_options(gpu_encode_layout_probe PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp -lineinfo -g>)   # host line info for the probe's backtraces
-
-# The encoder's parity probe (COEFF integers, EVAL words, a product) — same shape as the layout probe.
-add_executable(gpu_encode_probe gpu_encode_probe.cu)
-target_link_libraries(gpu_encode_probe PRIVATE cachemir_lib)
-target_include_directories(gpu_encode_probe PRIVATE
-    ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src)
-set_target_properties(gpu_encode_probe PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-target_compile_options(gpu_encode_probe PRIVATE
-    $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp -lineinfo -g>)
-
 if(TARGET test_rotation_ext_moddown)
     target_include_directories(test_rotation_ext_moddown PRIVATE
         ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src)
@@ -47,12 +24,28 @@ if(TARGET test_ks_digit_intt)
         ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src)
 endif()
 
-# The device magnitude probe of the graph capture against the host path's numbers (gpu_mag_probe.h).
-add_executable(gpu_mag_probe_check gpu_mag_probe_check.cu)
-target_link_libraries(gpu_mag_probe_check PRIVATE cachemir_lib)
-target_include_directories(gpu_mag_probe_check PRIVATE
-    ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src)
-set_target_properties(gpu_mag_probe_check PROPERTIES
-    CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
-target_compile_options(gpu_mag_probe_check PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-g>)
+# The device encoder's probes (examples/fhe_ssm_from_primitives): plain executables (no gtest) that
+# exercise the library itself and exit non-zero on a parity failure, registered as ctest tests with
+# the label `gpu` (they need a device: `ctest -L gpu`).
+#   gpu_encode_layout_probe  FIDESlib's limb order and the device-plaintext wrap
+#   gpu_encode_probe         COEFF integers, EVAL words and a product against the CPU encode
+#   gpu_mag_probe_check      the capture's device magnitude probe against the host path
+function(add_dev_probe name)
+    add_executable(${name} ${name}.cu)
+    target_link_libraries(${name} PRIVATE cachemir_lib)
+    target_include_directories(${name} PRIVATE
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src)
+    set_target_properties(${name} PROPERTIES
+        CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
+    target_compile_options(${name} PRIVATE
+        $<$<COMPILE_LANGUAGE:CUDA>:-Xcompiler=-fopenmp -lineinfo -g>)   # host line info for the probes' backtraces
+    add_test(NAME ${name} COMMAND ${name})
+    set_tests_properties(${name} PROPERTIES LABELS "gpu")
+endfunction()
+add_dev_probe(gpu_encode_layout_probe)
+add_dev_probe(gpu_encode_probe)
+add_dev_probe(gpu_mag_probe_check)
+if(CACHEMIR_MAG_PROBE_DEBUG)
+    target_compile_definitions(gpu_mag_probe_check PRIVATE GPU_MAG_PROBE_DEBUG=1)   # its `diag` mode
+endif()

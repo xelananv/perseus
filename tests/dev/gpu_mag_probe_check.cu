@@ -100,6 +100,7 @@ int main(int argc, char** argv) {
         return cc->EvalAdd(c, 0.0);   // onto the device, value unchanged
     };
 
+#ifdef GPU_MAG_PROBE_DEBUG
     if (argc > 4 && std::string(argv[4]) == "diag") {
         // Where does the decryption go wrong? Host: the decrypted polynomial's coefficients (OpenFHE
         // Decrypt, element in COEFFICIENT format, towers 0/1 -> integer by CRT). Device: the same from
@@ -208,6 +209,12 @@ int main(int argc, char** argv) {
                     cto->GetElements()[0].GetFormat() == Format::EVALUATION, ceq_nat, ceq_rev, ring, (int)c->loaded);
         return 0;
     }
+#else
+    if (argc > 4 && std::string(argv[4]) == "diag") {
+        std::fprintf(stderr, "diag mode needs a build with CACHEMIR_MAG_PROBE_DEBUG=ON (the probe's debug accessors)\n");
+        return 2;
+    }
+#endif
     struct Case {
         std::string name;
         Ctx ct;

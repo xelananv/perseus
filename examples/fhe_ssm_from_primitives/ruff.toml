@@ -1,5 +1,5 @@
 # The repository's ruff settings plus the stricter families this example is held to.
-# Run ./lint.sh (it fixes what ruff can fix, formats, then fails on anything left).
+# Run ./lint.py (it fixes what ruff can fix, formats, then fails on anything left).
 extend = "../../pyproject.toml"
 line-length = 100
 

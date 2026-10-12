@@ -106,7 +106,7 @@ int main(int argc, char** argv) {
     for (auto& v : y) v = U(rng);
 
     gpu_encode::GpuEncoder enc(fctx, n, d);
-    gpu_encode::TileHandle tile = enc.register_tile(W, d);
+    const gpu_encode::TileId tile = enc.register_tile(W, d);
     const double sf = cc->ScalingFactorReal(L);
     gpu_encode::GroupJob job;
     job.tiles.assign(B, tile);
@@ -167,7 +167,8 @@ int main(int argc, char** argv) {
     }
     const double rel_inf = max_int ? (double)max_diff / (double)max_int : 0.0;
     const size_t diff10plus = [&] { size_t c = 0; for (auto& [v, cnt] : hist) if (v >= 10) c += cnt; return c; }();
-    std::printf("{\"probe\":\"coeff\",\"limbs_cpu\":%zu,\"limbs_dev\":%zu,\"coefficients\":%zu,\"exact\":%zu,\"diff1\":%zu,"
+    std::printf("{\"probe\":\"coeff\",\"limbs_cpu\":%zu,\"limbs_dev\":%zu,\"coefficients\":%zu,"
+                "\"exact\":%zu,\"diff1\":%zu,"
                 "\"diff2_9\":%zu,\"diff10plus\":%zu,\"max_abs_diff_units\":%lld,\"max_abs_int\":%lld,\"rel_inf\":%.3e,"
                 "\"max_rel_per_coeff\":%.3e,\"residues_equal\":%zu,\"of\":%zu}\n",
                 limbs_cpu, limbs_dev, total, hist[0], hist[1],
@@ -205,7 +206,8 @@ int main(int argc, char** argv) {
                 ++tot;
             }
     }
-    std::printf("{\"probe\":\"eval\",\"words_equal_self\":%zu,\"words_equal_cpu_ref\":%zu,\"of\":%zu}\n", eq_self, eq_ref, tot);
+    std::printf("{\"probe\":\"eval\",\"words_equal_self\":%zu,\"words_equal_cpu_ref\":%zu,\"of\":%zu}\n",
+                eq_self, eq_ref, tot);
     std::fflush(stdout);
 
     // 3. product through the facade, wrapped as the bridge wraps it
@@ -228,11 +230,13 @@ int main(int argc, char** argv) {
         }
         cc->EvictDevicePlaintext(handle);
     }
-    std::printf("{\"probe\":\"product\",\"max_abs_dev_minus_ref\":%.3e,\"rel_dev_minus_ref\":%.3e,\"max_abs_dev_minus_plain\":%.3e,"
+    std::printf("{\"probe\":\"product\",\"max_abs_dev_minus_ref\":%.3e,\"rel_dev_minus_ref\":%.3e,"
+                "\"max_abs_dev_minus_plain\":%.3e,"
                 "\"max_abs_plain\":%.3e}\n",
                 max_dev_ref, max_plain > 0 ? max_dev_ref / max_plain : 0.0, max_dev_plain, max_plain);
     const auto& st = enc.stats();
-    std::printf("{\"probe\":\"stats\",\"plaintexts\":%lu,\"batches\":%lu,\"k1_ms\":%.3f,\"fft_ms\":%.3f,\"k2_ms\":%.3f,\"ntt_ms\":%.3f}\n",
+    std::printf("{\"probe\":\"stats\",\"plaintexts\":%lu,\"batches\":%lu,\"k1_ms\":%.3f,\"fft_ms\":%.3f,"
+                "\"k2_ms\":%.3f,\"ntt_ms\":%.3f}\n",
                 (unsigned long)st.plaintexts, (unsigned long)st.batches, st.k1_ms, st.fft_ms, st.k2_ms, st.ntt_ms);
     // gates: no integer off by 10 or more units, infinity-norm relative error <= 1e-13, the device's EVAL
     // words identical to the library's NTT of its own coefficients, the product within 1e-9 of the
