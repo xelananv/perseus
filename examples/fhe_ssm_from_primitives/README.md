@@ -75,6 +75,9 @@ refreshes plus the hints and the carry; a plan from Perseus's planner places the
 
 ## Run on a GPU: eager, capture, plan, planned
 
+`RUNS.md` has the same chain from a fresh clone to a 148-tick planned run, with the inputs, the
+expected durations and what each run answers.
+
 Needs a GPU of compute capability 8.0 or newer (FIDESlib32bits's `CKKS/Discard.cu` uses a PTX
 instruction older GPUs lack) and, per Perseus's README, 48 GB or more; the build is
 `colab_build.py` on any Ubuntu machine with root (it is not Colab-specific: `--logs DIR`).
