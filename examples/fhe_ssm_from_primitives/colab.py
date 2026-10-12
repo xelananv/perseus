@@ -105,9 +105,9 @@ def machine() -> dict:
 
 def fetch_model(dest, *, download: Callable[..., str] | None = None) -> dict[str, Path]:
     """The checkpoint, Newton seeds and config from the Hugging Face model repository into
-    ``dest``. The weights must match their recorded hash (the published run's); a seeds or
-    config file that differs from its recorded hash is reported, since the fake check stays
-    valid for any consistent set. ``download(repo, filename, local_dir)`` defaults to
+    ``dest``, at the pinned revision. Every file must match its recorded hash (the published
+    run's); a mismatch raises, naming the file and the revision.
+    ``download(repo, filename, local_dir=..., revision=...)`` defaults to
     ``huggingface_hub.hf_hub_download``."""
     if download is None:
         from huggingface_hub import hf_hub_download
