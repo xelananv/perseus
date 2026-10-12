@@ -44,6 +44,9 @@ using perseus_stamp::kNativeIntBits;
 //                  ParsedConfigs, BootstrapPlan arguments: needs 3)
 //   8 make_context, _debug, stamps, build_info (this file)
 //   9 bind_session RunConfig / RunResult / GtSteps / DecodeSession — the app layer, last
+//  10 bind_bts     the FIDESlib bootstrap stages (independent of the rest)
+//  11 bind_encode  the device encoder: DevicePlaintext, register_tile / encode_group_gpu /
+//                  mult_ptx / evict_ptx / drop_gpu_encoder (takes Inference and PackedCtx: needs 2)
 //
 // A wrong order is an import-time failure, never a silent drift; the import is the test.
 void bind_ops(py::module_& m);          // 2

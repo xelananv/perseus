@@ -60,7 +60,7 @@ long mismatches(const DeviceCt& a, const DeviceCt& b) {
 
 }  // namespace
 
-void bind_bts(py::module_& root) {
+static void bind_bts_stages(py::module_& root) {
     auto m = root.def_submodule("bts", "The GPU bootstrap as stages (FIDESlib BootstrapStages.cuh).");
 
     py::class_<DeviceCt>(m, "DeviceCt")
@@ -200,3 +200,6 @@ void bind_bts(py::module_& root) {
           "Install fn(ct, slots, prescaled) as the runtime's bootstrap (None restores FIDESlib's own). fn runs with "
           "the GIL held; the DeviceCt it receives is valid only during the call.");
 }
+
+// The module-level entry (module.cu step 10): the layout convention names the parameter m.
+void bind_bts(py::module_& m) { bind_bts_stages(m); }
