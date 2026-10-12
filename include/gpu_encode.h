@@ -130,7 +130,7 @@ class GpuEncoder {
     DevicePtr<uint16_t> invperm_;          // device, n
     DevicePtr<cufftDoubleComplex> twist_;  // device, n
     DevicePtr<cufftDoubleComplex> in_[2];  // device, kMaxBatch * n each
-    DevicePtr<void> work_[2];              // cuFFT work areas, one per parity
+    DevicePtr<unsigned char> work_[2];     // cuFFT work areas (bytes), one per parity
     std::size_t work_bytes_[2] = {0, 0};
     std::vector<Tile> tiles_;
     uint32_t generation_ = 1;

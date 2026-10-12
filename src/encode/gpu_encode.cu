@@ -171,7 +171,7 @@ cufftHandle GpuEncoder::plan_for(int batch, int parity) {
         // the other batch of this parity (two batches ago) may still be in flight on its work area
         check(cudaStreamSynchronize(s_enc_[parity].get()), "sync before work-area growth");
         work_[parity].reset();
-        work_[parity] = device_alloc<void>(ws, kWho, "cudaMalloc cufft work area");
+        work_[parity] = device_alloc<unsigned char>(ws, kWho, "cudaMalloc cufft work area");
         work_bytes_[parity] = ws;
         for (auto& r : plans_)
             if (r.parity == parity) check_fft(cufftSetWorkArea(r.plan.get(), work_[parity].get()), "cufftSetWorkArea");
