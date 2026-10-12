@@ -3,7 +3,8 @@
 
     eager      refreshes fire where the levels run out (reactive), plus the port's hints
     capture    as eager, and every stage's graph is recorded on tick ``--capture-tick`` (default
-               1: tick 0's carried state is zero) for the planner (plan.py)
+               1: tick 0's carried state is zero) for the planner (plan.py); the magnitudes are
+               probed on the device (FHE_MAG_GPU=0 selects the host decrypt instead)
     planned    every stage runs under its plan (``block_<b>_placement.json``, b = 0..24)
 
     source scripts/local_env.sh      # the n32 chain's defaults
@@ -117,6 +118,9 @@ def run(a) -> dict:
         # before the session opens, as Perseus's own runner (gpt2_from_primitives/run_decode.py)
         os.environ["FHE_GRAPH_DIR"] = str(a.graph_dir)
         os.environ["FHE_GRAPH_CAPTURE_TOKEN"] = str(a.capture_tick)
+        # the capture's magnitudes come from the device probe unless FHE_MAG_GPU=0 asks for the
+        # host decrypt (the same five statistics; the probe is ~40x faster on the capture tick)
+        os.environ.setdefault("FHE_MAG_GPU", "1")
     session, core = fake_session(params, a.payload) if a.fake else gpu_session(params)
     out = Path(a.out)
     report: dict = {"mode": a.mode, "fake": a.fake, "blocks": params.n_layers, "ticks": []}
