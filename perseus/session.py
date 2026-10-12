@@ -57,14 +57,23 @@ class Session:
             return
         try:
             from . import _core
-            if hasattr(_core, "drop_gpu_encoder"):
-                # the device encoder's tiles, metadata plaintexts, streams and plans: released
-                # while `inf` is alive (at interpreter exit they would outlive the context)
-                try:
-                    _core.drop_gpu_encoder(inf)
-                except TypeError:             # not a runtime Inference (a test double)
-                    pass
-            if hasattr(_core, "close_session"):
+        except Exception:      # no extension in this process
+            _core = None
+        if _core is not None and hasattr(_core, "drop_gpu_encoder"):
+            # the device encoder's tiles, metadata plaintexts, streams and plans: released
+            # while `inf` is alive (at interpreter exit they would outlive the context). Its own
+            # try: a failure here must not skip the release of weights, caches and keys below.
+            try:
+                _core.drop_gpu_encoder(inf)
+            except TypeError:             # not a runtime Inference (a test double)
+                pass
+            except Exception as e:        # noqa: BLE001 (reported, then the session closes anyway)
+                import warnings
+                warnings.warn(f"perseus.Session.close: drop_gpu_encoder failed: {e}", RuntimeWarning, stacklevel=2)
+        try:
+            if _core is None:
+                inf.clear_enc_cache()
+            elif hasattr(_core, "close_session"):
                 try:
                     _core.close_session(inf)      # weights, caches, rotation keys
                 except TypeError:                 # not a runtime Inference (a test double)

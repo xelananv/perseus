@@ -118,11 +118,19 @@ def main(argv=None):
                     pts = ops.encode_group(ids, baby, g, s, x, names)
                     for pt in pts:
                         ops.evict_ptx(pt)
-                ops.decrypt_slots(
-                    ops.mult_ptx(x, pts[-1])
-                )  # the fence (the evicted polys are gone;
-                # this product is on a fresh group of the same shape)
+                # the fence: a product on a fresh group of the same shape waits for every encode
+                fence = ops.encode_group(ids, baby, g, s, x, names)
+                ops.decrypt_slots(ops.mult_ptx(x, fence[-1]))
+                for pt in fence:
+                    ops.evict_ptx(pt)
                 wall = time.time() - t1
+                # an evicted plaintext is refused, never multiplied as zeros
+                try:
+                    ops.mult_ptx(x, pts[-1])
+                except (ValueError, RuntimeError):
+                    pass
+                else:
+                    raise SystemExit("mult_ptx accepted an evicted plaintext")
                 st1 = dict(_core.gpu_encode_stats(inf))
                 B = len(ids)
                 row = {

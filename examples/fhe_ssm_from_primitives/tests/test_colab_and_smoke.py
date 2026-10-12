@@ -29,8 +29,9 @@ def write_checkpoint(dirpath, seed=21):
 def local_hub(src):
     """hf_hub_download's signature, served from a local directory."""
 
-    def download(repo, filename, local_dir):
+    def download(repo, filename, local_dir, revision=None):
         assert repo == colab.HF_REPO
+        assert revision == colab.HF_REVISION
         out = shutil.copy(src / filename, local_dir)
         return str(out)
 
@@ -54,13 +55,15 @@ def test_fetch_checks_the_weights_hash(tmp_path, monkeypatch):
         colab.fetch_model(tmp_path / "dest2", download=local_hub(src))
 
 
-def test_fetch_reports_but_accepts_other_seeds(tmp_path, monkeypatch, capsys):
+def test_fetch_refuses_other_seeds(tmp_path, monkeypatch):
+    """Seeds and config are refused on a hash mismatch like the weights: the three files describe
+    one checkpoint, and a silent mismatch would bind a run to the wrong model."""
     src = write_checkpoint(tmp_path / "hub")
     files = {k: (n, colab.sha256(src / n)) for k, (n, _h) in colab.FILES.items()}
     files["seeds"] = (files["seeds"][0], "0" * 64)
     monkeypatch.setattr(colab, "FILES", files)
-    colab.fetch_model(tmp_path / "dest", download=local_hub(src))
-    assert "differs from the recorded" in capsys.readouterr().out
+    with pytest.raises(RuntimeError, match="seeds"):
+        colab.fetch_model(tmp_path / "dest", download=local_hub(src))
 
 
 def test_recorded_hashes_are_well_formed():

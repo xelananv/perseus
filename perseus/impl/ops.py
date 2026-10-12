@@ -243,16 +243,18 @@ class FheOps:
     # The device encoder (gpu_encode_bridge.h): weight tiles resident on the device, a giant
     # group's diagonal plaintexts made there at the level a product with `ref` needs, products
     # through the same fhe->mult the CPU path records. Absent on the fake and on cores without it.
+    # On a device session it is the default route (measured bit-identical to the CPU encode and
+    # 7-13x faster per block); FHE_GPU_ENCODE=0 selects the CPU route in the same binary.
     @property
     def gpu_encode(self) -> bool:
-        # FHE_GPU_ENCODE=0 forces the CPU route (the same binary: a like-for-like timing control)
         if os.environ.get("FHE_GPU_ENCODE", "1") in ("", "0"):
             return False
         f = getattr(self.core, "gpu_encode_available", None)
         return bool(f and f(self.inf))
 
-    def register_tile(self, name, W):
-        return self.core.register_tile(self.inf, name, np.ascontiguousarray(W, dtype=np.float64))
+    def register_tile(self, W):
+        """A d x d folded tile resident on the device; returns its id (refused after release_tiles)."""
+        return self.core.register_tile(self.inf, np.ascontiguousarray(W, dtype=np.float64))
 
     def encode_group(self, tile_ids, baby, g, s, ref, names):
         return self.core.encode_group_gpu(self.inf, list(tile_ids), list(baby), int(g), int(s), ref, list(names))

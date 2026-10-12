@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import dataclasses
 import math
+import warnings
 
 import numpy as np
 
@@ -88,23 +89,24 @@ class _Diagonal:
         self.vals, self.t, self.shift = vals, t, shift
 
     def __array__(self, dtype=None, copy=None):
+        if copy is False:
+            raise ValueError("a _Diagonal is materialized on read; a no-copy view is not available")
         v = np.roll(np.repeat(self.vals, self.t), self.shift)
         return v if dtype is None else v.astype(dtype)
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True, eq=False)
 class EncodedTile:
     """A d x d tile as its ``s * G`` diagonals, mirroring diagonal::encode_weight_matrix for
     d_in = d_out: diagonal (g, b) gives output channel j the weight W[(j + g*s + b) mod d, j],
     repeated over the t lanes of channel j and shifted by g*s*t. ``rows`` holds the d values
-    of each diagonal, (G, s, d)."""
+    of each diagonal, (G, s, d). Compared and hashed by identity (``rows`` is an array)."""
 
     N: int
     rows: np.ndarray
     name: str | None = None
-    dev: int | None = (
-        None  # the tile's id on the device encoder (apply_tiles' device route), or None
-    )
+    # the tile's id on the device encoder (apply_tiles' device route), or None
+    dev: int | None = None
 
     @classmethod
     def encode(cls, W, N: int, name: str | None = None, dev_ops=None):
@@ -117,7 +119,7 @@ class EncodedTile:
         k = np.arange(G)[:, None, None] * s + np.arange(s)[None, :, None]
         # dev_ops: an ops with a device encoder -> the d x d tile goes resident there once; its
         # diagonals are then made on the device at each use (rows stay for the mirror and the fake)
-        dev = dev_ops.register_tile(name or "tile", W) if dev_ops is not None else None
+        dev = dev_ops.register_tile(W) if dev_ops is not None else None
         return cls(N, W[(j + k) % d, j], name, dev)
 
     @property
@@ -161,6 +163,15 @@ def babies(ops, x, t: int, s: int):
     return out
 
 
+def _mixed_levels(ops, rxs) -> bool:
+    """True when the prepared inputs do not all sit at one level (ops without ``level``: False)."""
+    level = getattr(ops, "level", None)
+    if level is None:
+        return False
+    first = level(rxs[0][0])
+    return any(level(xb) != first for rx in rxs for xb in rx)
+
+
 def _giant_group(ops, rx, w: EncodedTile, g: int):
     """``sum_b rx[b] * diagonal(g, b)``: giant group ``g`` before its rotation."""
     acc = None
@@ -183,21 +194,29 @@ def apply_tiles(ops, rxs, tiles):
     if any(len(rx) != s for rx in rxs):
         raise ValueError(f"every prepared input needs {s} baby rotations")
     device = all(w.dev is not None for w in tiles) and getattr(ops, "gpu_encode", False)
+    if device and _mixed_levels(ops, rxs):
+        # one device encode serves the whole group at one level; inputs at different levels
+        # take the CPU route, which encodes each product at its own
+        warnings.warn("apply_tiles: prepared inputs at different levels; CPU route for this group", stacklevel=2)
+        device = False
     y = None
     for g in range(G):
         acc = None
         if device:
             # one batched device encode for every (tile, baby) of this giant index, then the
-            # products in exactly the CPU route's order (the recorded op stream is the same)
+            # products and additions in exactly the CPU route's order (each tile's group summed,
+            # then the tiles' partials), so the recorded op stream is the same on both routes
             ids = [w.dev for w in tiles for _ in range(s)]
             baby = [b for _ in tiles for b in range(s)]
-            names = [w.key(g, b) or f"tile.{g}.{b}" for w in tiles for b in range(s)]
+            names = [w.key(g, b) or f"tile{w.dev}.{g}.{b}" for w in tiles for b in range(s)]
             pts = ops.encode_group(ids, baby, g, s, rxs[0][0], names)
             try:
                 for i, rx in enumerate(rxs):
+                    part = None
                     for b, xb in enumerate(rx):
                         p = ops.mult_ptx(xb, pts[i * s + b])
-                        acc = p if acc is None else ops.add(acc, p)
+                        part = p if part is None else ops.add(part, p)
+                    acc = part if acc is None else ops.add(acc, part)
             finally:
                 for pt in pts:
                     ops.evict_ptx(pt)

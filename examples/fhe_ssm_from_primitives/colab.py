@@ -26,6 +26,8 @@ from pathlib import Path
 import numpy as np
 
 HF_REPO = "xelananv/fhe-ssm-pbd430a"
+# the repository commit the hashes below were taken from; a later commit must be re-pinned here
+HF_REVISION = "1ebf0ef3259fdd570c6e582b03dc2e64e1891c2c"
 #: file name and sha256: the weights' hash is the one the published run recorded, the seeds' and
 #: the config's those of the files the published run read (fhe-ssm repository, ml-eval/artifacts/)
 FILES = {
@@ -112,12 +114,10 @@ def fetch_model(dest, *, download=None) -> dict[str, Path]:
     dest.mkdir(parents=True, exist_ok=True)
     paths = {}
     for key, (name, want) in FILES.items():
-        path = Path(download(HF_REPO, name, local_dir=str(dest)))
+        path = Path(download(HF_REPO, name, local_dir=str(dest), revision=HF_REVISION))
         got = sha256(path)
         if got != want:
-            if key == "weights":
-                raise RuntimeError(f"{name}: sha256 {got}, expected {want}")
-            print(f"note: {name} sha256 {got} differs from the recorded {want}")
+            raise RuntimeError(f"{name}: sha256 {got}, expected {want} (revision {HF_REVISION})")
         paths[key] = path
     return paths
 
