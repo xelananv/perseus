@@ -8,6 +8,7 @@
 #include <CKKS/Plaintext.cuh>
 #include <CKKS/RNSPoly.cuh>
 
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
@@ -20,13 +21,13 @@ namespace gpu_encode {
 namespace {
 
 constexpr int kThreads = 256;
+constexpr const char* kWho = "gpu_encode";
+// llround is defined up to 2^63 - 1; the coefficients are bounded by sf * max|W| (the twist carries
+// the 1/n of the transform, so |c_k| <= max|Y| = max|W|), checked per batch against this margin.
+constexpr double kCoeffBound = 9.0e18;
 
-void check(cudaError_t e, const char* what) {
-    if (e != cudaSuccess) throw std::runtime_error(std::string("gpu_encode: ") + what + ": " + cudaGetErrorString(e));
-}
-void check_fft(cufftResult r, const char* what) {
-    if (r != CUFFT_SUCCESS) throw std::runtime_error(std::string("gpu_encode: ") + what + ": cufft error " + std::to_string(int(r)));
-}
+void check(cudaError_t e, const char* what) { cuda_check(e, kWho, what); }
+void check_fft(cufftResult r, const char* what) { cufft_check(r, kWho, what); }
 
 // Kernel parameter blocks (by value, in the constant bank; both under the 4 KB parameter limit).
 struct K1Params {
@@ -45,18 +46,18 @@ struct K2Params {
 // (g, baby[b]), i.e. W_b[(i + g*s + baby[b]) mod d][i]. Writes are coalesced in v; the reads gather
 // 8-byte values from one 8 MiB tile (read-only path).
 __global__ void k_gather_expand_permute(K1Params p, int g, int s, int d, int log2t, int n,
-                                        const uint16_t* __restrict__ invperm,   // [n]
-                                        cufftDoubleComplex* __restrict__ in)    // [B][n]
+                                        const uint16_t* __restrict__ invperm,  // [n]
+                                        cufftDoubleComplex* __restrict__ in)   // [B][n]
 {
     const int v = blockIdx.x * blockDim.x + threadIdx.x;
     const int b = blockIdx.y;
     if (v >= n) return;
     const int j = invperm[v];
-    const int shift = (g * s) << log2t;      // g*s*t < d*t = n
+    const int shift = (g * s) << log2t;  // g*s*t < d*t = n
     int m = j - shift;
     if (m < 0) m += n;
-    const int i = m >> log2t;                // channel of slot j
-    int row = i + g * s + p.baby[b];         // < 2d: one conditional subtract is the mod
+    const int i = m >> log2t;         // channel of slot j
+    int row = i + g * s + p.baby[b];  // < 2d: one conditional subtract is the mod
     if (row >= d) row -= d;
     const double* __restrict__ W = p.tiles[b];
     in[static_cast<size_t>(b) * n + v] = make_cuDoubleComplex(__ldg(W + static_cast<size_t>(row) * d + i), 0.0);
@@ -76,7 +77,7 @@ __device__ __forceinline__ uint32_t barrett64(uint64_t a, uint64_t q, uint64_t m
 }
 __device__ __forceinline__ uint32_t red_signed(long long x, uint64_t q, uint64_t mu) {
     if (x >= 0) return barrett64(static_cast<uint64_t>(x), q, mu);
-    const uint32_t m = barrett64(static_cast<uint64_t>(-x), q, mu);
+    const uint32_t m = barrett64(static_cast<uint64_t>(-x), q, mu);  // |x| < 2^63: the negation is defined
     return m ? static_cast<uint32_t>(q) - m : 0u;
 }
 
@@ -110,11 +111,6 @@ bool env_on(const char* name) {
 }  // namespace
 
 // ---- construction: tables, buffers, streams, events --------------------------------------------
-// ABI rule (Context.cuh:164, fideslib_wrapper.h:2135): FIDESlib is built with -DNCCL and its consumers are
-// not; Precomputations then carries one more std::map, so every ContextData field after `precom` (N,
-// logN, L, batch, prime, GPUid, ...) sits at a different offset in this translation unit than in the
-// library's. Measured here as N=0, logN=0, prime.size()=garbage. Only `param` (declared before the
-// shift) and the limbs' own plain fields are read; the device is the current one (single-GPU sessions).
 GpuEncoder::GpuEncoder(FIDESlib::CKKS::Context& ctx, int n, int d) : ctx_(ctx), cc_(*ctx), n_(n), d_(d) {
     if (n <= 0 || d <= 0 || n % d) throw std::invalid_argument("gpu_encode: n must be a multiple of d");
     if (n > 65536) throw std::invalid_argument("gpu_encode: n > 65536 (invperm is uint16)");
@@ -146,82 +142,82 @@ GpuEncoder::GpuEncoder(FIDESlib::CKKS::Context& ctx, int n, int d) : ctx_(ctx), 
         tw[k].x = static_cast<double>(std::cos(ang) / n);
         tw[k].y = static_cast<double>(std::sin(ang) / n);
     }
-    check(cudaMalloc(&invperm_, sizeof(uint16_t) * n), "cudaMalloc invperm");
-    check(cudaMemcpy(invperm_, inv.data(), sizeof(uint16_t) * n, cudaMemcpyHostToDevice), "upload invperm");
-    check(cudaMalloc(&twist_, sizeof(cufftDoubleComplex) * n), "cudaMalloc twist");
-    check(cudaMemcpy(twist_, tw.data(), sizeof(cufftDoubleComplex) * n, cudaMemcpyHostToDevice), "upload twist");
+    invperm_ = device_alloc<uint16_t>(n, kWho, "cudaMalloc invperm");
+    check(cudaMemcpy(invperm_.get(), inv.data(), sizeof(uint16_t) * n, cudaMemcpyHostToDevice), "upload invperm");
+    twist_ = device_alloc<cufftDoubleComplex>(n, kWho, "cudaMalloc twist");
+    check(cudaMemcpy(twist_.get(), tw.data(), sizeof(cufftDoubleComplex) * n, cudaMemcpyHostToDevice), "upload twist");
     for (int i = 0; i < 2; ++i) {
-        check(cudaMalloc(&in_[i], sizeof(cufftDoubleComplex) * static_cast<size_t>(kMaxBatch) * n), "cudaMalloc in");
-        check(cudaStreamCreateWithFlags(&s_enc_[i], cudaStreamNonBlocking), "cudaStreamCreate");
-        check(cudaEventCreateWithFlags(&alloc_done_[i], cudaEventDisableTiming), "cudaEventCreate");
-        check(cudaEventCreateWithFlags(&enc_done_[i], cudaEventDisableTiming), "cudaEventCreate");
-        check(cudaEventCreateWithFlags(&ready_[i], cudaEventDisableTiming), "cudaEventCreate");
-        for (auto& e : tm_[i]) check(cudaEventCreate(&e), "cudaEventCreate (timing)");
+        in_[i] = device_alloc<cufftDoubleComplex>(static_cast<size_t>(kMaxBatch) * n, kWho, "cudaMalloc in");
+        s_enc_[i] = Stream(cudaStreamNonBlocking, kWho);
+        alloc_done_[i] = Event(cudaEventDisableTiming, kWho);
+        enc_done_[i] = Event(cudaEventDisableTiming, kWho);
+        ready_[i] = Event(cudaEventDisableTiming, kWho);
+        for (auto& e : tm_[i]) e = Event(cudaEventDefault, kWho);
     }
 }
 
 cufftHandle GpuEncoder::plan_for(int batch, int parity) {
     for (auto& r : plans_)
-        if (r.batch == batch && r.parity == parity) return r.h;
-    cufftHandle h;
+        if (r.batch == batch && r.parity == parity) return r.plan.get();
+    FftPlan plan = FftPlan::create(kWho);
     int nn = n_;
     size_t ws = 0;
-    check_fft(cufftCreate(&h), "cufftCreate");
-    check_fft(cufftSetAutoAllocation(h, 0), "cufftSetAutoAllocation");
+    check_fft(cufftSetAutoAllocation(plan.get(), 0), "cufftSetAutoAllocation");
     // 1-D, contiguous input and output, `batch` transforms of length n, double complex, in place
-    check_fft(cufftMakePlanMany(h, 1, &nn, /*inembed*/ nullptr, /*istride*/ 1, /*idist*/ nn,
+    check_fft(cufftMakePlanMany(plan.get(), 1, &nn, /*inembed*/ nullptr, /*istride*/ 1, /*idist*/ nn,
                                 /*onembed*/ nullptr, /*ostride*/ 1, /*odist*/ nn, CUFFT_Z2Z, batch, &ws),
               "cufftMakePlanMany");
     if (ws > work_bytes_[parity]) {
         // the other batch of this parity (two batches ago) may still be in flight on its work area
-        check(cudaStreamSynchronize(s_enc_[parity]), "sync before work-area growth");
-        if (work_[parity]) cudaFree(work_[parity]);
-        check(cudaMalloc(&work_[parity], ws), "cudaMalloc cufft work area");
+        check(cudaStreamSynchronize(s_enc_[parity].get()), "sync before work-area growth");
+        work_[parity].reset();
+        work_[parity] = device_alloc<void>(ws, kWho, "cudaMalloc cufft work area");
         work_bytes_[parity] = ws;
         for (auto& r : plans_)
-            if (r.parity == parity) check_fft(cufftSetWorkArea(r.h, work_[parity]), "cufftSetWorkArea");
+            if (r.parity == parity) check_fft(cufftSetWorkArea(r.plan.get(), work_[parity].get()), "cufftSetWorkArea");
     }
-    if (work_bytes_[parity]) check_fft(cufftSetWorkArea(h, work_[parity]), "cufftSetWorkArea");
-    check_fft(cufftSetStream(h, s_enc_[parity]), "cufftSetStream");
-    plans_.push_back({batch, parity, h});
-    return h;
+    if (work_bytes_[parity]) check_fft(cufftSetWorkArea(plan.get(), work_[parity].get()), "cufftSetWorkArea");
+    check_fft(cufftSetStream(plan.get(), s_enc_[parity].get()), "cufftSetStream");
+    plans_.push_back({batch, parity, std::move(plan)});
+    return plans_.back().plan.get();
 }
 
 GpuEncoder::~GpuEncoder() {
     for (int i = 0; i < 2; ++i)
-        if (s_enc_[i]) cudaStreamSynchronize(s_enc_[i]);   // nothing in flight reads the buffers freed below
-    for (auto& r : plans_) cufftDestroy(r.h);
-    for (int i = 0; i < 2; ++i) {
-        if (in_[i]) cudaFree(in_[i]);
-        if (work_[i]) cudaFree(work_[i]);
-        if (s_enc_[i]) cudaStreamDestroy(s_enc_[i]);
-        if (alloc_done_[i]) cudaEventDestroy(alloc_done_[i]);
-        if (enc_done_[i]) cudaEventDestroy(enc_done_[i]);
-        if (ready_[i]) cudaEventDestroy(ready_[i]);
-        for (auto& e : tm_[i])
-            if (e) cudaEventDestroy(e);
-    }
-    if (invperm_) cudaFree(invperm_);
-    if (twist_) cudaFree(twist_);
-    cudaGetLastError();   // a teardown error is not this object's to report
+        if (s_enc_[i]) cudaStreamSynchronize(s_enc_[i].get());  // nothing in flight reads the buffers freed below
+    cudaGetLastError();  // a teardown error is not this object's to report
 }
 
-TileHandle GpuEncoder::register_tile(const std::vector<double>& W, int d) {
+TileId GpuEncoder::register_tile(const std::vector<double>& W, int d) {
     if (d != d_) throw std::invalid_argument("gpu_encode: tile dimension differs from the encoder's d");
     if (W.size() != static_cast<size_t>(d) * d) throw std::invalid_argument("gpu_encode: tile must be d*d");
-    check(cudaSetDevice(device_), "cudaSetDevice");
-    double* dev = nullptr;
-    check(cudaMalloc(&dev, sizeof(double) * W.size()), "cudaMalloc tile");
-    check(cudaMemcpy(dev, W.data(), sizeof(double) * W.size(), cudaMemcpyHostToDevice), "upload tile");
-    TileHandle h;
-    h.W = dev;
-    h.d = d;
-    return h;
+    if (tiles_.size() >= 0xffffffffu) throw std::length_error("gpu_encode: too many tiles");
+    DeviceGuard guard(device_, kWho);
+    Tile t;
+    t.W = device_alloc<double>(W.size(), kWho, "cudaMalloc tile");
+    check(cudaMemcpy(t.W.get(), W.data(), sizeof(double) * W.size(), cudaMemcpyHostToDevice), "upload tile");
+    t.d = d;
+    double m = 0.0;
+    for (double v : W) m = std::max(m, std::fabs(v));
+    t.max_abs = m;
+    tiles_.push_back(std::move(t));
+    return (static_cast<TileId>(generation_) << 32) | static_cast<TileId>(tiles_.size() - 1);
 }
 
-void GpuEncoder::release_tile(TileHandle& h) {
-    if (h.W) cudaFree(const_cast<double*>(h.W));
-    h = {};
+void GpuEncoder::release_tiles() {
+    for (int i = 0; i < 2; ++i)
+        if (s_enc_[i]) check(cudaStreamSynchronize(s_enc_[i].get()), "sync before releasing tiles");
+    tiles_.clear();
+    ++generation_;
+}
+
+const GpuEncoder::Tile& GpuEncoder::tile(TileId id) const {
+    const uint32_t gen = static_cast<uint32_t>(id >> 32);
+    const size_t idx = static_cast<size_t>(id & 0xffffffffu);
+    if (gen != generation_)
+        throw std::invalid_argument("gpu_encode: tile id from before release_tiles(); register the tile again");
+    if (idx >= tiles_.size()) throw std::out_of_range("gpu_encode: unknown tile id");
+    return tiles_[idx];
 }
 
 std::vector<std::shared_ptr<FIDESlib::CKKS::Plaintext>> GpuEncoder::encode_group(const GroupJob& job) {
@@ -230,39 +226,45 @@ std::vector<std::shared_ptr<FIDESlib::CKKS::Plaintext>> GpuEncoder::encode_group
     const int B = static_cast<int>(job.tiles.size());
     if (B < 1 || B > kMaxBatch) throw std::invalid_argument("gpu_encode: batch size out of range");
     if (job.baby.size() != job.tiles.size()) throw std::invalid_argument("gpu_encode: tiles and baby differ in length");
-    if (job.s < 1 || (job.g + 1) * job.s > d_ || job.g < 0) throw std::invalid_argument("gpu_encode: (g, s) outside the tile");
-    for (int b = 0; b < B; ++b) {
-        if (!job.tiles[b].W || job.tiles[b].d != d_) throw std::invalid_argument("gpu_encode: tile not registered for this encoder");
-        if (job.baby[b] < 0 || job.baby[b] >= job.s) throw std::invalid_argument("gpu_encode: baby index out of range");
-    }
+    if (job.s < 1 || (job.g + 1) * job.s > d_ || job.g < 0)
+        throw std::invalid_argument("gpu_encode: (g, s) outside the tile");
     const int nlimbs = cc_.param.L + 1 - job.level;
-    if (nlimbs < 1 || nlimbs > kMaxLimbs) throw std::invalid_argument("gpu_encode: level " + std::to_string(job.level) + " has no limbs");
+    if (nlimbs < 1 || nlimbs > kMaxLimbs)
+        throw std::invalid_argument("gpu_encode: level " + std::to_string(job.level) + " has no limbs");
     if (!(job.sf > 0.0)) throw std::invalid_argument("gpu_encode: scaling factor must be positive");
-    check(cudaSetDevice(device_), "cudaSetDevice");
+    K1Params k1{};
+    double bound = 0.0;
+    for (int b = 0; b < B; ++b) {
+        const Tile& t = tile(job.tiles[b]);
+        if (job.baby[b] < 0 || job.baby[b] >= job.s) throw std::invalid_argument("gpu_encode: baby index out of range");
+        k1.tiles[b] = t.W.get();
+        k1.baby[b] = job.baby[b];
+        bound = std::max(bound, t.max_abs);
+    }
+    if (bound * job.sf >= kCoeffBound)
+        throw std::overflow_error("gpu_encode: sf * max|W| = " + std::to_string(bound * job.sf) +
+                                  " exceeds the 63-bit coefficient range (OpenFHE's encoder refuses the same)");
+    DeviceGuard guard(device_, kWho);
 
     const int i = static_cast<int>(cur_ & 1);
-    cudaStream_t se = s_enc_[i];
+    cudaStream_t se = s_enc_[i].get();
     const dim3 grid(static_cast<unsigned>((n_ + kThreads - 1) / kThreads), static_cast<unsigned>(B));
 
     // 1. K1 on the encode stream: in_[i] was last read by K2 of the batch two back, on this same stream.
-    K1Params k1{};
-    for (int b = 0; b < B; ++b) {
-        k1.tiles[b] = job.tiles[b].W;
-        k1.baby[b] = job.baby[b];
-    }
-    if (timing_) cudaEventRecord(tm_[i][0], se);
-    k_gather_expand_permute<<<grid, kThreads, 0, se>>>(k1, job.g, job.s, d_, log2t_, n_, invperm_, in_[i]);
+    if (timing_) cudaEventRecord(tm_[i][0].get(), se);
+    k_gather_expand_permute<<<grid, kThreads, 0, se>>>(k1, job.g, job.s, d_, log2t_, n_, invperm_.get(), in_[i].get());
     check(cudaGetLastError(), "K1 launch");
     if (debug_sync_) check(cudaStreamSynchronize(se), "K1");
 
     // 2. batched cuFFT, in place
-    if (timing_) cudaEventRecord(tm_[i][1], se);
-    check_fft(cufftExecZ2Z(plan_for(B, i), in_[i], in_[i], CUFFT_FORWARD), "cufftExecZ2Z");
-    if (timing_) cudaEventRecord(tm_[i][2], se);
+    if (timing_) cudaEventRecord(tm_[i][1].get(), se);
+    check_fft(cufftExecZ2Z(plan_for(B, i), in_[i].get(), in_[i].get(), CUFFT_FORWARD), "cufftExecZ2Z");
+    if (timing_) cudaEventRecord(tm_[i][2].get(), se);
     if (debug_sync_) check(cudaStreamSynchronize(se), "FFT");
 
-    // 3. the polys: limbs with aux (grow with constant = false), pooled and pointer-tabled on the legacy
-    //    stream; the event recorded there afterwards also orders after every pending ciphertext op.
+    // 3. the polys: limbs with aux (grow with constant = false), pooled and pointer-tabled on the
+    //    legacy stream; the event recorded there afterwards also orders after every pending
+    //    ciphertext op.
     std::vector<std::shared_ptr<Plaintext>> pts;
     pts.reserve(B);
     K2Params k2{};
@@ -276,18 +278,28 @@ std::vector<std::shared_ptr<FIDESlib::CKKS::Plaintext>> GpuEncoder::encode_group
         if (static_cast<int>(part.limb.size()) < nlimbs) throw std::runtime_error("gpu_encode: poly has too few limbs");
         if (b == 0) {
             ps = part.getS().ptr();
+            if (!stream_checked_) {
+                if (!stream_is_blocking(ps, kWho))
+                    throw std::runtime_error("gpu_encode: the library's poly stream is non-blocking; the legacy-stream "
+                                             "ordering this encoder relies on does not hold");
+                stream_checked_ = true;
+            }
             for (int l = 0; l < nlimbs; ++l) {
                 if (!std::holds_alternative<Limb<uint32_t>>(part.limb[l]))
-                    throw std::runtime_error("gpu_encode: the chain has a 64-bit limb; the encoder writes 32-bit limbs only");
+                    throw std::runtime_error("gpu_encode: the chain has a 64-bit limb; the encoder writes 32-bit "
+                                             "limbs only");
                 const auto& limb = std::get<Limb<uint32_t>>(part.limb[l]);
                 const int pid = limb.primeid;
-                if (pid != l) throw std::runtime_error("gpu_encode: limb " + std::to_string(l) + " carries prime id " + std::to_string(pid));
-                if (limb.v.size != 2 * n_) throw std::runtime_error("gpu_encode: limb size " + std::to_string(limb.v.size) + " != N");
+                if (pid != l)
+                    throw std::runtime_error("gpu_encode: limb " + std::to_string(l) + " carries prime id " +
+                                             std::to_string(pid));
+                if (limb.v.size != 2 * n_)
+                    throw std::runtime_error("gpu_encode: limb size " + std::to_string(limb.v.size) + " != N");
                 if (limb.v.device != device_) throw std::runtime_error("gpu_encode: limb on another device");
                 const uint64_t q = cc_.param.primes.at(pid).p;
                 if (q >= (1ull << 32)) throw std::runtime_error("gpu_encode: prime wider than 32 bits");
                 k2.prime[l] = q;
-                k2.mu64[l] = ~0ull / q;   // floor((2^64 - 1)/q) = floor(2^64/q) for odd q > 1
+                k2.mu64[l] = ~0ull / q;  // floor((2^64 - 1)/q) = floor(2^64/q) for odd q > 1
             }
         } else if (part.getS().ptr() != ps) {
             throw std::runtime_error("gpu_encode: plaintext polys on different streams (unsupported)");
@@ -298,35 +310,39 @@ std::vector<std::shared_ptr<FIDESlib::CKKS::Plaintext>> GpuEncoder::encode_group
         pt->slots = n_;
         pts.push_back(std::move(pt));
     }
-    check(cudaEventRecord(alloc_done_[i], ps), "record alloc_done");
-    check(cudaStreamWaitEvent(se, alloc_done_[i], 0), "wait alloc_done");
+    check(cudaEventRecord(alloc_done_[i].get(), ps), "record alloc_done");
+    check(cudaStreamWaitEvent(se, alloc_done_[i].get(), 0), "wait alloc_done");
 
     // 4. K2 on the encode stream, then its completion event
-    if (timing_) cudaEventRecord(tm_[i][3], se);
-    k_twist_scale_round_reduce<<<grid, kThreads, 0, se>>>(k2, in_[i], twist_, job.sf, n_, nlimbs);
+    if (timing_) cudaEventRecord(tm_[i][3].get(), se);
+    k_twist_scale_round_reduce<<<grid, kThreads, 0, se>>>(k2, in_[i].get(), twist_.get(), job.sf, n_, nlimbs);
     check(cudaGetLastError(), "K2 launch");
-    if (timing_) cudaEventRecord(tm_[i][4], se);
-    check(cudaEventRecord(enc_done_[i], se), "record enc_done");
+    if (timing_) cudaEventRecord(tm_[i][4].get(), se);
+    check(cudaEventRecord(enc_done_[i].get(), se), "record enc_done");
     if (debug_sync_) check(cudaStreamSynchronize(se), "K2");
 
     // 5. the library's NTT (ALGO_SHOUP, the default) on the polys' stream, after K2
-    check(cudaStreamWaitEvent(ps, enc_done_[i], 0), "wait enc_done");
-    if (timing_) cudaEventRecord(tm_[i][5], ps);
+    check(cudaStreamWaitEvent(ps, enc_done_[i].get(), 0), "wait enc_done");
+    if (timing_) cudaEventRecord(tm_[i][5].get(), ps);
     if (!job.skip_ntt)
         for (auto& pt : pts) pt->c0.NTT(cc_.param.batch, true);
-    if (timing_) cudaEventRecord(tm_[i][6], ps);
-    check(cudaEventRecord(ready_[i], ps), "record ready");
+    if (timing_) cudaEventRecord(tm_[i][6].get(), ps);
+    check(cudaEventRecord(ready_[i].get(), ps), "record ready");
     if (debug_sync_) check(cudaDeviceSynchronize(), "NTT");
 
     stats_.plaintexts += B;
     stats_.batches += 1;
     if (timing_) {
-        check(cudaEventSynchronize(tm_[i][6]), "timing sync");
+        check(cudaEventSynchronize(tm_[i][6].get()), "timing sync");
         float ms = 0;
-        cudaEventElapsedTime(&ms, tm_[i][0], tm_[i][1]); stats_.k1_ms += ms;
-        cudaEventElapsedTime(&ms, tm_[i][1], tm_[i][2]); stats_.fft_ms += ms;
-        cudaEventElapsedTime(&ms, tm_[i][3], tm_[i][4]); stats_.k2_ms += ms;
-        cudaEventElapsedTime(&ms, tm_[i][5], tm_[i][6]); stats_.ntt_ms += ms;
+        cudaEventElapsedTime(&ms, tm_[i][0].get(), tm_[i][1].get());
+        stats_.k1_ms += ms;
+        cudaEventElapsedTime(&ms, tm_[i][1].get(), tm_[i][2].get());
+        stats_.fft_ms += ms;
+        cudaEventElapsedTime(&ms, tm_[i][3].get(), tm_[i][4].get());
+        stats_.k2_ms += ms;
+        cudaEventElapsedTime(&ms, tm_[i][5].get(), tm_[i][6].get());
+        stats_.ntt_ms += ms;
     }
     ++cur_;
     return pts;

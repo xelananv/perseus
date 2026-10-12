@@ -12,6 +12,7 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <cstdint>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -24,7 +25,8 @@ namespace {
 using PtxImpl = typename Ptx::element_type;
 
 std::vector<double> rows_of(const py::array_t<double, py::array::c_style | py::array::forcecast>& W, int& d) {
-    if (W.ndim() != 2 || W.shape(0) != W.shape(1)) throw std::invalid_argument("register_tile: W must be a square 2-D array");
+    if (W.ndim() != 2 || W.shape(0) != W.shape(1))
+        throw std::invalid_argument("register_tile: W must be a square 2-D array");
     d = static_cast<int>(W.shape(0));
     const double* p = W.data();
     return std::vector<double>(p, p + static_cast<size_t>(d) * d);
@@ -34,7 +36,8 @@ std::vector<double> rows_of(const py::array_t<double, py::array::c_style | py::a
 
 void bind_encode(py::module_& m) {
     // The device plaintext as Python sees it: an opaque handle (its facade Plaintext). Dropping the
-    // last reference does not free the device copy — call evict_ptx (or let the group's eviction).
+    // last reference does not free the device copy — call evict_ptx (filling.py evicts every group
+    // after its products). An evicted plaintext is refused by mult_ptx.
     py::class_<PtxImpl, Ptx>(m, "DevicePlaintext")
         .def_property_readonly("level", [](const PtxImpl& p) { return p.GetLevel(); })
         .def_property_readonly("loaded", [](const PtxImpl& p) { return p.loaded; });
@@ -45,21 +48,22 @@ void bind_encode(py::module_& m) {
 
     m.def(
         "register_tile",
-        [](Inference& inf, const std::string& name, py::array_t<double, py::array::c_style | py::array::forcecast> W) {
+        [](Inference& inf, py::array_t<double, py::array::c_style | py::array::forcecast> W) {
             int d = 0;
             auto rows = rows_of(W, d);
             py::gil_scoped_release nogil;
-            return gpu_encode::bridge_for(inf).register_tile(name, rows, d);
+            return gpu_encode::bridge_for(inf)->register_tile(rows, d);
         },
-        py::arg("inf"), py::arg("name"), py::arg("W"),
-        "Upload a d x d folded tile (row-major, y = x @ W) once; returns its tile id.");
+        py::arg("inf"), py::arg("W"),
+        "Upload a d x d folded tile (row-major, y = x @ W) once; returns its tile id (invalid after "
+        "release_tiles).");
 
     m.def(
         "encode_group_gpu",
-        [](Inference& inf, const std::vector<int>& tile_ids, const std::vector<int>& baby, int g, int s,
+        [](Inference& inf, const std::vector<uint64_t>& tile_ids, const std::vector<int>& baby, int g, int s,
            const PackedCtx& ref, const std::vector<std::string>& names) {
             py::gil_scoped_release nogil;
-            return gpu_encode::bridge_for(inf).encode_group(tile_ids, baby, g, s, ref.ct, names);
+            return gpu_encode::bridge_for(inf)->encode_group(tile_ids, baby, g, s, ref.ct, names);
         },
         py::arg("inf"), py::arg("tile_ids"), py::arg("baby"), py::arg("g"), py::arg("s"), py::arg("ref"),
         py::arg("names"),
@@ -69,6 +73,10 @@ void bind_encode(py::module_& m) {
     m.def(
         "mult_ptx",
         [](Inference& inf, const PackedCtx& ct, Ptx& pt) {
+            if (!inf.fhe) throw std::runtime_error("mult_ptx: the session has no FHE runtime");
+            if (!pt || !pt->loaded)
+                throw std::invalid_argument("mult_ptx: the device plaintext was evicted or never made; encode the "
+                                            "group again");
             py::gil_scoped_release nogil;
             return inf.fhe->mult(ct, pt);
         },
@@ -79,14 +87,14 @@ void bind_encode(py::module_& m) {
         "evict_ptx",
         [](Inference& inf, Ptx& pt) {
             py::gil_scoped_release nogil;
-            gpu_encode::bridge_for(inf).evict(pt);
+            gpu_encode::bridge_for(inf)->evict(pt);
         },
-        py::arg("inf"), py::arg("pt"), "Free the device plaintext (its shared host metadata stays).");
+        py::arg("inf"), py::arg("pt"), "Free the device plaintext; the handle is refused by mult_ptx afterwards.");
 
     m.def(
         "gpu_encode_stats",
         [](Inference& inf) {
-            const auto& st = gpu_encode::bridge_for(inf).stats();
+            const auto st = gpu_encode::bridge_for(inf)->stats();
             py::dict d;
             d["plaintexts"] = st.plaintexts;
             d["batches"] = st.batches;
@@ -99,8 +107,12 @@ void bind_encode(py::module_& m) {
         py::arg("inf"), "Counters of the device encoder (device-side stage times when FHE_GPU_ENCODE_TIMING=1).");
 
     m.def(
-        "release_tiles", [](Inference& inf) { gpu_encode::bridge_for(inf).release_tiles(); }, py::arg("inf"),
-        "Free the resident tiles.");
+        "release_tiles",
+        [](Inference& inf) {
+            py::gil_scoped_release nogil;
+            gpu_encode::bridge_for(inf)->release_tiles();
+        },
+        py::arg("inf"), "Free the resident tiles; their ids are refused from then on.");
 
     m.def(
         "drop_gpu_encoder",

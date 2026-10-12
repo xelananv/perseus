@@ -17,23 +17,37 @@ namespace gpu_encode {
 
 Bridge::Bridge(Inference& inf) : inf_(inf) {
     auto& fctx = std::any_cast<FIDESlib::CKKS::Context&>(inf.cc()->gpu);
-    const int n = inf.slots;
-    const int d = inf.size.dim;   // the port opens its session with dim = hidDim = d (gpu_smoke.open_session)
-    enc_ = std::make_unique<GpuEncoder>(fctx, n, d);   // the shared_ptr itself: Plaintext(Context&) wants it
+    context_ = static_cast<const void*>(&*inf.cc());
+    slots_ = inf.slots;
+    dim_ = inf.size.dim;   // the port opens its session with dim = hidDim = d (gpu_smoke.open_session)
+    enc_ = std::make_unique<GpuEncoder>(fctx, slots_, dim_);   // the shared_ptr itself: Plaintext(Context&) wants it
 }
 
-Bridge::~Bridge() { release_tiles(); }
+Bridge::~Bridge() {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (enc_) enc_->release_tiles();
+}
 
-int Bridge::register_tile(const std::string& name, const std::vector<double>& W, int d) {
-    tiles_.push_back(enc_->register_tile(W, d));
-    tile_names_.push_back(name);
-    return static_cast<int>(tiles_.size()) - 1;
+void Bridge::check_session() const {
+    if (static_cast<const void*>(&*inf_.cc()) != context_ || inf_.slots != slots_ || inf_.size.dim != dim_)
+        throw std::runtime_error("gpu_encode: the session changed under its device encoder (a stale bridge); "
+                                 "close the previous session before opening another");
+}
+
+TileId Bridge::register_tile(const std::vector<double>& W, int d) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    check_session();
+    return enc_->register_tile(W, d);
 }
 
 void Bridge::release_tiles() {
-    for (auto& t : tiles_) enc_->release_tile(t);
-    tiles_.clear();
-    tile_names_.clear();
+    std::lock_guard<std::mutex> lk(mtx_);
+    enc_->release_tiles();
+}
+
+GpuEncoder::Stats Bridge::stats() const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    return enc_->stats();
 }
 
 const std::any& Bridge::meta_for_level(uint32_t level) {
@@ -47,19 +61,20 @@ const std::any& Bridge::meta_for_level(uint32_t level) {
     return it->second->cpu;
 }
 
-std::vector<Ptx> Bridge::encode_group(const std::vector<int>& tile_ids, const std::vector<int>& baby, int g, int s,
+std::vector<Ptx> Bridge::encode_group(const std::vector<TileId>& tile_ids, const std::vector<int>& baby, int g, int s,
                                       const Ctx& ref, const std::vector<std::string>& names) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    check_session();
     const size_t B = tile_ids.size();
-    if (baby.size() != B || names.size() != B) throw std::invalid_argument("encode_group: tiles, baby, names differ in length");
-    if (B == 0 || B > static_cast<size_t>(kMaxBatch)) throw std::invalid_argument("encode_group: batch size out of range");
+    if (baby.size() != B || names.size() != B)
+        throw std::invalid_argument("encode_group: tiles, baby, names differ in length");
+    if (B == 0 || B > static_cast<size_t>(kMaxBatch))
+        throw std::invalid_argument("encode_group: batch size out of range");
+    if (!ref) throw std::invalid_argument("encode_group: null reference ciphertext");
     const auto [lv, nsd] = inf_.encode_like_params(ref);
     if (nsd != 1) throw std::runtime_error("encode_group: the device encoder makes degree-1 plaintexts only");
     GroupJob job;
-    job.tiles.reserve(B);
-    for (int id : tile_ids) {
-        if (id < 0 || id >= static_cast<int>(tiles_.size())) throw std::out_of_range("encode_group: unknown tile id");
-        job.tiles.push_back(tiles_[id]);
-    }
+    job.tiles = tile_ids;
     job.baby = baby;
     job.g = g;
     job.s = s;
@@ -68,7 +83,7 @@ std::vector<Ptx> Bridge::encode_group(const std::vector<int>& tile_ids, const st
 
     auto gps = enc_->encode_group(job);   // K1 -> cuFFT -> K2 -> NTT, ready event recorded
     // the legacy-stream bridge: every later launch on a blocking stream (the ciphertext ops) waits
-    cudaStreamWaitEvent(nullptr, enc_->last_ready_event(), 0);
+    cuda_check(cudaStreamWaitEvent(nullptr, enc_->last_ready_event(), 0), "encode_group", "cudaStreamWaitEvent");
 
     const std::any& meta = meta_for_level(lv);
     using PtxImpl = typename Ptx::element_type;
@@ -89,7 +104,13 @@ std::vector<Ptx> Bridge::encode_group(const std::vector<int>& tile_ids, const st
     return out;
 }
 
-void Bridge::evict(Ptx& pt) { inf_.evict_plaintext(pt); }
+void Bridge::evict(Ptx& pt) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!pt) return;
+    inf_.evict_plaintext(pt);
+    if (inf_.fhe) inf_.fhe->forget_pt(pt);
+    pt->cpu.reset();   // no host values: a product after eviction fails instead of multiplying by zeros
+}
 
 namespace {
 std::mutex g_mtx;
@@ -98,21 +119,21 @@ std::mutex g_mtx;
 // would free them after the context and the CUDA runtime are gone (observed: "double free or
 // corruption" at interpreter exit). A bridge whose session was never closed leaks with the process.
 auto& registry() {
-    static auto* r = new std::unordered_map<const Inference*, std::unique_ptr<Bridge>>();
+    static auto* r = new std::unordered_map<const Inference*, std::shared_ptr<Bridge>>();
     return *r;
 }
 }  // namespace
 
-Bridge& bridge_for(Inference& inf) {
+std::shared_ptr<Bridge> bridge_for(Inference& inf) {
     std::lock_guard<std::mutex> lk(g_mtx);
     auto& reg = registry();
     auto it = reg.find(&inf);
-    if (it == reg.end()) it = reg.emplace(&inf, std::make_unique<Bridge>(inf)).first;
-    return *it->second;
+    if (it == reg.end()) it = reg.emplace(&inf, std::make_shared<Bridge>(inf)).first;
+    return it->second;
 }
 
 void drop_bridge(Inference& inf) {
-    std::unique_ptr<Bridge> gone;
+    std::shared_ptr<Bridge> gone;
     {
         std::lock_guard<std::mutex> lk(g_mtx);
         auto& reg = registry();
@@ -121,7 +142,7 @@ void drop_bridge(Inference& inf) {
         gone = std::move(it->second);
         reg.erase(it);
     }
-    gone.reset();   // outside the lock: frees tiles, metadata plaintexts, the encoder
+    gone.reset();   // outside the lock: frees tiles, metadata plaintexts, the encoder (when no call holds it)
 }
 
 }  // namespace gpu_encode

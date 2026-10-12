@@ -14,9 +14,14 @@
 // through a transform of size `slots`.
 //
 // Everything runs on the legacy default stream, which orders after every ciphertext operation that
-// produced the value and before every one that may change it in place.
+// produced the value and before every one that may change it in place — provided the library's
+// streams are blocking ones, which the first probe checks. The key lives on the device for the
+// probe's lifetime and is zeroed, with the last decrypted polynomial, before its memory returns to
+// the pool. The two debug accessors (the decrypted residues, the key's limbs) exist only in builds
+// with GPU_MAG_PROBE_DEBUG (CMake: CACHEMIR_MAG_PROBE_DEBUG=ON, the probe check's diag mode).
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <vector>
@@ -41,12 +46,12 @@ class GpuMagProbe {
     };
     struct Stats {
         uint64_t items = 0;
-        double enqueue_ms = 0;      // host time spent issuing the probes
-        double fetch_ms = 0;        // host time spent waiting at fetch (the device work)
+        double enqueue_ms = 0;  // host time spent issuing the probes
+        double fetch_ms = 0;    // host time spent waiting at fetch (the device work)
     };
 
     // `secret`: the secret key polynomial imported like any plaintext (Plaintext(ctx, GetRawPlainText))
-    // at the top level, EVAL form, all limbs.
+    // at the top level, EVAL form, all limbs. The probe takes ownership and zeroes it at the end.
     GpuMagProbe(FIDESlib::CKKS::Context& ctx, int n_slots, std::shared_ptr<FIDESlib::CKKS::Plaintext> secret);
     ~GpuMagProbe();
     GpuMagProbe(const GpuMagProbe&) = delete;
@@ -54,16 +59,18 @@ class GpuMagProbe {
 
     // Issue the probe of `ct` (EVAL form, any level, any noise degree); returns the index its result
     // will have in the next fetch().
-    size_t probe(const FIDESlib::CKKS::Ciphertext& ct);
+    std::size_t probe(const FIDESlib::CKKS::Ciphertext& ct);
     // Wait for every probe issued since the last fetch and return their results in issue order.
     std::vector<Result> fetch();
     const Stats& stats() const { return stats_; }
 
+#ifdef GPU_MAG_PROBE_DEBUG
     // Diagnostics: the decrypted polynomial's residues per limb after the INTT (natural order, host
     // vectors), with the ciphertext components in the stored order or swapped; and the secret key's
     // limbs as imported.
     std::vector<std::vector<uint64_t>> debug_decrypt(const FIDESlib::CKKS::Ciphertext& ct, bool swap_components);
     std::vector<std::vector<uint64_t>> debug_secret_limbs();
+#endif
 
   private:
     struct Impl;
