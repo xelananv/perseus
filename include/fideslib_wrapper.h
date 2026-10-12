@@ -1745,14 +1745,23 @@ struct CKKSContext {
         FIDESlib::CKKS::RawPlainText raw = FIDESlib::CKKS::GetRawPlainText(occ, spt);
         auto& fctx = std::any_cast<FIDESlib::CKKS::Context&>(cc->gpu);
         auto gs = std::make_shared<FIDESlib::CKKS::Plaintext>(fctx, raw);   // uploaded synchronously
+        // the device copy is zeroed by whoever holds it last: the probe once it has taken it, this
+        // scope if the probe's construction fails before that
+        struct ZeroOnExit {
+            std::shared_ptr<FIDESlib::CKKS::Plaintext> p;
+            ~ZeroOnExit() {
+                if (p) gpu_encode::zero_plaintext_limbs(*p);
+            }
+        } key_guard{gs};
         // the host copies of the key (raw.sub_0 and the OpenFHE plaintext raw.originalPlainText
-        // shares with spt) are zeroed before they are freed; the device copy is the probe's to zero
+        // shares with spt) are zeroed before they are freed
         for (auto& limb : raw.sub_0) wipe_u64(limb);
         raw.sub_0.clear();
         raw.originalPlainText.reset();
         spt->GetElement<lbcrypto::DCRTPoly>().SetValuesToZero();
         spt.reset();
-        mag_gpu = std::make_unique<gpu_encode::GpuMagProbe>(fctx, slots, gs);
+        mag_gpu = std::make_unique<gpu_encode::GpuMagProbe>(fctx, slots, std::move(gs));
+        key_guard.p.reset();   // the probe owns the key from here on
     }
     bool mag_gpu_probe(const Ctx& ct, std::size_t node_idx, long ordinal) {
         if (!mag_gpu_enabled() || mag_gpu_failed || !ct || !ct->loaded) return false;

@@ -35,6 +35,10 @@ using Context = std::shared_ptr<ContextData>;
 
 namespace gpu_encode {
 
+// Zero every limb of a poly on the device; never throws. The key's owner calls it before the
+// memory returns to the pool, whether the probe was built or its construction failed.
+void zero_plaintext_limbs(FIDESlib::CKKS::Plaintext& p) noexcept;
+
 class GpuMagProbe {
   public:
     struct Result {
@@ -51,7 +55,9 @@ class GpuMagProbe {
     };
 
     // `secret`: the secret key polynomial imported like any plaintext (Plaintext(ctx, GetRawPlainText))
-    // at the top level, EVAL form, all limbs. The probe takes ownership and zeroes it at the end.
+    // at the top level, EVAL form, all limbs. The probe takes ownership and zeroes it at the end,
+    // including when its own construction fails after taking it; a constructor that throws before
+    // taking it leaves the zeroing to the caller (zero_plaintext_limbs).
     GpuMagProbe(FIDESlib::CKKS::Context& ctx, int n_slots, std::shared_ptr<FIDESlib::CKKS::Plaintext> secret);
     ~GpuMagProbe();
     GpuMagProbe(const GpuMagProbe&) = delete;

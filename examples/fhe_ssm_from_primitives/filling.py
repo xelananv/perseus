@@ -164,12 +164,19 @@ def babies(ops, x, t: int, s: int):
 
 
 def _mixed_levels(ops, rxs) -> bool:
-    """True when the prepared inputs do not all sit at one level (ops without ``level``: False)."""
+    """True when the prepared inputs do not all share one encode: the level and the pending
+    rescale (noise degree) both decide it (``encode_like_params``). Ops without the accessors:
+    False."""
     level = getattr(ops, "level", None)
-    if level is None:
+    noise_deg = getattr(ops, "noise_deg", None)
+    if level is None or noise_deg is None:
         return False
-    first = level(rxs[0][0])
-    return any(level(xb) != first for rx in rxs for xb in rx)
+
+    def key(x):
+        return (level(x), noise_deg(x))
+
+    first = key(rxs[0][0])
+    return any(key(xb) != first for rx in rxs for xb in rx)
 
 
 def _giant_group(ops, rx, w: EncodedTile, g: int):
@@ -195,9 +202,12 @@ def apply_tiles(ops, rxs, tiles):
         raise ValueError(f"every prepared input needs {s} baby rotations")
     device = all(w.dev is not None for w in tiles) and getattr(ops, "gpu_encode", False)
     if device and _mixed_levels(ops, rxs):
-        # one device encode serves the whole group at one level; inputs at different levels
-        # take the CPU route, which encodes each product at its own
-        warnings.warn("apply_tiles: prepared inputs at different levels; CPU route for this group", stacklevel=2)
+        # one device encode serves the whole group at one (level, noise degree); inputs that
+        # differ take the CPU route, which encodes each product at its own
+        warnings.warn(
+            "apply_tiles: prepared inputs at different levels or noise degrees; CPU route for this group",
+            stacklevel=2,
+        )
         device = False
     y = None
     for g in range(G):

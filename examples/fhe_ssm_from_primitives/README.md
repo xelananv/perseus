@@ -115,7 +115,9 @@ lower under either plan and top-1 1.0 on every planned tick.
 The weight diagonals are encoded on the device at their use (`FHE_GPU_ENCODE=0` selects the CPU
 encode in the same binary, 7–13× slower per block). On a GPU below compute capability 9.0 the
 pinned FIDESlib32bits does not build as is (one kernel uses thread-block clusters); the fork's
-measurement notes carry an arch-guarded patch for that file.
+measurement notes carry an arch-guarded patch for that file. The encoder's and the probe's own
+checks are ctest tests labelled `gpu` (`ctest -L gpu` in the tests build directory); the
+repository's CI has no GPU runner, so they run by hand.
 
 ## Colab
 

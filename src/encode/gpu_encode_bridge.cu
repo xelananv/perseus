@@ -5,6 +5,7 @@
 #include "fideslib_wrapper.h"
 #include "inference.h"
 
+#include <CKKS/Ciphertext.cuh>
 #include <CKKS/Plaintext.cuh>
 
 #include <any>
@@ -24,6 +25,8 @@ Bridge::Bridge(Inference& inf) : inf_(inf) {
 }
 
 Bridge::~Bridge() {
+    // destructors do not throw: release_tiles() is noexcept and the encoder's own teardown clears
+    // rather than reports a context error
     std::lock_guard<std::mutex> lk(mtx_);
     if (enc_) enc_->release_tiles();
 }
@@ -32,6 +35,20 @@ void Bridge::check_session() const {
     if (static_cast<const void*>(&*inf_.cc()) != context_ || inf_.slots != slots_ || inf_.size.dim != dim_)
         throw std::runtime_error("gpu_encode: the session changed under its device encoder (a stale bridge); "
                                  "close the previous session before opening another");
+}
+
+void Bridge::check_ciphertext_stream(const Ctx& ref) {
+    // The ordering contract (gpu_encode.h): the legacy default stream, where the plaintext polys are
+    // made and the NTTs run, orders after the ciphertext streams only while those are blocking ones.
+    // Checked once, on the ciphertext the products will run on (the plaintext polys themselves are
+    // always on the legacy stream, so their flags say nothing).
+    if (stream_checked_ || !ref->loaded) return;
+    auto gct = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(inf_.cc()->GetDeviceCiphertext(ref->gpu));
+    if (!gct || gct->c0.GPU.empty()) return;
+    if (!stream_is_blocking(gct->c0.GPU[0].getS().ptr(), "gpu_encode"))
+        throw std::runtime_error("gpu_encode: the library's ciphertext stream is non-blocking; the legacy-stream "
+                                 "ordering the device encoder relies on does not hold");
+    stream_checked_ = true;
 }
 
 TileId Bridge::register_tile(const std::vector<double>& W, int d) {
@@ -71,6 +88,7 @@ std::vector<Ptx> Bridge::encode_group(const std::vector<TileId>& tile_ids, const
     if (B == 0 || B > static_cast<size_t>(kMaxBatch))
         throw std::invalid_argument("encode_group: batch size out of range");
     if (!ref) throw std::invalid_argument("encode_group: null reference ciphertext");
+    check_ciphertext_stream(ref);
     const auto [lv, nsd] = inf_.encode_like_params(ref);
     if (nsd != 1) throw std::runtime_error("encode_group: the device encoder makes degree-1 plaintexts only");
     GroupJob job;
@@ -89,17 +107,31 @@ std::vector<Ptx> Bridge::encode_group(const std::vector<TileId>& tile_ids, const
     using PtxImpl = typename Ptx::element_type;
     std::vector<Ptx> out;
     out.reserve(B);
-    for (size_t b = 0; b < B; ++b) {
-        const uint32_t handle = inf_.cc()->RegisterDevicePlaintext(std::static_pointer_cast<void>(gps[b]));
-        Ptx pt = std::make_shared<PtxImpl>(CC(inf_.cc()));
-        pt->cpu = meta;
-        pt->gpu = handle;
-        pt->loaded = true;
-        if (inf_.fhe) {
-            inf_.fhe->tag_plaintext_top(pt);
-            inf_.fhe->name_pt_if_absent(pt, names[b]);
+    std::vector<uint32_t> registered;
+    registered.reserve(B);
+    try {
+        for (size_t b = 0; b < B; ++b) {
+            const uint32_t handle = inf_.cc()->RegisterDevicePlaintext(std::static_pointer_cast<void>(gps[b]));
+            registered.push_back(handle);
+            Ptx pt = std::make_shared<PtxImpl>(CC(inf_.cc()));
+            pt->cpu = meta;
+            pt->gpu = handle;
+            pt->loaded = true;
+            if (inf_.fhe) {
+                inf_.fhe->tag_plaintext_top(pt);
+                inf_.fhe->name_pt_if_absent(pt, names[b]);
+            }
+            issued_.insert(static_cast<const void*>(pt.get()));
+            out.push_back(std::move(pt));
         }
-        out.push_back(std::move(pt));
+    } catch (...) {
+        // a wrap that failed midway leaves no device plaintext without a facade to evict it
+        for (auto& pt : out) {
+            issued_.erase(static_cast<const void*>(pt.get()));
+            inf_.evict_plaintext(pt);
+        }
+        for (size_t i = out.size(); i < registered.size(); ++i) inf_.cc()->EvictDevicePlaintext(registered[i]);
+        throw;
     }
     return out;
 }
@@ -107,6 +139,9 @@ std::vector<Ptx> Bridge::encode_group(const std::vector<TileId>& tile_ids, const
 void Bridge::evict(Ptx& pt) {
     std::lock_guard<std::mutex> lk(mtx_);
     if (!pt) return;
+    const void* key = static_cast<const void*>(pt.get());
+    if (!issued_.erase(key))
+        throw std::invalid_argument("evict_ptx: not a device plaintext of this encoder (or already evicted)");
     inf_.evict_plaintext(pt);
     if (inf_.fhe) inf_.fhe->forget_pt(pt);
     pt->cpu.reset();   // no host values: a product after eviction fails instead of multiplying by zeros

@@ -204,8 +204,9 @@ uint64_t inv_mod(uint64_t a, uint64_t m) {
     return r;
 }
 
-// Zero every limb of a poly on the device (the key, the last decrypted polynomial).
-void zero_limbs(FIDESlib::CKKS::Plaintext& p) {
+}  // namespace
+
+void zero_plaintext_limbs(FIDESlib::CKKS::Plaintext& p) noexcept {
     using FIDESlib::CKKS::Limb;
     for (auto& part : p.c0.GPU) {
         for (auto& var : part.limb) {
@@ -216,16 +217,43 @@ void zero_limbs(FIDESlib::CKKS::Plaintext& p) {
             }
         }
     }
+    cudaGetLastError();
 }
 
-}  // namespace
+// A poly whose limbs are zeroed when the owner goes away: the key and the scratch poly (which holds
+// the last decrypted polynomial). Runs on the failure paths of the constructor too, since Impl's
+// members are destroyed when the constructor throws.
+struct WipedPoly {
+    std::shared_ptr<FIDESlib::CKKS::Plaintext> p;
+    WipedPoly() = default;
+    explicit WipedPoly(std::shared_ptr<FIDESlib::CKKS::Plaintext> q) : p(std::move(q)) {}
+    ~WipedPoly() {
+        if (p) {
+            cudaDeviceSynchronize();
+            zero_plaintext_limbs(*p);
+            cudaDeviceSynchronize();
+        }
+    }
+    WipedPoly(const WipedPoly&) = delete;
+    WipedPoly& operator=(const WipedPoly&) = delete;
+    WipedPoly(WipedPoly&&) = default;
+    WipedPoly& operator=(WipedPoly&& o) noexcept {
+        if (this != &o) {
+            if (p) zero_plaintext_limbs(*p);
+            p = std::move(o.p);
+        }
+        return *this;
+    }
+    FIDESlib::CKKS::Plaintext* operator->() const { return p.get(); }
+    explicit operator bool() const { return static_cast<bool>(p); }
+};
 
 struct GpuMagProbe::Impl {
     FIDESlib::CKKS::Context& ctx;
     FIDESlib::CKKS::ContextData& cc;
     int N = 0, n = 0;
-    std::shared_ptr<FIDESlib::CKKS::Plaintext> secret;
-    std::shared_ptr<FIDESlib::CKKS::Plaintext> scratch;  // one poly at the top level, level set per probe
+    WipedPoly secret;   // zeroed when the probe goes away, built or not
+    WipedPoly scratch;  // one poly at the top level, level set per probe; zeroed likewise
     void* const* s_table = nullptr;                       // the secret's limb pointer table
     void* const* d_table = nullptr;                       // the scratch's
     std::vector<uint64_t> q, mu;
@@ -263,7 +291,7 @@ GpuMagProbe::GpuMagProbe(FIDESlib::CKKS::Context& ctx, int n_slots, std::shared_
     if (2 * I.n != I.N) throw std::invalid_argument("gpu_mag_probe: slots must be N/2");
     if (!secret || secret->c0.GPU.size() != 1)
         throw std::invalid_argument("gpu_mag_probe: secret key poly missing or multi-device");
-    I.secret = std::move(secret);
+    I.secret = WipedPoly(std::move(secret));
     const int nprimes = I.cc.param.L + 1;
     if (nprimes > kMaxLimbs) throw std::invalid_argument("gpu_mag_probe: too many primes");
     if (static_cast<int>(I.secret->c0.GPU[0].limb.size()) < nprimes)
@@ -280,7 +308,7 @@ GpuMagProbe::GpuMagProbe(FIDESlib::CKKS::Context& ctx, int n_slots, std::shared_
     }
     I.s_table = I.secret->c0.GPU[0].limbptr.data;
     // the scratch poly: every limb of the chain, with aux (the INTT needs them)
-    I.scratch = std::make_shared<FIDESlib::CKKS::Plaintext>(I.ctx);
+    I.scratch = WipedPoly(std::make_shared<FIDESlib::CKKS::Plaintext>(I.ctx));
     I.scratch->c0.grow(nprimes - 1, false, false);
     if (static_cast<int>(I.scratch->c0.GPU[0].limb.size()) < nprimes)
         throw std::runtime_error("gpu_mag_probe: scratch poly did not grow");
@@ -319,11 +347,7 @@ GpuMagProbe::GpuMagProbe(FIDESlib::CKKS::Context& ctx, int n_slots, std::shared_
 }
 
 GpuMagProbe::~GpuMagProbe() {
-    Impl& I = *impl_;
-    cudaDeviceSynchronize();
-    // the key and the last decrypted polynomial are zeroed before their memory returns to the pool
-    if (I.secret) zero_limbs(*I.secret);
-    if (I.scratch) zero_limbs(*I.scratch);
+    // the key and the last decrypted polynomial are zeroed by their owners (WipedPoly) as Impl goes
     cudaDeviceSynchronize();
     cudaGetLastError();
 }

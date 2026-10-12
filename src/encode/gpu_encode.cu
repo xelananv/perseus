@@ -192,21 +192,27 @@ TileId GpuEncoder::register_tile(const std::vector<double>& W, int d) {
     if (d != d_) throw std::invalid_argument("gpu_encode: tile dimension differs from the encoder's d");
     if (W.size() != static_cast<size_t>(d) * d) throw std::invalid_argument("gpu_encode: tile must be d*d");
     if (tiles_.size() >= 0xffffffffu) throw std::length_error("gpu_encode: too many tiles");
+    double m = 0.0;
+    for (double v : W) {
+        if (!std::isfinite(v)) throw std::invalid_argument("gpu_encode: tile holds a non-finite value");
+        m = std::max(m, std::fabs(v));
+    }
     DeviceGuard guard(device_, kWho);
     Tile t;
     t.W = device_alloc<double>(W.size(), kWho, "cudaMalloc tile");
     check(cudaMemcpy(t.W.get(), W.data(), sizeof(double) * W.size(), cudaMemcpyHostToDevice), "upload tile");
     t.d = d;
-    double m = 0.0;
-    for (double v : W) m = std::max(m, std::fabs(v));
     t.max_abs = m;
     tiles_.push_back(std::move(t));
     return (static_cast<TileId>(generation_) << 32) | static_cast<TileId>(tiles_.size() - 1);
 }
 
-void GpuEncoder::release_tiles() {
+void GpuEncoder::release_tiles() noexcept {
+    // Called from destructors too: a sticky context error is cleared, not thrown (the next real
+    // call reports it).
     for (int i = 0; i < 2; ++i)
-        if (s_enc_[i]) check(cudaStreamSynchronize(s_enc_[i].get()), "sync before releasing tiles");
+        if (s_enc_[i]) cudaStreamSynchronize(s_enc_[i].get());
+    cudaGetLastError();
     tiles_.clear();
     ++generation_;
 }
@@ -277,13 +283,10 @@ std::vector<std::shared_ptr<FIDESlib::CKKS::Plaintext>> GpuEncoder::encode_group
         auto& part = pt->c0.GPU[0];
         if (static_cast<int>(part.limb.size()) < nlimbs) throw std::runtime_error("gpu_encode: poly has too few limbs");
         if (b == 0) {
+            // the plaintext polys live on the legacy default stream; whether the ciphertext streams
+            // are blocking ones (the ordering contract) is checked by the bridge on the ciphertext
+            // the products will run on
             ps = part.getS().ptr();
-            if (!stream_checked_) {
-                if (!stream_is_blocking(ps, kWho))
-                    throw std::runtime_error("gpu_encode: the library's poly stream is non-blocking; the legacy-stream "
-                                             "ordering this encoder relies on does not hold");
-                stream_checked_ = true;
-            }
             for (int l = 0; l < nlimbs; ++l) {
                 if (!std::holds_alternative<Limb<uint32_t>>(part.limb[l]))
                     throw std::runtime_error("gpu_encode: the chain has a 64-bit limb; the encoder writes 32-bit "

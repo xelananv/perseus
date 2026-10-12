@@ -20,6 +20,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 struct Inference;
@@ -43,21 +44,25 @@ class Bridge {
     std::vector<Ptx> encode_group(const std::vector<TileId>& tile_ids, const std::vector<int>& baby, int g, int s,
                                   const Ctx& ref, const std::vector<std::string>& names);
 
-    // Free the device plaintext behind a wrapped Ptx and forget its graph name and tag.
+    // Free the device plaintext behind a wrapped Ptx and forget its graph name and tag. Only a
+    // plaintext this bridge issued (and has not evicted yet) is accepted.
     void evict(Ptx& pt);
 
     GpuEncoder::Stats stats() const;
 
   private:
     void check_session() const;                       // the Inference is still the one this bridge was made for
+    void check_ciphertext_stream(const Ctx& ref);     // once: the ciphertext streams are blocking ones
     const std::any& meta_for_level(uint32_t level);   // one host metadata plaintext per level
 
     Inference& inf_;
     const void* context_ = nullptr;   // identity of the session's crypto context at construction
     int slots_ = 0, dim_ = 0;
+    bool stream_checked_ = false;
     mutable std::mutex mtx_;
     std::unique_ptr<GpuEncoder> enc_;
     std::unordered_map<uint32_t, Ptx> meta_;   // level -> a zero plaintext made once (level, scale, slots)
+    std::unordered_set<const void*> issued_;   // the live device plaintexts this bridge made
 };
 
 // The session's bridge, created on first use. Callers keep the shared_ptr for the duration of a

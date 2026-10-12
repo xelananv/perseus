@@ -45,7 +45,4 @@ function(add_dev_probe name)
 endfunction()
 add_dev_probe(gpu_encode_layout_probe)
 add_dev_probe(gpu_encode_probe)
-add_dev_probe(gpu_mag_probe_check)
-if(CACHEMIR_MAG_PROBE_DEBUG)
-    target_compile_definitions(gpu_mag_probe_check PRIVATE GPU_MAG_PROBE_DEBUG=1)   # its `diag` mode
-endif()
+add_dev_probe(gpu_mag_probe_check)   # its `diag` mode needs CACHEMIR_MAG_PROBE_DEBUG, inherited from cachemir_lib

@@ -21,7 +21,8 @@
 // blocking stream (the ciphertext ops), so one event recorded there after the grows is the barrier
 // K2 waits for (a recycled limb is never written while a pending product still reads it), and K2's
 // completion event is what the legacy stream waits for before the NTTs. That contract holds only
-// while the library's streams are blocking ones; the first batch checks it and refuses otherwise.
+// while the library's ciphertext streams are blocking ones; the bridge checks the stream of the
+// ciphertext the products will run on before the first batch and refuses otherwise.
 //
 // Context layout. FIDESlib is built with -DNCCL and its consumers are not, so ContextData's fields
 // after `precom` sit at different offsets in this translation unit than in the library's
@@ -81,8 +82,9 @@ class GpuEncoder {
     // Upload a folded d x d tile (row-major, y = x @ W: the diagonal (g, b) at channel i reads
     // W[(i + g*s + b) mod d][i]) once; the id is what encode_group reads from.
     TileId register_tile(const std::vector<double>& W_row_major, int d);
-    // Free every resident tile; ids issued before this call are refused from here on.
-    void release_tiles();
+    // Free every resident tile; ids issued before this call are refused from here on. Never throws
+    // (it runs from destructors): a context error at that point is cleared, not reported.
+    void release_tiles() noexcept;
     std::size_t tile_count() const { return tiles_.size(); }
 
     // Encode one batch: K1 -> cuFFT -> K2 on the encode stream of this batch's parity, then the
@@ -119,7 +121,7 @@ class GpuEncoder {
     FIDESlib::CKKS::Context& ctx_;
     FIDESlib::CKKS::ContextData& cc_;
     int n_, d_, t_, log2t_, device_;
-    bool timing_ = false, debug_sync_ = false, stream_checked_ = false;
+    bool timing_ = false, debug_sync_ = false;
     // Members are destroyed bottom-up: the plans (which reference the work areas) go first, then
     // the buffers, then the streams and events; the destructor body drains the streams before that.
     Stream s_enc_[2];
