@@ -93,19 +93,35 @@ void Bridge::evict(Ptx& pt) { inf_.evict_plaintext(pt); }
 
 namespace {
 std::mutex g_mtx;
-std::unordered_map<const Inference*, std::unique_ptr<Bridge>> g_bridges;
+// Leaked on purpose: a bridge holds facade plaintexts and CUDA handles, which must be released while
+// the session is alive (drop_bridge from Session.close); a registry destroyed at static destruction
+// would free them after the context and the CUDA runtime are gone (observed: "double free or
+// corruption" at interpreter exit). A bridge whose session was never closed leaks with the process.
+auto& registry() {
+    static auto* r = new std::unordered_map<const Inference*, std::unique_ptr<Bridge>>();
+    return *r;
+}
 }  // namespace
 
 Bridge& bridge_for(Inference& inf) {
     std::lock_guard<std::mutex> lk(g_mtx);
-    auto it = g_bridges.find(&inf);
-    if (it == g_bridges.end()) it = g_bridges.emplace(&inf, std::make_unique<Bridge>(inf)).first;
+    auto& reg = registry();
+    auto it = reg.find(&inf);
+    if (it == reg.end()) it = reg.emplace(&inf, std::make_unique<Bridge>(inf)).first;
     return *it->second;
 }
 
 void drop_bridge(Inference& inf) {
-    std::lock_guard<std::mutex> lk(g_mtx);
-    g_bridges.erase(&inf);
+    std::unique_ptr<Bridge> gone;
+    {
+        std::lock_guard<std::mutex> lk(g_mtx);
+        auto& reg = registry();
+        auto it = reg.find(&inf);
+        if (it == reg.end()) return;
+        gone = std::move(it->second);
+        reg.erase(it);
+    }
+    gone.reset();   // outside the lock: frees tiles, metadata plaintexts, the encoder
 }
 
 }  // namespace gpu_encode

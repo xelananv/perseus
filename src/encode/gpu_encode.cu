@@ -188,6 +188,8 @@ cufftHandle GpuEncoder::plan_for(int batch, int parity) {
 }
 
 GpuEncoder::~GpuEncoder() {
+    for (int i = 0; i < 2; ++i)
+        if (s_enc_[i]) cudaStreamSynchronize(s_enc_[i]);   // nothing in flight reads the buffers freed below
     for (auto& r : plans_) cufftDestroy(r.h);
     for (int i = 0; i < 2; ++i) {
         if (in_[i]) cudaFree(in_[i]);

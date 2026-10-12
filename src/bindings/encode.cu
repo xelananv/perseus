@@ -101,4 +101,14 @@ void bind_encode(py::module_& m) {
     m.def(
         "release_tiles", [](Inference& inf) { gpu_encode::bridge_for(inf).release_tiles(); }, py::arg("inf"),
         "Free the resident tiles.");
+
+    m.def(
+        "drop_gpu_encoder",
+        [](Inference& inf) {
+            py::gil_scoped_release nogil;
+            gpu_encode::drop_bridge(inf);
+        },
+        py::arg("inf"),
+        "Release the session's device encoder (tiles, metadata plaintexts, streams, plans); Session.close "
+        "calls it before the Inference goes away.");
 }

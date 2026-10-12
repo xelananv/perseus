@@ -57,6 +57,10 @@ class Session:
             return
         try:
             from . import _core
+            if hasattr(_core, "drop_gpu_encoder"):
+                # the device encoder's tiles, metadata plaintexts, streams and plans: released
+                # while `inf` is alive (at interpreter exit they would outlive the context)
+                _core.drop_gpu_encoder(inf)
             if hasattr(_core, "close_session"):
                 try:
                     _core.close_session(inf)      # weights, caches, rotation keys

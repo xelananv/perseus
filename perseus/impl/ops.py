@@ -246,6 +246,9 @@ class FheOps:
     # through the same fhe->mult the CPU path records. Absent on the fake and on cores without it.
     @property
     def gpu_encode(self) -> bool:
+        # FHE_GPU_ENCODE=0 forces the CPU route (the same binary: a like-for-like timing control)
+        if os.environ.get("FHE_GPU_ENCODE", "1") in ("", "0"):
+            return False
         f = getattr(self.core, "gpu_encode_available", None)
         return bool(f and f(self.inf))
 
