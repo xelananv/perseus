@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: MIT
 // gpu_encode_bridge.h — the device encoder (gpu_encode.h) as a session service: tiles registered
 // once, plaintexts made per giant group at the level and scale a product with a given ciphertext
-// needs, wrapped as facade plaintexts the ordinary fhe->mult consumes (parity step 0: such a wrap
-// multiplies bit-identically to a CPU-encoded plaintext, tests/dev/gpu_encode_layout_probe.cu).
+// needs, wrapped as facade plaintexts the ordinary fhe->mult consumes (such a wrap multiplies
+// bit-identically to a CPU-encoded plaintext: tests/dev/gpu_encode_layout_probe.cu).
 #pragma once
 
 #include "ckks_types.h"

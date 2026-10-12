@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 // gpu_encode_probe — parity of the device encoder (include/gpu_encode.h) against OpenFHE's CPU encode,
-// on the library itself (R1, 2026-10-11). No gtest: JSON lines; exit 0 iff every gate passes.
+// on the library itself. No gtest: JSON lines; exit 0 iff every gate passes.
 //
 //  1. COEFF parity (skip_ntt): for B diagonals of one giant index, the device's natural-order residues
 //     vs MakeCKKSPackedPlaintext's; the integer coefficient is recovered from the q0 pair by CRT on both
@@ -176,7 +176,7 @@ int main(int argc, char** argv) {
     std::fflush(stdout);
 
     // 2. EVAL parity. (a) self-consistency: the device's EVAL words must equal the library's own NTT of
-    //    the device's COEFF residues (RNSPoly::load + NTT, the path parity step 0 validated) — this is
+    //    the device's COEFF residues (RNSPoly::load + NTT, the path gpu_encode_layout_probe validated) — this is
     //    what checks the grow/aux/stream choreography. (b) against the CPU reference's EVAL words:
     //    informational only, since one differing coefficient changes every word after the NTT.
     job.skip_ntt = false;

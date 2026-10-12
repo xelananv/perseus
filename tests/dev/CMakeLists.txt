@@ -12,7 +12,7 @@ endforeach()
 # test_rotation_ext_moddown reaches the FIDESlib-native GPU API (Ciphertext::rotate(idx, moddown),
 # GenCryptoContextGPU, ...) which is NOT part of the installed OpenFHE-compat headers, so it needs
 # the FIDESlib source tree on its include path. Scoped to this one target.
-# R1 encoder groundwork: a plain executable (no gtest) probing FIDESlib's limb order and the
+# Device-encoder groundwork: a plain executable (no gtest) probing FIDESlib's limb order and the
 # device-plaintext wrap on the library itself (examples/fhe_ssm_from_primitives's GPU encoder).
 add_executable(gpu_encode_layout_probe gpu_encode_layout_probe.cu)
 target_link_libraries(gpu_encode_layout_probe PRIVATE cachemir_lib)

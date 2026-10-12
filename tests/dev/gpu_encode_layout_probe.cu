@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: MIT
-// gpu_encode_layout_probe — R1 encoder groundwork, parity step 0 (2026-10-11). No gtest: prints JSON lines.
+// gpu_encode_layout_probe — device-encoder groundwork: the limb order and the plaintext wrap, measured on
+// the library. No gtest: prints JSON lines.
 //
 // Two questions the device encoder's K2 and wrap depend on, answered on the library itself:
 //  A. In which index order must COEFF-form residues be written into an RNSPoly's limbs so that the

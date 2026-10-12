@@ -1,17 +1,18 @@
 // SPDX-License-Identifier: MIT
-// gpu_encode.h — CKKS plaintexts for the port's weight diagonals made on the device (R1, 2026-10-11).
+// gpu_encode.h — CKKS plaintexts for the port's weight diagonals made on the device.
 //
 // A diagonal plaintext of the filled layout is block-constant: channel i's value over t = n/d consecutive
 // slots, rolled by g*s*t (examples/fhe_ssm_from_primitives/filling.py). Encoding it on the CPU costs
 // 2-4 ms (FFT-bound) for every one of the ~345k products of a tick; here the slot vector never exists
 // on the host: a kernel gathers it from the resident folded matrix straight into a batched cuFFT
 // buffer, cuFFT does the length-n transform, and one fused kernel twists, scales, rounds and reduces
-// the result into a FIDESlib RNSPoly's limbs, which the library then NTTs. Maths, layout and the
-// validation ladder: results/perseus-20261006/fork_port/gpu_20261011/r1/DESIGN.md (the owner's tree).
+// the result into a FIDESlib RNSPoly's limbs, which the library then NTTs. The acceptance test is
+// tests/dev/gpu_encode_probe.cu; the limb order and the plaintext wrap were measured on the library by
+// tests/dev/gpu_encode_layout_probe.cu.
 //
 //   c_k = (1/n) FFT_n(Y)_k zeta^(-k),   Y_v = z_j,  v = (5^j mod 4n - 1)/4,   m_k = llround(sf Re c_k),
 //   m_{k+n} = llround(sf Im c_k),   residue_l = m mod q_l (sign in 64-bit, as openfhe-n32 patch 0005),
-//   written in natural coefficient order (parity step 0: r1/layout_probe.out).
+//   written in natural coefficient order (the order the library's own import uses).
 //
 // Streams. K1 -> cuFFT -> K2 run on one of two non-blocking encode streams (batch parity), so the next
 // group's encode overlaps the current group's products. The plaintext polys live on the legacy default

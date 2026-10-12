@@ -152,7 +152,7 @@ def open_session(params, *, logn=16, auto_bts_level=46):
     opts.expanded = opts.expDim = params.d_ffn
     opts.numHeads = opts.numHeadsReal = 16
     # the default, Cachemir, packs one token per ciphertext: every conversation but the first
-    # was dropped at the encode (rented A6000, 2026-10-11)
+    # was dropped at the encode
     opts.packing_kind = _backend.default().PackingKind.Diagonal
     ck = opts.ckks
     ck.logN = logn
