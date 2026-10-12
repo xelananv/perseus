@@ -59,6 +59,13 @@ def main(argv=None):
     ap.add_argument("--level", type=int, default=34, help="the input ciphertext's level")
     ap.add_argument("--seed", type=int, default=11)
     ap.add_argument("--out", default=None)
+    ap.add_argument(
+        "--bench",
+        type=int,
+        default=0,
+        help="N > 0: time N groups per batch shape (B = 32, 128, 256; encode + evict, no products) "
+        "instead of the checks; wall time per plaintext, fenced by one product + decrypt per shape",
+    )
     a = ap.parse_args(argv)
     from perseus import _core
     from perseus.impl.ops import FheOps
@@ -82,6 +89,44 @@ def main(argv=None):
         lx = ops.level(x)
         if not np.allclose(filling.unpack(ops.decrypt_slots(x), d, t), rows, atol=1e-6):
             raise SystemExit("round trip of the input failed")
+
+        if a.bench:
+            report["bench"] = []
+            for n_tiles, g in ((1, 3), (4, 5), (8, 17)):
+                Ws = [rng.uniform(-0.3, 0.3, (d, d)) for _ in range(n_tiles)]
+                devs = [filling.EncodedTile.encode(W, N, f"b{i}", dev_ops=ops) for i, W in enumerate(Ws)]
+                ids = [w.dev for w in devs for _ in range(s)]
+                baby = [b for _ in devs for b in range(s)]
+                names = [w.key(g, b) for w in devs for b in range(s)]
+                st0 = dict(_core.gpu_encode_stats(inf))
+                pts = ops.encode_group(ids, baby, g, s, x, names)   # warm-up (plans, module load)
+                ops.decrypt_slots(ops.mult_ptx(x, pts[-1]))
+                for pt in pts:
+                    ops.evict_ptx(pt)
+                t1 = time.time()
+                for _ in range(a.bench):
+                    pts = ops.encode_group(ids, baby, g, s, x, names)
+                    for pt in pts:
+                        ops.evict_ptx(pt)
+                ops.decrypt_slots(ops.mult_ptx(x, pts[-1]))   # the fence (the evicted polys are gone;
+                # this product is on a fresh group of the same shape)
+                wall = time.time() - t1
+                st1 = dict(_core.gpu_encode_stats(inf))
+                B = len(ids)
+                row = {"B": B, "g": g, "groups": a.bench, "plaintexts": a.bench * B,
+                       "wall_s": round(wall, 4), "wall_ms_per_plaintext": round(1e3 * wall / (a.bench * B), 4),
+                       "device_ms_per_plaintext": {k: round((st1[k] - st0[k]) / (st1["plaintexts"] - st0["plaintexts"]), 4)
+                                                   for k in ("k1_ms", "fft_ms", "k2_ms", "ntt_ms")},
+                       "timing_env": os.environ.get("FHE_GPU_ENCODE_TIMING", "")}
+                print(json.dumps(row), flush=True)
+                report["bench"].append(row)
+            _core.release_tiles(inf)
+            report["pass"] = True
+            report["total_seconds"] = round(time.time() - t0, 1)
+            if a.out:
+                with open(a.out, "w", encoding="utf-8") as f:
+                    json.dump(report, f, indent=1, default=str)
+            return 0
 
         def one_group(tiles_W, g, babies_checked):
             """tiles_W: the tiles sharing this group's babies (B = len * s)."""
