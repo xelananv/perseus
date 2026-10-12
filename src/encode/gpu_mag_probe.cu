@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Alexander Ananyev
 // gpu_mag_probe.cu — see include/gpu_mag_probe.h.
 #include "gpu_mag_probe.h"
 

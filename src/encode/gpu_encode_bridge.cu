@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Alexander Ananyev
 // gpu_encode_bridge.cu — see include/gpu_encode_bridge.h.
 #include "gpu_encode_bridge.h"
 

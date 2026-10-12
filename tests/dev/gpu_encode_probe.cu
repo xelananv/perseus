@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Alexander Ananyev
 // gpu_encode_probe — parity of the device encoder (include/gpu_encode.h) against OpenFHE's CPU encode,
 // on the library itself. No gtest: JSON lines; exit 0 iff every gate passes.
 //

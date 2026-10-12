@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Alexander Ananyev
 // gpu_encode.cu — see include/gpu_encode.h.
 #include "gpu_encode.h"
 

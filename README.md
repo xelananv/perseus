@@ -340,3 +340,11 @@ Perseus is released under the [Business Source License 1.1](LICENSE): free for a
 non-commercial use (research, academic, evaluation); commercial use requires prior written
 permission from the authors. On the Change Date (2030-08-18) the license converts to GPLv2.
 `third_party/FIDESlib` keeps its own license.
+
+The device encoder, the capture's device magnitude probe and the fhe-ssm port
+(`examples/fhe_ssm_from_primitives/`, `include/gpu_cuda_raii.h`, `include/gpu_encode.h`,
+`include/gpu_encode_bridge.h`, `include/gpu_mag_probe.h`, `src/encode/`, `src/bindings/encode.cu`,
+`tests/dev/gpu_encode_layout_probe.cu`, `tests/dev/gpu_encode_probe.cu`,
+`tests/dev/gpu_mag_probe_check.cu`) are copyright (c) 2026 Alexander Ananyev and licensed under
+the MIT License (`examples/fhe_ssm_from_primitives/LICENSE`); each file says so in its first line.
+They may be redistributed as part of Perseus under its license with that notice retained.

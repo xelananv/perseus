@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Alexander Ananyev
 // gpu_mag_probe_check — the device magnitude probe (include/gpu_mag_probe.h) against the host path's
 // numbers on the same ciphertexts: max|z|, the Re mean and max|z - mean| from the decrypted slots,
 // the max coefficient with and without X^0 from FFTSpecialInv of those slots (fideslib_wrapper.h's

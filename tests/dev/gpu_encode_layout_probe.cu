@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Alexander Ananyev
 // gpu_encode_layout_probe — device-encoder groundwork: the limb order and the plaintext wrap, measured on
 // the library. No gtest: prints JSON lines.
 //

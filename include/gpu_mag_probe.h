@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Alexander Ananyev
 // gpu_mag_probe.h — the graph capture's magnitude probe on the device.
 //
 // The capture prices every recorded node by three statistics of its decrypted value: the slot

@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Alexander Ananyev
 // encode.cu — perseus._core bindings of the device encoder (include/gpu_encode_bridge.h): tiles
 // registered once per session, a giant group's diagonals encoded on the GPU at the level a product
 // with a given ciphertext needs, products with those plaintexts through the same fhe->mult the CPU

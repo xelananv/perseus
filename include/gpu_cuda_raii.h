@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Alexander Ananyev
 // gpu_cuda_raii.h — owners for the CUDA handles the device encoder and the magnitude probe hold:
 // device buffers, streams, events, cuFFT plans, and a guard that restores the caller's current
 // device. Each is move-only and releases in its destructor, so a constructor that throws halfway

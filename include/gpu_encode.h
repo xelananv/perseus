@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Alexander Ananyev
 // gpu_encode.h — CKKS plaintexts for the port's weight diagonals made on the device.
 //
 // A diagonal plaintext of the filled layout is block-constant: channel i's value over t = n/d
