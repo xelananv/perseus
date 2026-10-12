@@ -120,19 +120,12 @@ int main(int argc, char** argv) {
         Plaintext pt;
         Ctx copy = c;
         cc->Decrypt(copy, fhe->sk(), &pt);
-        auto& pto = std::any_cast<lbcrypto::Plaintext&>(pt->cpu);
-        // after Decrypt a CKKS plaintext holds its coefficients as ONE big-integer Poly (CRT-interpolated,
-        // modulo the product of the remaining primes), not as towers
-        const auto& P = pto->GetElement<lbcrypto::Poly>();
-        const auto Q = P.GetModulus();
-        const auto Qh = Q >> 1;
-        std::printf("{\"diag\":\"host\",\"poly_len\":%u,\"logQ\":%u,\"scale\":%.6e,\"coeffs\":[", (unsigned)P.GetLength(), (unsigned)Q.GetMSB(), pto->GetScalingFactor());
-        for (int k = 0; k < 6; ++k) {
-            const auto v = P.GetValues()[k];
-            const double d = (v > Qh) ? -((Q - v).ConvertToDouble()) : v.ConvertToDouble();
-            std::printf("%s%.6e", k ? "," : "", d);
-        }
-        std::printf("]}\n");
+        // (the decoded slot values are the host reference; the decrypted polynomial's integers are
+        //  not kept in the plaintext's RNS element after Decrypt, so the device's residues are judged
+        //  by their per-limb consistency and the host Garner below)
+        const double host_scale = std::any_cast<lbcrypto::Plaintext&>(pt->cpu)->GetScalingFactor();
+        const double host_mean_times_scale = [&] { const auto vz = pt->GetCKKSPackedValue(); long double a = 0; for (auto& z : vz) a += z.real(); return (double)(a / (long double)vz.size()) * host_scale; }();
+        std::printf("{\"diag\":\"host\",\"mean_times_scale\":%.6e,\"scale\":%.6e}\n", host_mean_times_scale, host_scale);
         std::fflush(stdout);
         const uint64_t q0 = cd.param.primes.at(0).p, q1 = cd.param.primes.at(1).p;
         auto gct = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(cc->GetDeviceCiphertext(c->gpu));
