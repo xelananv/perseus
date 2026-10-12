@@ -34,6 +34,8 @@ ROOT = Path(__file__).resolve().parents[2]
 CUDA_MIN, GCC_MIN, CMAKE_MIN = (12, 6), 12, (3, 24)
 CUDA_PKG = "cuda-toolkit-12-6"
 CUDA_HOME_NEW = "/usr/local/cuda-12.6"
+# exact versions, the ones a GPU build of this example was made with, so a rebuild is reproducible
+CMAKE_PIN, PYBIND11_PIN, NCCL_PIN = "cmake==4.4.4", "pybind11==3.1.0", "nvidia-nccl-cu12==2.32.3"
 KEYRING = (
     "https://developer.download.nvidia.com/compute/cuda/repos/{distro}/x86_64/"
     "cuda-keyring_1.1-1_all.deb"
@@ -169,8 +171,8 @@ def plan(p: dict, jobs: int, nccl_home: str) -> list[Step]:
                     "bash",
                     "-c",
                     (
-                        f"wget -q {keyring} -O /tmp/cuda-keyring.deb && "
-                        "dpkg -i /tmp/cuda-keyring.deb && apt-get update -q"
+                        f'd=$(mktemp -d) && wget -q {keyring} -O "$d/cuda-keyring.deb" && '
+                        'dpkg -i "$d/cuda-keyring.deb" && apt-get update -q && rm -rf "$d"'
                     ),
                 ],
             )
@@ -187,11 +189,11 @@ def plan(p: dict, jobs: int, nccl_home: str) -> list[Step]:
         steps.append(Step("apt", ["apt-get", "install", "-y", "-q", *pkgs]))
     pip = []
     if p.get("cmake") is None or p["cmake"] < CMAKE_MIN:
-        pip.append("cmake>=3.24")
+        pip.append(CMAKE_PIN)
     if not p.get("pybind11"):
-        pip.append("pybind11")
+        pip.append(PYBIND11_PIN)
     if not p.get("nccl_wheel"):
-        pip.append("nvidia-nccl-cu12")
+        pip.append(NCCL_PIN)
     if pip:
         steps.append(Step("pip", [sys.executable, "-m", "pip", "install", "-q", *pip]))
     steps.append(Step("nccl", [sys.executable, __file__, "--link-nccl", nccl_home]))

@@ -95,15 +95,28 @@ class _Diagonal:
         return v if dtype is None else v.astype(dtype)
 
 
+def _diagonal_rows(W: np.ndarray, s: int, G: int) -> np.ndarray:
+    """The ``(G, s, d)`` diagonal rows of a d x d tile: row (g, b) holds W[(j + g*s + b) mod d, j]."""
+    d = W.shape[0]
+    j = np.arange(d)
+    k = np.arange(G)[:, None, None] * s + np.arange(s)[None, :, None]
+    return W[(j + k) % d, j]
+
+
 @dataclasses.dataclass(frozen=True, eq=False)
 class EncodedTile:
     """A d x d tile as its ``s * G`` diagonals, mirroring diagonal::encode_weight_matrix for
     d_in = d_out: diagonal (g, b) gives output channel j the weight W[(j + g*s + b) mod d, j],
-    repeated over the t lanes of channel j and shifted by g*s*t. ``rows`` holds the d values
-    of each diagonal, (G, s, d). Compared and hashed by identity (``rows`` is an array)."""
+    repeated over the t lanes of channel j and shifted by g*s*t. ``rows`` holds the d values of
+    each diagonal, (G, s, d), on a tile the CPU route encodes; a tile registered on the device
+    encoder (``dev``) keeps none, the device holds the only copy, and ``with_rows`` fetches it
+    back for a group the device route cannot serve. Compared and hashed by identity."""
 
     N: int
-    rows: np.ndarray
+    G: int
+    s: int
+    d: int
+    rows: np.ndarray | None = None
     name: str | None = None
     # the tile's id on the device encoder (apply_tiles' device route), or None
     dev: int | None = None
@@ -115,20 +128,33 @@ class EncodedTile:
         if W.shape != (d, d):
             raise ValueError("cut wider matrices into d x d tiles (encode_tiled)")
         _, s, G = tile_params(N, d)
-        j = np.arange(d)
-        k = np.arange(G)[:, None, None] * s + np.arange(s)[None, :, None]
-        # dev_ops: an ops with a device encoder -> the d x d tile goes resident there once; its
-        # diagonals are then made on the device at each use (rows stay for the mirror and the fake)
-        dev = dev_ops.register_tile(W) if dev_ops is not None else None
-        return cls(N, W[(j + k) % d, j], name, dev)
+        if dev_ops is not None:
+            # the d x d tile goes resident on the device once and its diagonals are made there at
+            # each use; no host copy beside it (24 blocks of 14 tiles would hold 2.6 GiB twice)
+            return cls(N, G, s, d, None, name, dev_ops.register_tile(W))
+        return cls(N, G, s, d, _diagonal_rows(W, s, G), name, None)
 
-    @property
-    def d(self) -> int:
-        return self.rows.shape[2]
+    def with_rows(self, ops=None):
+        """This tile with its diagonal rows on the host: itself when it has them, else the tile
+        fetched back from the device encoder (``ops.tile_values``) and diagonalized."""
+        if self.rows is not None:
+            return self
+        if ops is None or self.dev is None:
+            raise ValueError(
+                f"tile {self.name}: no host rows and no device encoder to fetch them from"
+            )
+        W = np.asarray(ops.tile_values(self.dev), dtype=np.float64)
+        if W.shape != (self.d, self.d):
+            raise ValueError(
+                f"tile {self.name}: the device returned {W.shape}, not ({self.d}, {self.d})"
+            )
+        return dataclasses.replace(self, rows=_diagonal_rows(W, self.s, self.G))
 
     def pt(self, g: int, b: int):
-        t, s = self.N // self.d, self.rows.shape[1]
-        return _Diagonal(self.rows[g, b], t, g * s * t)
+        if self.rows is None:
+            raise ValueError(f"tile {self.name}: the CPU route needs host rows (with_rows)")
+        t = self.N // self.d
+        return _Diagonal(self.rows[g, b], t, g * self.s * t)
 
     def key(self, g: int, b: int):
         return None if self.name is None else f"{self.name}.{g}.{b}"
@@ -163,20 +189,14 @@ def babies(ops, x, t: int, s: int):
     return out
 
 
-def _mixed_levels(ops, rxs) -> bool:
-    """True when the prepared inputs do not all share one encode: the level and the pending
-    rescale (noise degree) both decide it (``encode_like_params``). Ops without the accessors:
-    False."""
+def _encode_key(ops, x):
+    """What decides a plaintext's encode for a product with ``x``: its level and pending rescale
+    (``encode_like_params``). None on ops without the accessors."""
     level = getattr(ops, "level", None)
     noise_deg = getattr(ops, "noise_deg", None)
     if level is None or noise_deg is None:
-        return False
-
-    def key(x):
-        return (level(x), noise_deg(x))
-
-    first = key(rxs[0][0])
-    return any(key(xb) != first for rx in rxs for xb in rx)
+        return None
+    return (level(x), noise_deg(x))
 
 
 def _giant_group(ops, rx, w: EncodedTile, g: int):
@@ -194,21 +214,23 @@ def apply_tiles(ops, rxs, tiles):
     rotation by ``g*s*t``: ``G - 1`` giant rotations however many inputs are summed."""
     if len(rxs) != len(tiles) or not tiles:
         raise ValueError(f"{len(rxs)} prepared inputs for {len(tiles)} tiles")
-    G, s, d = tiles[0].rows.shape
+    G, s, d = tiles[0].G, tiles[0].s, tiles[0].d
     t = tiles[0].N // d
-    if any(w.rows.shape != (G, s, d) or w.N != tiles[0].N for w in tiles):
+    if any((w.G, w.s, w.d, w.N) != (G, s, d, tiles[0].N) for w in tiles):
         raise ValueError("tiles of one sum must share N, d and the (G, s) split")
     if any(len(rx) != s for rx in rxs):
         raise ValueError(f"every prepared input needs {s} baby rotations")
     device = all(w.dev is not None for w in tiles) and getattr(ops, "gpu_encode", False)
-    if device and _mixed_levels(ops, rxs):
-        # one device encode serves the whole group at one (level, noise degree); inputs that
-        # differ take the CPU route, which encodes each product at its own
+    if device and not all(ops.gpu_encode_fits(rx[0]) for rx in rxs):
+        # the device encoder makes degree-1 plaintexts; an input it cannot serve (a pending
+        # rescale on a one-prime chain) takes the CPU route, from the tiles fetched back
         warnings.warn(
-            "apply_tiles: prepared inputs at different levels or noise degrees; CPU route for this group",
+            "apply_tiles: an input the device encoder cannot serve; CPU route for this group",
             stacklevel=2,
         )
         device = False
+    if not device:
+        tiles = [w.with_rows(ops if w.dev is not None else None) for w in tiles]
     y = None
     for g in range(G):
         if device:
@@ -225,16 +247,30 @@ def apply_tiles(ops, rxs, tiles):
 
 
 def _device_giant_groups(ops, rxs, tiles, g: int, s: int):
-    """Giant index ``g`` of every tile on the device route: one batched device encode for every
-    (tile, baby), then the products and additions in exactly the CPU route's order (each tile's
-    group summed, then the tiles' partials), so the recorded op stream is the same on both routes.
-    The device plaintexts are evicted before returning."""
-    ids = [w.dev for w in tiles for _ in range(s)]
-    baby = [b for _ in tiles for b in range(s)]
-    names = [w.key(g, b) or f"tile{w.dev}.{g}.{b}" for w in tiles for b in range(s)]
-    pts = ops.encode_group(ids, baby, g, s, rxs[0][0], names)
+    """Giant index ``g`` of every tile on the device route: one batched device encode per distinct
+    encode among the inputs (the babies of one input share theirs, so inputs at one level share a
+    batch and an input at another gets its own, each at its reference ciphertext's), then the
+    products and additions in exactly the CPU route's order (each tile's group summed, then the
+    tiles' partials), so the recorded op stream is the same on both routes. The device plaintexts
+    are evicted before returning."""
+    keys = [_encode_key(ops, rx[0]) for rx in rxs]
+    pts: list = [None] * (len(tiles) * s)
+    made: list = []
     acc = None
     try:
+        for key in dict.fromkeys(keys):  # in first-appearance order
+            members = [i for i, k in enumerate(keys) if k == key]
+            ids = [tiles[i].dev for i in members for _ in range(s)]
+            baby = [b for _ in members for b in range(s)]
+            names = [
+                tiles[i].key(g, b) or f"tile{tiles[i].dev}.{g}.{b}"
+                for i in members
+                for b in range(s)
+            ]
+            group = ops.encode_group(ids, baby, g, s, rxs[members[0]][0], names)
+            made.extend(group)
+            for n, i in enumerate(members):
+                pts[i * s : (i + 1) * s] = group[n * s : (n + 1) * s]
         for i, rx in enumerate(rxs):
             part = None
             for b, xb in enumerate(rx):
@@ -242,15 +278,14 @@ def _device_giant_groups(ops, rxs, tiles, g: int, s: int):
                 part = p if part is None else ops.add(part, p)
             acc = part if acc is None else ops.add(acc, part)
     finally:
-        for pt in pts:
+        for pt in made:
             ops.evict_ptx(pt)
     return acc
 
 
 def linear(ops, x, w: EncodedTile):
     """y = x @ W for every conversation in x (the y = x @ W convention)."""
-    _, s, d = w.rows.shape
-    return apply_tiles(ops, [babies(ops, x, w.N // d, s)], [w])
+    return apply_tiles(ops, [babies(ops, x, w.N // w.d, w.s)], [w])
 
 
 def linear_multi(ops, xs, weights):
@@ -263,8 +298,8 @@ def linear_multi(ops, xs, weights):
     for tiles in weights:
         if len(tiles) != len(xs):
             raise ValueError(f"{len(xs)} input chunks for {len(tiles)} tile rows")
-    _, s, d = weights[0][0][0].rows.shape
-    rxs = [babies(ops, x, weights[0][0][0].N // d, s) for x in xs]
+    w0 = weights[0][0][0]
+    rxs = [babies(ops, x, w0.N // w0.d, w0.s) for x in xs]
     return [
         [apply_tiles(ops, rxs, [tiles[i][o] for i in range(len(xs))]) for o in range(len(tiles[0]))]
         for tiles in weights

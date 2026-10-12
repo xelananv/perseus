@@ -75,7 +75,9 @@ def test_fresh_runtime_gets_every_install():
     apt = by_name(steps, "apt").cmd
     for pkg in (cb.CUDA_PKG, "libarchive-dev", "gcc-12", "g++-12"):
         assert pkg in apt
-    assert {"pybind11", "nvidia-nccl-cu12"} <= set(by_name(steps, "pip").cmd)
+    assert {cb.PYBIND11_PIN, cb.NCCL_PIN} <= set(by_name(steps, "pip").cmd)
+    assert cb.CMAKE_PIN not in by_name(steps, "pip").cmd  # the runtime's cmake is new enough
+    assert "/tmp/" not in by_name(steps, "nvidia-repo").cmd[-1]  # the keyring lands in a mktemp dir
     env = by_name(steps, "deps").env
     assert env["CUDA_HOME"] == cb.CUDA_HOME_NEW
     assert (env["CC"], env["CXX"]) == ("gcc-12", "g++-12")

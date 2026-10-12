@@ -103,10 +103,7 @@ __global__ void k_twist_scale_round_reduce(K2Params p, const cufftDoubleComplex*
     }
 }
 
-bool env_on(const char* name) {
-    const char* v = std::getenv(name);
-    return v && *v && std::strcmp(v, "0") != 0;
-}
+bool on(const char* v) { return v && *v && std::strcmp(v, "0") != 0; }
 
 }  // namespace
 
@@ -122,8 +119,8 @@ GpuEncoder::GpuEncoder(FIDESlib::CKKS::Context& ctx, int n, int d) : ctx_(ctx), 
     while ((1 << log2t_) < t_) ++log2t_;
     if ((1 << log2t_) != t_) throw std::invalid_argument("gpu_encode: n/d must be a power of two");
     check(cudaGetDevice(&device_), "cudaGetDevice");
-    timing_ = env_on("FHE_GPU_ENCODE_TIMING");
-    debug_sync_ = env_on("FHE_GPU_ENCODE_SYNC");
+    timing_ = on(std::getenv("FHE_GPU_ENCODE_TIMING"));
+    debug_sync_ = on(std::getenv("FHE_GPU_ENCODE_SYNC"));
 
     // invperm: v = (5^j mod 4n - 1)/4 is a bijection on [0, n); store j for each v (uint16: n <= 65536)
     std::vector<uint16_t> inv(n);
@@ -183,9 +180,10 @@ cufftHandle GpuEncoder::plan_for(int batch, int parity) {
 }
 
 GpuEncoder::~GpuEncoder() {
+    // nothing in flight reads the buffers freed below; a drain that fails is reported, not thrown
     for (int i = 0; i < 2; ++i)
-        if (s_enc_[i]) cudaStreamSynchronize(s_enc_[i].get());  // nothing in flight reads the buffers freed below
-    cudaGetLastError();  // a teardown error is not this object's to report
+        if (s_enc_[i]) note_teardown(cudaStreamSynchronize(s_enc_[i].get()), kWho, "drain encode stream");
+    cudaGetLastError();
 }
 
 TileId GpuEncoder::register_tile(const std::vector<double>& W, int d) {
@@ -208,13 +206,23 @@ TileId GpuEncoder::register_tile(const std::vector<double>& W, int d) {
 }
 
 void GpuEncoder::release_tiles() noexcept {
-    // Called from destructors too: a sticky context error is cleared, not thrown (the next real
-    // call reports it).
+    // Called from destructors too: nothing is thrown; a failing drain (a sticky context error) is
+    // reported on stderr and the flag cleared, so the next real call reports it afresh.
     for (int i = 0; i < 2; ++i)
-        if (s_enc_[i]) cudaStreamSynchronize(s_enc_[i].get());
+        if (s_enc_[i]) note_teardown(cudaStreamSynchronize(s_enc_[i].get()), kWho, "drain encode stream");
     cudaGetLastError();
     tiles_.clear();
     ++generation_;
+}
+
+std::vector<double> GpuEncoder::download_tile(TileId id, int& d) const {
+    const Tile& t = tile(id);
+    DeviceGuard guard(device_, kWho);
+    std::vector<double> W(static_cast<size_t>(t.d) * t.d);
+    // a synchronous copy; K1 only ever reads a tile, so an encode in flight is not disturbed
+    check(cudaMemcpy(W.data(), t.W.get(), sizeof(double) * W.size(), cudaMemcpyDeviceToHost), "download tile");
+    d = t.d;
+    return W;
 }
 
 const GpuEncoder::Tile& GpuEncoder::tile(TileId id) const {
@@ -316,7 +324,17 @@ std::vector<std::shared_ptr<FIDESlib::CKKS::Plaintext>> GpuEncoder::encode_group
     check(cudaEventRecord(alloc_done_[i].get(), ps), "record alloc_done");
     check(cudaStreamWaitEvent(se, alloc_done_[i].get(), 0), "wait alloc_done");
 
-    // 4. K2 on the encode stream, then its completion event
+    // 4. K2 on the encode stream, then its completion event. Until the polys' stream has been told
+    //    to wait for K2 (step 5), a throw would release `pts` (their limbs back to the pool) while K2
+    //    may still be writing them, and the pool's next user is not ordered after the encode stream:
+    //    on that path the guard drains the encode stream first.
+    struct DrainOnThrow {
+        cudaStream_t s;
+        bool armed = true;
+        ~DrainOnThrow() {
+            if (armed) note_teardown(cudaStreamSynchronize(s), kWho, "drain after a failed K2 hand-off");
+        }
+    } drain{se};
     if (timing_) cudaEventRecord(tm_[i][3].get(), se);
     k_twist_scale_round_reduce<<<grid, kThreads, 0, se>>>(k2, in_[i].get(), twist_.get(), job.sf, n_, nlimbs);
     check(cudaGetLastError(), "K2 launch");
@@ -326,6 +344,7 @@ std::vector<std::shared_ptr<FIDESlib::CKKS::Plaintext>> GpuEncoder::encode_group
 
     // 5. the library's NTT (ALGO_SHOUP, the default) on the polys' stream, after K2
     check(cudaStreamWaitEvent(ps, enc_done_[i].get(), 0), "wait enc_done");
+    drain.armed = false;   // from here every later use of the limbs is ordered after K2
     if (timing_) cudaEventRecord(tm_[i][5].get(), ps);
     if (!job.skip_ntt)
         for (auto& pt : pts) pt->c0.NTT(cc_.param.batch, true);

@@ -197,7 +197,9 @@ CHAIN=n32 bash scripts/local_build_core.sh       # perseus/_core.n32.so
 ```
 
 `NATIVE_SIZE=64` and `CHAIN=n64` build the 64-bit version next to it (`deps_n64/`,
-`_core.n64.so`); the importable module is a symlink to whichever is active.
+`_core.n64.so`); the importable module is a symlink to whichever is active. The core links
+cuFFT (`CUDA::cufft`, part of the CUDA toolkit) for the device encoder that
+`examples/fhe_ssm_from_primitives` uses; the client-only build does not need it.
 `scripts/local_env.sh` sets every default, and a variable you export yourself always wins:
 
 | variable | what it points at | default |

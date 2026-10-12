@@ -59,9 +59,7 @@ def _bench(ops, inf, _core, rng, N, d, s, x, bench):
     rows = []
     for n_tiles, g in ((1, 3), (4, 5), (8, 17)):
         Ws = [rng.uniform(-0.3, 0.3, (d, d)) for _ in range(n_tiles)]
-        devs = [
-            filling.EncodedTile.encode(W, N, f"b{i}", dev_ops=ops) for i, W in enumerate(Ws)
-        ]
+        devs = [filling.EncodedTile.encode(W, N, f"b{i}", dev_ops=ops) for i, W in enumerate(Ws)]
         ids = [w.dev for w in devs for _ in range(s)]
         baby = [b for _ in devs for b in range(s)]
         names = [w.key(g, b) for w in devs for b in range(s)]
@@ -106,6 +104,47 @@ def _bench(ops, inf, _core, rng, N, d, s, x, bench):
         print(json.dumps(row), flush=True)
         rows.append(row)
     return rows
+
+
+def _mixed_cell(ops, rng, x, N, d, s, t):
+    """Two inputs that do not share one encode through the device route (one batched encode
+    per input, filling._device_giant_groups) against the CPU route on the same inputs, and the
+    tiles fetched back off the device against their host diagonals. Without rotation keys the
+    inputs stand in for their own babies: the same sum of products on both routes."""
+    x2 = ops.mult(x, 1.0)  # one product down: a different encode from x's
+    keys = [(ops.level(c), ops.noise_deg(c)) for c in (x, x2)]
+    if keys[0] == keys[1]:
+        raise SystemExit(f"mixed cell: both inputs encode alike {keys}")
+    Ws = [rng.uniform(-0.3, 0.3, (d, d)) for _ in range(2)]
+    devs = [filling.EncodedTile.encode(W, N, f"m{i}", dev_ops=ops) for i, W in enumerate(Ws)]
+    cpus = [filling.EncodedTile.encode(W, N, f"n{i}") for i, W in enumerate(Ws)]
+    rxs = [[x] * s, [x2] * s]
+    g = 2
+    y_dev = filling._device_giant_groups(ops, rxs, devs, g, s)
+    y_cpu = None
+    for rx, w in zip(rxs, cpus):
+        part = filling._giant_group(ops, rx, w, g)
+        y_cpu = part if y_cpu is None else ops.add(y_cpu, part)
+    r_dev = filling.unpack(ops.decrypt_slots(y_dev), d, t)
+    r_cpu = filling.unpack(ops.decrypt_slots(y_cpu), d, t)
+    fetched = [np.array_equal(w.with_rows(ops).rows, c.rows) for w, c in zip(devs, cpus)]
+    cell = {
+        "mixed": True,
+        "g": g,
+        "encodes": keys,
+        "max_abs_dev_minus_cpu": float(np.max(np.abs(r_dev - r_cpu))),
+        "max_abs": float(np.max(np.abs(r_cpu))),
+        "level_dev": ops.level(y_dev),
+        "level_cpu": ops.level(y_cpu),
+        "tiles_fetched_exact": all(fetched),
+    }
+    cell["pass"] = (
+        cell["max_abs_dev_minus_cpu"] <= 1e-9
+        and cell["level_dev"] == cell["level_cpu"]
+        and cell["tiles_fetched_exact"]
+    )
+    print(json.dumps(cell), flush=True)
+    return cell
 
 
 def main(argv=None):
@@ -235,6 +274,9 @@ def main(argv=None):
         ok &= one_group(W4, 5, (0, 31))
         W8 = [rng.uniform(-0.3, 0.3, (d, d)) for _ in range(8)]
         ok &= one_group(W8, 17, (0, 15))
+        mixed = _mixed_cell(ops, rng, x, N, d, s, t)
+        report["cells"].append(mixed)
+        ok &= mixed["pass"]
         report["stats"] = dict(_core.gpu_encode_stats(inf))
         _core.release_tiles(inf)
     report["pass"] = bool(ok)

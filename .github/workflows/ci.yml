@@ -12,7 +12,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: astral-sh/ruff-action@v3
         with:
-          args: check perseus tests scripts
+          args: check perseus tests scripts examples/fhe_ssm_from_primitives
       - run: bash scripts/utils/lint_no_narrative.sh
 
   cpu-tests:

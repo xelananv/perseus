@@ -83,15 +83,18 @@ class FheSsmModel(ImplModel):
         """The block's operands; with ``resident_weights`` encoded once and named for the
         runtime's caches, else rebuilt per use and unnamed (a CPU pass over many blocks)."""
         sc = None if self.scales is None else self.scales[b]
-        # With the device encoder the tiles go resident once (2.6 GiB for 24 blocks) and the lane
-        # vectors stay unnamed (~50 per block, encoded per use), so the block's operands are kept
-        # as with resident weights, only unnamed.
+        # With the device encoder the tiles go resident once (2.6 GiB for 24 blocks, on the
+        # device only: a registered tile keeps no host rows) and the lane vectors stay unnamed
+        # (~50 per block, encoded per use), so the block's operands are kept as with resident
+        # weights, only unnamed.
         device = bool(getattr(self.rt.ops, "gpu_encode", False))
         named = not device
         if not device and not self.resident:
             return encode_block(self.params.block(b), self.geo, f"b{b}.", named=False, scales=sc)
         if b not in self._bw:
-            self._bw[b] = encode_block(self.params.block(b), self.geo, f"b{b}.", named=named, scales=sc)
+            self._bw[b] = encode_block(
+                self.params.block(b), self.geo, f"b{b}.", named=named, scales=sc
+            )
         return self._bw[b]
 
     def preload(self):

@@ -60,10 +60,12 @@ long mismatches(const DeviceCt& a, const DeviceCt& b) {
 
 }  // namespace
 
-void bind_bts(py::module_& m) {
-    auto bts = m.def_submodule("bts", "The GPU bootstrap as stages (FIDESlib BootstrapStages.cuh).");
+// The bootstrap bindings go on the submodule `bts`. Inside, `m` names that submodule (as `m` names
+// the module in every other bindings file), so a definition reads the same here and there;
+// bind_bts below makes the submodule and hands it in.
+static void bts_defs(py::module_& m) {
 
-    py::class_<DeviceCt>(bts, "DeviceCt")
+    py::class_<DeviceCt>(m, "DeviceCt")
         .def_property_readonly("level", [](const DeviceCt& d) { return d.get().getLevel(); })
         .def_property_readonly("noise_level", [](const DeviceCt& d) { return d.get().NoiseLevel; })
         .def_property("slots", [](const DeviceCt& d) { return d.get().slots; },
@@ -74,7 +76,7 @@ void bind_bts(py::module_& m) {
                    std::to_string(d.get().NoiseLevel) + " slots=" + std::to_string(d.get().slots) + ">";
         });
 
-    py::class_<FC::BtsState>(bts, "BtsState")
+    py::class_<FC::BtsState>(m, "BtsState")
         .def_readonly("slots", &FC::BtsState::slots)
         .def_readonly("old_slots", &FC::BtsState::oldSlots)
         .def_readonly("prescaled", &FC::BtsState::prescaled)
@@ -100,53 +102,53 @@ void bind_bts(py::module_& m) {
         });
 
     // ---- handles
-    bts.def("device", &device_of, py::arg("fhe"), py::arg("ct"), kRelease,
+    m.def("device", &device_of, py::arg("fhe"), py::arg("ct"), kRelease,
           "The device ciphertext of a PackedCtx (loaded if needed); the view keeps the PackedCtx's storage alive.");
-    bts.def("clone", [](PackedCtx& p) { PackedCtx q = p; q.ct = p.ct->Clone(); return q; }, py::arg("ct"), kRelease,
+    m.def("clone", [](PackedCtx& p) { PackedCtx q = p; q.ct = p.ct->Clone(); return q; }, py::arg("ct"), kRelease,
           "A deep copy (device copy) of a PackedCtx.");
-    bts.def("set_slots", [](PackedCtx& p, int s) { p.ct->SetSlots((size_t)s); }, py::arg("ct"), py::arg("slots"),
+    m.def("set_slots", [](PackedCtx& p, int s) { p.ct->SetSlots((size_t)s); }, py::arg("ct"), py::arg("slots"),
           "Set the ciphertext's slot count (the bootstrap route is chosen from it).");
-    bts.def("mismatches", &mismatches, py::arg("a"), py::arg("b"), kRelease,
+    m.def("mismatches", &mismatches, py::arg("a"), py::arg("b"), kRelease,
           "Residues that differ between two device ciphertexts (both polynomials, every limb); -1 = different shape.");
-    bts.def("sync", [] { cudaDeviceSynchronize(); }, kRelease);
+    m.def("sync", [] { cudaDeviceSynchronize(); }, kRelease);
 
     // ---- C++ references
-    bts.def("cpp_bootstrap", [](DeviceCt& d, int slots, bool prescaled) { FC::Bootstrap(d.get(), slots, prescaled); },
+    m.def("cpp_bootstrap", [](DeviceCt& d, int slots, bool prescaled) { FC::Bootstrap(d.get(), slots, prescaled); },
           py::arg("ct"), py::arg("slots"), py::arg("prescaled") = false, kRelease,
           "FIDESlib's own Bootstrap() on the device ciphertext (in place).");
-    bts.def("cpp_bootstrap_staged",
+    m.def("cpp_bootstrap_staged",
           [](DeviceCt& d, int slots, bool prescaled) { FC::BootstrapStaged(d.get(), slots, prescaled); },
           py::arg("ct"), py::arg("slots"), py::arg("prescaled") = false, kRelease,
           "The stage sequence, driven from C++ (in place).");
 
     // ---- stages (in place on the DeviceCt)
-    bts.def("begin", [](DeviceCt& d, int slots, bool prescaled, bool allow_stc_first) {
+    m.def("begin", [](DeviceCt& d, int slots, bool prescaled, bool allow_stc_first) {
               return FC::btsBegin(d.get(), slots, prescaled, allow_stc_first);
           },
           py::arg("ct"), py::arg("slots"), py::arg("prescaled") = false, py::arg("allow_stc_first") = true, kRelease);
-    bts.def("stc_first_input", [](DeviceCt& d, const FC::BtsState& s) { FC::btsStcFirstInput(d.get(), s); },
+    m.def("stc_first_input", [](DeviceCt& d, const FC::BtsState& s) { FC::btsStcFirstInput(d.get(), s); },
           py::arg("ct"), py::arg("st"), kRelease);
-    bts.def("mod_raise", [](DeviceCt& d, FC::BtsState& s) { FC::btsModRaise(d.get(), s); }, py::arg("ct"),
+    m.def("mod_raise", [](DeviceCt& d, FC::BtsState& s) { FC::btsModRaise(d.get(), s); }, py::arg("ct"),
           py::arg("st"), kRelease);
-    bts.def("fold", [](DeviceCt& d, const FC::BtsState& s) { FC::btsFold(d.get(), s); }, py::arg("ct"), py::arg("st"),
+    m.def("fold", [](DeviceCt& d, const FC::BtsState& s) { FC::btsFold(d.get(), s); }, py::arg("ct"), py::arg("st"),
           kRelease);
-    bts.def("cts_stage", [](DeviceCt& d, const FC::BtsState& s, int k) { FC::btsCtSStage(d.get(), s, k); },
+    m.def("cts_stage", [](DeviceCt& d, const FC::BtsState& s, int k) { FC::btsCtSStage(d.get(), s, k); },
           py::arg("ct"), py::arg("st"), py::arg("k"), kRelease);
-    bts.def("eval_mod", [](DeviceCt& d, const FC::BtsState& s) { FC::btsEvalMod(d.get(), s); }, py::arg("ct"),
+    m.def("eval_mod", [](DeviceCt& d, const FC::BtsState& s) { FC::btsEvalMod(d.get(), s); }, py::arg("ct"),
           py::arg("st"), kRelease);
-    bts.def("stc_first_output", [](DeviceCt& d, const FC::BtsState& s) { FC::btsStcFirstOutput(d.get(), s); },
+    m.def("stc_first_output", [](DeviceCt& d, const FC::BtsState& s) { FC::btsStcFirstOutput(d.get(), s); },
           py::arg("ct"), py::arg("st"), kRelease);
-    bts.def("stc_enter", [](DeviceCt& d, const FC::BtsState& s) { FC::btsStCEnter(d.get(), s); }, py::arg("ct"),
+    m.def("stc_enter", [](DeviceCt& d, const FC::BtsState& s) { FC::btsStCEnter(d.get(), s); }, py::arg("ct"),
           py::arg("st"), kRelease);
-    bts.def("stc_stage", [](DeviceCt& d, const FC::BtsState& s, int k) { FC::btsStCStage(d.get(), s, k); },
+    m.def("stc_stage", [](DeviceCt& d, const FC::BtsState& s, int k) { FC::btsStCStage(d.get(), s, k); },
           py::arg("ct"), py::arg("st"), py::arg("k"), kRelease);
-    bts.def("finish", [](DeviceCt& d, const FC::BtsState& s) { FC::btsFinish(d.get(), s); }, py::arg("ct"),
+    m.def("finish", [](DeviceCt& d, const FC::BtsState& s) { FC::btsFinish(d.get(), s); }, py::arg("ct"),
           py::arg("st"), kRelease);
 
     // ---- SPRU for the s = 1 route (CKKS/Spru.cuh)
     static std::shared_ptr<FC::SpruKey> g_spru;
     static struct { long n = 0; FC::SpruTimes t; } g_spruAcc;
-    bts.def("spru_times", [] {
+    m.def("spru_times", [] {
         py::dict r;
         const double n = g_spruAcc.n ? (double)g_spruAcc.n : 1.0;
         r["n"] = g_spruAcc.n;
@@ -155,7 +157,7 @@ void bind_bts(py::module_& m) {
         r["product"] = g_spruAcc.t.product_ms / n; r["finish"] = g_spruAcc.t.finish_ms / n; r["total"] = g_spruAcc.t.total_ms / n;
         return r;
     }, "Mean SPRU phase times (ms) over the calls made with PERSEUS_BTS_PROFILE set.");
-    bts.def("spru_setup",
+    m.def("spru_setup",
           [](CKKSContext& fhe, int h) {
               auto& lcc = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(fhe.cc->cpu);
               auto lsk = std::any_cast<const lbcrypto::PrivateKey<lbcrypto::DCRTPoly>&>(fhe.keys.secretKey->pimpl);
@@ -166,7 +168,7 @@ void bind_bts(py::module_& m) {
           },
           py::arg("fhe"), py::arg("h") = 64, kRelease,
           "Build the SPRU key material for the s = 1 route (block key, switching key, 4 key ciphertexts).");
-    bts.def("spru",
+    m.def("spru",
           [](CKKSContext& fhe, DeviceCt& d, uint32_t correction) {
               if (!g_spru) throw std::runtime_error("[bts] spru_setup first");
               auto& lcc = std::any_cast<lbcrypto::CryptoContext<lbcrypto::DCRTPoly>&>(fhe.cc->cpu);
@@ -183,7 +185,7 @@ void bind_bts(py::module_& m) {
           "SPRU bootstrap of a ciphertext whose slots all hold one complex value (in place).");
 
     // ---- override hook: route every FIDESlib Bootstrap() of the runtime to fn(ct: DeviceCt, slots, prescaled)
-    bts.def("set_override",
+    m.def("set_override",
           [](py::object fn) {
               if (fn.is_none()) {
                   FC::g_bootstrapOverride = nullptr;
@@ -201,3 +203,7 @@ void bind_bts(py::module_& m) {
           "the GIL held; the DeviceCt it receives is valid only during the call.");
 }
 
+void bind_bts(py::module_& m) {
+    py::module_ bts = m.def_submodule("bts", "The GPU bootstrap as stages (FIDESlib BootstrapStages.cuh).");
+    bts_defs(bts);
+}

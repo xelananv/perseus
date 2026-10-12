@@ -16,8 +16,10 @@
 // Everything runs on the legacy default stream, which orders after every ciphertext operation that
 // produced the value and before every one that may change it in place — provided the library's
 // streams are blocking ones, which the first probe checks. The key lives on the device for the
-// probe's lifetime and is zeroed, with the last decrypted polynomial, before its memory returns to
-// the pool. The two debug accessors (the decrypted residues, the key's limbs) exist only in builds
+// probe's lifetime. When the probe goes, the key and the scratch polynomial (both buffers of every
+// limb, over their whole allocation) and the decoded coefficients and slots of the last probe are
+// zeroed before their memory returns to the pool; the statistics buffer is the capture's own
+// output. The two debug accessors (the decrypted residues, the key's limbs) exist only in builds
 // with GPU_MAG_PROBE_DEBUG (CMake: CACHEMIR_MAG_PROBE_DEBUG=ON, the probe check's diag mode).
 #pragma once
 
@@ -35,8 +37,9 @@ using Context = std::shared_ptr<ContextData>;
 
 namespace gpu_encode {
 
-// Zero every limb of a poly on the device; never throws. The key's owner calls it before the
-// memory returns to the pool, whether the probe was built or its construction failed.
+// Zero every limb of a poly on the device (both of each limb's buffers, over their whole
+// allocation); never throws, a failing memset is reported on stderr. The key's owner calls it
+// before the memory returns to the pool, whether the probe was built or its construction failed.
 void zero_plaintext_limbs(FIDESlib::CKKS::Plaintext& p) noexcept;
 
 class GpuMagProbe {

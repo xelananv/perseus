@@ -40,6 +40,7 @@ namespace FIDESlib::CKKS { void setArcsineOverride(int v); }  // ApproxModEval.c
 #include <regex>
 #include <set>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <condition_variable>
 #include <deque>
@@ -754,12 +755,36 @@ struct CKKSContext {
             sig.slots, sig.period, sig.live_exact, sig.stride_exact, sig.window_exact,
             sig.offset_exact);
     }
-    // A plaintext known to be dense and aperiodic without a slot scan: the port's block-constant
-    // weight diagonals made on the device (gpu_encode_bridge.cu) carry no host values to analyze.
+    // The tag of a plaintext known to be dense and aperiodic without a slot scan: the port's weight
+    // diagonals made on the device (gpu_encode_bridge.cu) carry no host values to analyze. It is
+    // the tag tag_plaintext() itself gives a dense aperiodic real vector, computed once per session
+    // on a scratch plaintext, so whatever that path records for such a plaintext (support, period,
+    // any field added to the tag later) the device plaintexts carry identically;
+    // tests/dev/gpu_encode_layout_probe.cu asserts the equality on a real diagonal.
+    mutable std::optional<packtag::PackTag> dense_pt_tag;
+    mutable std::mutex dense_tag_mtx;
+    packtag::PackTag dense_plaintext_tag() const {
+        std::lock_guard<std::mutex> lk(dense_tag_mtx);
+        if (!dense_pt_tag) {
+            std::vector<double> v(static_cast<std::size_t>(cc->GetRingDimension() / 2));
+            uint64_t s = 0x9E3779B97F4A7C15ull;   // a fixed pseudo-random fill in [0.5, 1.5): dense, aperiodic
+            for (auto& x : v) {
+                s = s * 6364136223846793005ull + 1442695040888963407ull;
+                x = 0.5 + static_cast<double>(s >> 11) * (1.0 / 9007199254740992.0);
+            }
+            Ptx probe = std::make_shared<typename Ptx::element_type>(CC(cc));
+            tag_plaintext(probe, v);
+            dense_pt_tag = tag_of(probe);
+            std::lock_guard<std::mutex> lk2(tags_mtx);
+            pt_tags.erase((const void*)probe.get());
+        }
+        return *dense_pt_tag;
+    }
     void tag_plaintext_top(const Ptx& pt) const {
         if (!pt) return;
+        const packtag::PackTag t = dense_plaintext_tag();
         std::lock_guard<std::mutex> lk(tags_mtx);
-        pt_tags[(const void*)pt.get()] = packtag::PackTag::top(static_cast<int>(cc->GetRingDimension() / 2));
+        pt_tags[(const void*)pt.get()] = t;
     }
     void tag_plaintext(const Ptx& pt, const std::vector<std::complex<double>>& values) const {
         if (!pt) return;
@@ -1223,12 +1248,16 @@ struct CKKSContext {
     // pt_vars and pt_tags are keyed by the facade object's address. The device encoder makes and
     // drops one facade plaintext per diagonal, so addresses recur within a capture; a plaintext
     // leaving the session takes its name and tag with it (gpu_encode_bridge.cu: evict).
-    void forget_pt(const Ptx& pt) {
-        if (!pt) return;
-        const void* key = static_cast<const void*>(pt.get());
+    // Forget the name and tag keyed by a plaintext's address: on eviction, and from the deleter of
+    // a device plaintext's wrap when its last reference goes (another plaintext may take the
+    // address next).
+    void forget_pt_key(const void* key) {
         pt_vars.erase(key);
         std::lock_guard<std::mutex> lk(tags_mtx);
         pt_tags.erase(key);
+    }
+    void forget_pt(const Ptx& pt) {
+        if (pt) forget_pt_key(static_cast<const void*>(pt.get()));
     }
 
     std::string next_ct(const std::string& prefix = "v") {
@@ -1715,7 +1744,9 @@ struct CKKSContext {
     // capture block); borrows and copy-inheritance resolve at drain exactly as before. A failure
     // while issuing a probe switches the probe off and the node takes the host path; a failure at
     // fetch (the device work itself) aborts the capture, since a graph with nodes that carry no
-    // magnitude would plan silently worse.
+    // magnitude would plan silently worse. The [mag_lanes] live/dead report of a lane-masked
+    // capture is a host-path diagnostic (lane_split reads decoded host values): nodes measured
+    // here do not feed it.
     static bool mag_gpu_enabled() {
         static const bool on = [] {
             const char* e = std::getenv("FHE_MAG_GPU");

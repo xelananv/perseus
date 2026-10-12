@@ -6,7 +6,7 @@ PATTERN='KNOWLEDGE\.md|TO-TRY|FAILURE\.md|SUCCESSFUL\.md|SETUPS\.md|CLAUDE\.md|R
 if grep -rniE "$PATTERN" --include='*.py' --include='*.cu' --include='*.cpp' --include='*.h' --include='*.cuh' \
      --include='*.sh' --include='*.md' --include='*.toml' --include='*.yml' --include='*.yaml' --include='*.ipynb' --include='*.json' \
      --include='CMakeLists.txt' --include='.gitignore' --include='.gitmodules' \
-     perseus src include scripts tests notebooks docs configs .github .gitignore .gitmodules \
+     perseus src include scripts tests examples notebooks docs configs .github .gitignore .gitmodules \
      third_party/openfhe-n32 \
      README.md CONTRIBUTING.md CMakeLists.txt pyproject.toml \
      2>/dev/null | grep -vE 'scripts/utils/lint_no_narrative.sh|tests/test_notebooks.py:[0-9]+:FORBIDDEN' \

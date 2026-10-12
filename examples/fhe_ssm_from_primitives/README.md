@@ -113,11 +113,15 @@ binary: eager 1,839.5 s, planned 1,345.0 s at 48, 1,143.8 s at 50, with the repl
 lower under either plan and top-1 1.0 on every planned tick.
 
 The weight diagonals are encoded on the device at their use (`FHE_GPU_ENCODE=0` selects the CPU
-encode in the same binary, 7–13× slower per block). On a GPU below compute capability 9.0 the
-pinned FIDESlib32bits does not build as is (one kernel uses thread-block clusters); the fork's
-measurement notes carry an arch-guarded patch for that file. The encoder's and the probe's own
-checks are ctest tests labelled `gpu` (`ctest -L gpu` in the tests build directory); the
-repository's CI has no GPU runner, so they run by hand.
+encode in the same binary, 7–13× slower per block): a tile registered on the device keeps no host
+copy, each giant group is one batched encode per input level, and a group the encoder cannot
+serve (a pending rescale on a one-prime chain) takes the CPU route from the tile fetched back. On
+a GPU below compute capability 9.0 the pinned FIDESlib32bits does not build as is (one kernel uses
+thread-block clusters); the fork's measurement notes carry an arch-guarded patch for that file.
+The encoder's and the probe's own checks are ctest tests labelled `gpu` (`ctest -L gpu` in the
+tests build directory, no further environment); the repository's CI has no GPU runner, so they
+run by hand. `python examples/fhe_ssm_from_primitives/lint.py --check` runs ruff and mypy over
+this directory with its own, stricter configuration.
 
 ## Colab
 

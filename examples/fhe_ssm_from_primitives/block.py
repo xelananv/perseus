@@ -17,9 +17,12 @@ values are lists of ciphertexts (one per tile; a single one in the decode layout
 from __future__ import annotations
 
 import dataclasses
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from .norm import rmsnorm
+
+if TYPE_CHECKING:
+    from .geometry import Geometry, Ops
 
 
 @dataclasses.dataclass
@@ -31,17 +34,17 @@ class BlockState:
     n_prev: Any
 
 
-def norm(geo, h, site, tag: str, form: str):
+def norm(geo: Geometry, h, site, tag: str, form: str):
     """RMSNorm of ``h`` as a section, the split's factor 2 absorbed by the masks."""
     gain = geo.split_gain
 
-    def kernel(ops, g, xs):
+    def kernel(ops: Ops, g: Geometry, xs):
         return [rmsnorm(ops, g, xs[0], site, tag, form, gain=gain)]
 
     return geo.section(kernel, [h])[0]
 
 
-def tm_gate(ops, z, w):
+def tm_gate(ops: Ops, z, w):
     """``z (p0 + p1 z + p2 z^2)``."""
     poly = ops.add(
         ops.mult_pt(z, w.p1, key=w.key("p1")),
@@ -50,7 +53,7 @@ def tm_gate(ops, z, w):
     return ops.mult(z, ops.add_pt(poly, w.p0, key=w.key("p0")))
 
 
-def cm_gate(ops, k, r, w, j: int = 0):
+def cm_gate(ops: Ops, k, r, w, j: int = 0):
     """``(q0 + q1 k + q2 k^2 + q3 k^3) (r0 + r1 r + r2 r^2)`` on d_ffn tile ``j``."""
 
     def key(name):
@@ -68,7 +71,7 @@ def cm_gate(ops, k, r, w, j: int = 0):
     return ops.mult(act, gate)
 
 
-def time_mix(ops, geo, h, w, st: BlockState, form: str):
+def time_mix(ops: Ops, geo: Geometry, h, w, st: BlockState, form: str):
     """``h + W_out g``; updates ``st`` in place (``s``, ``n_prev`` not yet carried)."""
     with geo.step("tm.norm"):
         n = norm(geo, h, w.norm_tm, w.key("tm.norm"), form)
@@ -87,7 +90,7 @@ def time_mix(ops, geo, h, w, st: BlockState, form: str):
         return ops.add(h, geo.linear(geo.hint(g), w.wout))
 
 
-def channel_mix(ops, geo, h, w, form: str):
+def channel_mix(ops: Ops, geo: Geometry, h, w, form: str):
     """``h + W_v (act (.) gate)``, tile by tile over d_ffn."""
     with geo.step("cm.norm"):
         n = norm(geo, h, w.norm_cm, w.key("cm.norm"), form)
@@ -104,11 +107,11 @@ def channel_mix(ops, geo, h, w, form: str):
         return ops.add(h, geo.down([geo.hint(a) for a in ags], w.wv))
 
 
-def ssm_block(ops, geo, h, w, st: BlockState, form: str = "perseus"):
+def ssm_block(ops: Ops, geo: Geometry, h, w, st: BlockState, form: str = "perseus"):
     return channel_mix(ops, geo, time_mix(ops, geo, h, w, st, form), w, form)
 
 
-def carry(ops, geo, st: BlockState):
+def carry(ops: Ops, geo: Geometry, st: BlockState):
     """The canonical carry: both carried values back to the bootstrap landing level, so the
     next token enters the identical circuit."""
     with geo.step("carry"):

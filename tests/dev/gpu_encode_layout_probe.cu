@@ -68,8 +68,10 @@ void fill_poly(FIDESlib::CKKS::RNSPoly& poly, FIDESlib::CKKS::ContextData& cd,
     // RNSPoly::loadCoeffExpand, which grows with constant=false before its INTT/NTT)
     poly.load(data, moduli);
     cudaDeviceSynchronize();
-    std::fprintf(stderr, "[probe] loaded (level %d); NTT batch=%d\n", poly.getLevel(), cd.batch);
-    poly.NTT(cd.batch, true);
+    // cd.param.batch, not cd.batch: `param` sits before the NCCL-shifted fields of ContextData
+    // (gpu_encode.h, "Context layout"); a field read past the shift is garbage in this translation unit
+    std::fprintf(stderr, "[probe] loaded (level %d); NTT batch=%d\n", poly.getLevel(), cd.param.batch);
+    poly.NTT(cd.param.batch, true);
     cudaDeviceSynchronize();
     std::fprintf(stderr, "[probe] NTT done\n");
 }
@@ -166,6 +168,20 @@ int main(int argc, char** argv) {
     std::printf("{\"probe\":\"wrap\",\"order\":\"%s\",\"max_abs_dev_minus_ref\":%.3e,\"max_abs_dev_minus_plain\":%.3e,"
                 "\"max_abs_plain\":%.3e,\"pt_level\":%u}\n",
                 use_rev ? "bitrev16" : "natural", max_dd, max_plain, max_ref, ref_o->GetLevel());
+
+    // C. the tag: the bridge tags a device plaintext without a slot scan (tag_plaintext_top); it must
+    //    equal what the runtime's encode records for the same dense values (tag_plaintext), field by
+    //    field, or the planner would see the two routes differently
+    fhe->tag_plaintext(ref, x);
+    fhe->tag_plaintext_top(mypt);
+    const auto t_ref = fhe->tag_of(ref), t_dev = fhe->tag_of(mypt);
+    const bool tags_equal = t_ref.slots == t_dev.slots && t_ref.period == t_dev.period
+        && t_ref.support.kind == t_dev.support.kind && t_ref.support.offset == t_dev.support.offset
+        && t_ref.support.stride == t_dev.support.stride && t_ref.support.count == t_dev.support.count
+        && t_ref.support.width == t_dev.support.width;
+    std::printf("{\"probe\":\"tag\",\"equal\":%d,\"slots\":%d,\"period\":%d,\"dense\":%d}\n", (int)tags_equal,
+                t_dev.slots, t_dev.period, (int)t_dev.support.is_dense());
+    fhe->forget_pt(mypt);
     cc->EvictDevicePlaintext(handle);
-    return (mm_nat == 0 || mm_rev == 0) && max_dd < 1e-9 ? 0 : 1;
+    return (mm_nat == 0 || mm_rev == 0) && max_dd < 1e-9 && tags_equal ? 0 : 1;
 }

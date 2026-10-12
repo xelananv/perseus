@@ -61,6 +61,7 @@ Regenerate this file with `python scripts/utils/scan_env_vars.py`.
 | `FHE_BOOTSTRAP_PLACEMENTS_DIR` | Plan directory a run binds to; unset = eager. |
 | `FHE_DECODE_PLACEMENTS_DIR` | Plan used for the decode phase of a generation run. |
 | `FHE_GRAPH_DIR` | Directory a capture writes the op-graph into (STAGE=capture). |
+| `FHE_MAG_GPU` | Measure a capture's magnitudes on the device (decrypt, inverse NTT, decode and the statistics where the ciphertext is; include/gpu_mag_probe.h) instead of copying every node to the host; default off, `examples/fhe_ssm_from_primitives/gpu_run.py --mode capture` turns it on. The `[mag_lanes]` live/dead report of a lane-masked capture is a host-path diagnostic and does not count device-measured nodes. |
 | `FHE_MAG_WORKERS` | Worker threads for that measurement. |
 | `FHE_PREFILL_CAPTURE_RANGES` | Capture the per-chunk token ranges of a prefill. |
 | `FHE_PREFILL_PLACEMENTS_DIR` | Plan used for the prefill phase of a generation run. |
@@ -100,6 +101,9 @@ Regenerate this file with `python scripts/utils/scan_env_vars.py`.
 
 | variable | meaning |
 |---|---|
+| `FHE_GPU_ENCODE` | Encode the filled layout's weight diagonals on the device from resident tiles (include/gpu_encode_bridge.h; the default where `perseus._core` has the encoder and the session runs on a GPU); 0 = the CPU encode in the same binary. The port's own encoder, not a library switch. |
+| `FHE_GPU_ENCODE_SYNC` | Synchronize after every stage of the device encoder (debugging: a launch error is reported at its stage). |
+| `FHE_GPU_ENCODE_TIMING` | Accumulate the device encoder's per-stage device times (gather, FFT, twist/round/reduce, NTT) in its stats; the host then waits for every batch, so the overlap with the products is lost. |
 | `FHE_MAG_RING_GB` | Pinned ring the asynchronous magnitude capture stores ciphertexts in. |
 | `FHE_PREFILL_ENCODE_THREADS` | Threads encoding prefill weights. |
 | `FHE_PT_COEFF_ENCODE` | Stage weights as raw coefficients and expand them on the GPU. |
@@ -126,3 +130,4 @@ Regenerate this file with `python scripts/utils/scan_env_vars.py`.
 | `FHE_GRAPH_CAPTURE_TOKEN` | Capture the op-graph of one token only. |
 | `FHE_PROFILE` | Per-operation timing table on stderr (default off). |
 | `FHE_PROFILE_TOKEN` | Restrict that profile to one token index. |
+| `FHE_RESIDPERF` | Per-token host-side residency timings on stdout; `xwait` is the staging the pipeline failed to hide behind compute (0 = fully hidden). Valid on an unprofiled run, unlike FHE_PROFILE. |

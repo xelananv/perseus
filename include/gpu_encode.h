@@ -83,9 +83,12 @@ class GpuEncoder {
     // W[(i + g*s + b) mod d][i]) once; the id is what encode_group reads from.
     TileId register_tile(const std::vector<double>& W_row_major, int d);
     // Free every resident tile; ids issued before this call are refused from here on. Never throws
-    // (it runs from destructors): a context error at that point is cleared, not reported.
+    // (it runs from destructors): a context error at that point is reported on stderr, not thrown.
     void release_tiles() noexcept;
     std::size_t tile_count() const { return tiles_.size(); }
+    // The resident tile back on the host (row-major d x d; `d` is set): the CPU route's source
+    // when a group cannot take the device route.
+    std::vector<double> download_tile(TileId id, int& d) const;
 
     // Encode one batch: K1 -> cuFFT -> K2 on the encode stream of this batch's parity, then the
     // library's NTT on the polys' (legacy default) stream; returns B device plaintexts (EVAL form,

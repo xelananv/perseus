@@ -256,6 +256,17 @@ class FheOps:
         """A d x d folded tile resident on the device; returns its id (refused after release_tiles)."""
         return self.core.register_tile(self.inf, np.ascontiguousarray(W, dtype=np.float64))
 
+    def tile_values(self, tile_id):
+        """The resident tile back on the host (d x d): the CPU route's source for a group the
+        device route cannot serve."""
+        return self.core.tile_values(self.inf, int(tile_id))
+
+    def gpu_encode_fits(self, ref) -> bool:
+        """True when a device encode can serve a product with `ref` (a degree-1 encode: always on
+        the composite chain). A core without the question answers yes."""
+        f = getattr(self.core, "gpu_encode_fits", None)
+        return True if f is None else bool(f(self.inf, ref))
+
     def encode_group(self, tile_ids, baby, g, s, ref, names):
         return self.core.encode_group_gpu(self.inf, list(tile_ids), list(baby), int(g), int(s), ref, list(names))
 

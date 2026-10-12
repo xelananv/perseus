@@ -204,17 +204,24 @@ uint64_t inv_mod(uint64_t a, uint64_t m) {
     return r;
 }
 
+// Both buffers of a limb over their whole allocation: the library's NTT kernels sweep [0, alloc),
+// not [0, size), and the aux buffer keeps the transform's intermediate of the last polynomial.
+template <class T>
+void zero_limb(FIDESlib::CKKS::Limb<T>& lb) noexcept {
+    if (lb.v.data) note_teardown(cudaMemset(lb.v.data, 0, sizeof(T) * lb.v.alloc), kWho, "zero limb");
+    if (lb.aux.data) note_teardown(cudaMemset(lb.aux.data, 0, sizeof(T) * lb.aux.alloc), kWho, "zero limb aux");
+}
+
 }  // namespace
 
 void zero_plaintext_limbs(FIDESlib::CKKS::Plaintext& p) noexcept {
     using FIDESlib::CKKS::Limb;
     for (auto& part : p.c0.GPU) {
         for (auto& var : part.limb) {
-            if (auto* lb = std::get_if<Limb<uint32_t>>(&var)) {
-                if (lb->v.data) cudaMemset(lb->v.data, 0, sizeof(uint32_t) * lb->v.size);
-            } else if (auto* lb64 = std::get_if<Limb<uint64_t>>(&var)) {
-                if (lb64->v.data) cudaMemset(lb64->v.data, 0, sizeof(uint64_t) * lb64->v.size);
-            }
+            if (auto* lb = std::get_if<Limb<uint32_t>>(&var))
+                zero_limb(*lb);
+            else if (auto* lb64 = std::get_if<Limb<uint64_t>>(&var))
+                zero_limb(*lb64);
         }
     }
     cudaGetLastError();
@@ -229,9 +236,9 @@ struct WipedPoly {
     explicit WipedPoly(std::shared_ptr<FIDESlib::CKKS::Plaintext> q) : p(std::move(q)) {}
     ~WipedPoly() {
         if (p) {
-            cudaDeviceSynchronize();
+            note_teardown(cudaDeviceSynchronize(), kWho, "drain before zeroing a poly");
             zero_plaintext_limbs(*p);
-            cudaDeviceSynchronize();
+            note_teardown(cudaDeviceSynchronize(), kWho, "drain after zeroing a poly");
         }
     }
     WipedPoly(const WipedPoly&) = delete;
@@ -268,10 +275,23 @@ struct GpuMagProbe::Impl {
     DevicePtr<cufftDoubleComplex> X;   // n
     DevicePtr<Result> results;         // capacity
     std::size_t capacity = 0, count = 0;
+    int nblocks = 0;                   // k_garner's grid: the partial maxima per block
     std::vector<std::pair<int, FftPlan>> plans;
     cudaStream_t s0 = nullptr;  // the legacy default stream
 
     Impl(FIDESlib::CKKS::Context& c, int slots) : ctx(c), cc(*c), n(slots) {}
+    ~Impl() {
+        // The decoded coefficients and slots, and their partial maxima, hold the last decrypted
+        // value: wiped before their memory returns (the results buffer holds the capture's own
+        // statistics). The key and the scratch poly are wiped by their WipedPoly owners, destroyed
+        // after this body.
+        note_teardown(cudaDeviceSynchronize(), kWho, "drain before the wipe");
+        if (coef) note_teardown(cudaMemset(coef.get(), 0, sizeof(double) * N), kWho, "wipe coef");
+        if (X) note_teardown(cudaMemset(X.get(), 0, sizeof(cufftDoubleComplex) * n), kWho, "wipe X");
+        if (pmax) note_teardown(cudaMemset(pmax.get(), 0, sizeof(double) * nblocks), kWho, "wipe pmax");
+        if (pmax_ac) note_teardown(cudaMemset(pmax_ac.get(), 0, sizeof(double) * nblocks), kWho, "wipe pmax_ac");
+        note_teardown(cudaDeviceSynchronize(), kWho, "drain after the wipe");
+    }
 
     cufftHandle plan_for(int size) {
         for (auto& [sz, h] : plans)
@@ -339,16 +359,16 @@ GpuMagProbe::GpuMagProbe(FIDESlib::CKKS::Context& ctx, int n_slots, std::shared_
     check(cudaMemcpy(I.tw.get(), tw.data(), sizeof(cufftDoubleComplex) * I.n, cudaMemcpyHostToDevice), "upload tw");
     I.X = device_alloc<cufftDoubleComplex>(I.n, kWho, "cudaMalloc X");
     I.coef = device_alloc<double>(I.N, kWho, "cudaMalloc coef");
-    const int nblocks = (I.N + kThreads - 1) / kThreads;
-    I.pmax = device_alloc<double>(nblocks, kWho, "cudaMalloc pmax");
-    I.pmax_ac = device_alloc<double>(nblocks, kWho, "cudaMalloc pmax_ac");
+    I.nblocks = (I.N + kThreads - 1) / kThreads;
+    I.pmax = device_alloc<double>(I.nblocks, kWho, "cudaMalloc pmax");
+    I.pmax_ac = device_alloc<double>(I.nblocks, kWho, "cudaMalloc pmax_ac");
     I.capacity = 1 << 16;
     I.results = device_alloc<Result>(I.capacity, kWho, "cudaMalloc results");
 }
 
 GpuMagProbe::~GpuMagProbe() {
-    // the key and the last decrypted polynomial are zeroed by their owners (WipedPoly) as Impl goes
-    cudaDeviceSynchronize();
+    // the key, the scratch poly and the decoded buffers are wiped by Impl's teardown
+    note_teardown(cudaDeviceSynchronize(), kWho, "drain");
     cudaGetLastError();
 }
 

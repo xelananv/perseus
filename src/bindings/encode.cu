@@ -13,6 +13,7 @@
 #include <pybind11/stl.h>
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -35,16 +36,32 @@ std::vector<double> rows_of(const py::array_t<double, py::array::c_style | py::a
 }  // namespace
 
 void bind_encode(py::module_& m) {
-    // The device plaintext as Python sees it: an opaque handle (its facade Plaintext). Dropping the
-    // last reference does not free the device copy — call evict_ptx (filling.py evicts every group
-    // after its products). An evicted plaintext is refused by mult_ptx.
+    // The device plaintext as Python sees it: an opaque handle (its facade Plaintext). evict_ptx
+    // frees the device copy and forgets the graph name and tag, and the handle is refused by
+    // mult_ptx afterwards (filling.py evicts every group after its products). Dropping the last
+    // reference instead does the same through the facade's destructor and the wrap's deleter.
     py::class_<PtxImpl, Ptx>(m, "DevicePlaintext")
-        .def_property_readonly("level", [](const PtxImpl& p) { return p.GetLevel(); })
+        .def_property_readonly("level",
+                               [](const PtxImpl& p) {
+                                   if (!p.loaded || !p.cpu.has_value())
+                                       throw std::invalid_argument("DevicePlaintext.level: the plaintext was evicted");
+                                   return p.GetLevel();
+                               })
         .def_property_readonly("loaded", [](const PtxImpl& p) { return p.loaded; });
 
     m.def(
         "gpu_encode_available", [](Inference& inf) { return inf.fhe && inf.cc() && inf.cc()->gpu.has_value(); },
         py::arg("inf"), "True when the session runs on a device the encoder can use.");
+
+    m.def(
+        "gpu_encode_fits",
+        [](Inference& inf, const PackedCtx& ref) {
+            py::gil_scoped_release nogil;
+            return gpu_encode::bridge_for(inf)->fits(ref.ct);
+        },
+        py::arg("inf"), py::arg("ref"),
+        "True when encode_group_gpu can serve a product with `ref` (a degree-1 encode); otherwise the "
+        "caller takes the CPU route for that group.");
 
     m.def(
         "register_tile",
@@ -57,6 +74,23 @@ void bind_encode(py::module_& m) {
         py::arg("inf"), py::arg("W"),
         "Upload a d x d folded tile (row-major, y = x @ W) once; returns its tile id (invalid after "
         "release_tiles).");
+
+    m.def(
+        "tile_values",
+        [](Inference& inf, uint64_t tile_id) {
+            int d = 0;
+            std::vector<double> W;
+            {
+                py::gil_scoped_release nogil;
+                W = gpu_encode::bridge_for(inf)->tile_values(tile_id, d);
+            }
+            py::array_t<double> out({static_cast<py::ssize_t>(d), static_cast<py::ssize_t>(d)});
+            std::memcpy(out.mutable_data(), W.data(), sizeof(double) * W.size());
+            return out;
+        },
+        py::arg("inf"), py::arg("tile_id"),
+        "The resident tile back on the host (row-major d x d): the CPU route's source when a group "
+        "cannot take the device route.");
 
     m.def(
         "encode_group_gpu",

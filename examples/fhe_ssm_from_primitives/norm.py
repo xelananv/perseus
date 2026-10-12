@@ -24,8 +24,12 @@ from __future__ import annotations
 
 import dataclasses
 import math
+from typing import TYPE_CHECKING
 
 from perseus.impl.poly import inv_sqrt_newton
+
+if TYPE_CHECKING:
+    from .geometry import Geometry, Ops
 
 NEWTON_FORMS = ("perseus", "depth2")
 
@@ -70,7 +74,7 @@ class NormSite:
         return math.sqrt(self.sigma)
 
 
-def newton_rsqrt(ops, v, y0: float, iters: int, form: str = "perseus"):
+def newton_rsqrt(ops: Ops, v, y0: float, iters: int, form: str = "perseus"):
     """``y <- y (1.5 - 0.5 v y^2)`` ``iters`` times from the constant ``y0``."""
     if form not in NEWTON_FORMS:
         raise ValueError(f"form must be one of {NEWTON_FORMS}, got {form!r}")
@@ -86,7 +90,9 @@ def newton_rsqrt(ops, v, y0: float, iters: int, form: str = "perseus"):
     return y
 
 
-def rmsnorm(ops, geo, x, site: NormSite, tag: str, form: str = "perseus", gain: float = 1.0):
+def rmsnorm(
+    ops: Ops, geo: Geometry, x, site: NormSite, tag: str, form: str = "perseus", gain: float = 1.0
+):
     """``u / sqrt(mean(u^2) + eps)`` on the lanes for ``u = gain x``, zero elsewhere. The gain
     rides the two masks, so it costs nothing: a split pair hands the norm ``2a`` and ``2b`` and
     ``gain = 0.5`` gives the norm of ``a`` and ``b`` exactly."""

@@ -21,6 +21,7 @@ import platform
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import numpy as np
@@ -102,19 +103,23 @@ def machine() -> dict:
     }
 
 
-def fetch_model(dest, *, download=None) -> dict[str, Path]:
+def fetch_model(dest, *, download: Callable[..., str] | None = None) -> dict[str, Path]:
     """The checkpoint, Newton seeds and config from the Hugging Face model repository into
     ``dest``. The weights must match their recorded hash (the published run's); a seeds or
     config file that differs from its recorded hash is reported, since the fake check stays
     valid for any consistent set. ``download(repo, filename, local_dir)`` defaults to
     ``huggingface_hub.hf_hub_download``."""
     if download is None:
-        from huggingface_hub import hf_hub_download as download
+        from huggingface_hub import hf_hub_download
+
+        fetch: Callable[..., str] = hf_hub_download
+    else:
+        fetch = download
     dest = Path(dest)
     dest.mkdir(parents=True, exist_ok=True)
     paths = {}
     for key, (name, want) in FILES.items():
-        path = Path(download(HF_REPO, name, local_dir=str(dest), revision=HF_REVISION))
+        path = Path(fetch(HF_REPO, name, local_dir=str(dest), revision=HF_REVISION))
         got = sha256(path)
         if got != want:
             raise RuntimeError(f"{name}: sha256 {got}, expected {want} (revision {HF_REVISION})")

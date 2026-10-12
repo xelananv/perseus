@@ -121,19 +121,27 @@ def test_short_token_records_are_refused(tmp_path):
 
 
 def make_plan_defaults():
-    """plan_blocks()'s ${VAR:-default} / ${VAR-default} pairs, read from Perseus's script."""
+    """Every ``VAR="${VAR:-default}"`` / ``${VAR-default}`` of Perseus's script, whether inside
+    ``plan_blocks()`` or exported around it, so a default the script adds anywhere shows up here.
+    Left out: the interpreter, a default that is itself a shell variable (a stage's entry
+    plumbing), and the dense plan's landing clamp, which ``plan_env`` mirrors by its condition.
+    A name with two different defaults in the script is an error."""
     text = (ROOT / "examples" / "gpt2_from_primitives" / "make_plan.sh").read_text()
-    body = text[text.index("plan_blocks() {") :]
-    body = body[: body.index("\n}\n")]
-    found = dict(re.findall(r'(\w+)="\$\{\1:?-([^}]*)\}"', body))
-    if 'PLAN_PRUNE="${PLAN_PRUNE-1}"' in text:
-        found["PLAN_PRUNE"] = "1"
+    found: dict[str, str] = {}
+    for name, default in re.findall(r'(\w+)="\$\{\1:?-([^}]*)\}"', text):
+        if name in ("PYTHON", "PLAN_DELIBERATE_CLAMP0") or "$" in default:
+            continue
+        assert found.get(name, default) == default, f"{name}: {found[name]!r} and {default!r}"
+        found[name] = default
+    assert "PLAN_DELIBERATE_CLAMP0" in text, (
+        "the dense clamp left make_plan.sh; drop it from plan_env"
+    )
     return found
 
 
 def test_recipe_is_perseus_own():
     theirs = make_plan_defaults()
-    assert theirs, "make_plan.sh's plan_blocks() no longer parses"
+    assert theirs, "make_plan.sh no longer parses"
     assert theirs == plan.RECIPE
 
 

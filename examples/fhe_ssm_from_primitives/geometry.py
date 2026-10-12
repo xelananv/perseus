@@ -1,7 +1,8 @@
 # SPDX-License-Identifier: MIT
 """How values and per-channel constants meet a ciphertext in the layouts the kernels run on.
 
-Every geometry offers the same protocol, so ``block.py`` and ``norm.py`` are written once:
+Every geometry offers the same protocol (``Geometry`` below, with ``Ops`` for the leaf
+operations), so ``block.py`` and ``norm.py`` are written once:
 
     lane(v) / ffn(v)        a d-wide / d_ffn-wide per-channel constant (ffn: one vector per tile)
     weight(W, name)         a linear in this layout's form
@@ -39,6 +40,7 @@ and reductions are those of the filled layout; nonlinear sections split or run l
 from __future__ import annotations
 
 import contextlib
+from typing import Any, Protocol
 
 import numpy as np
 
@@ -48,6 +50,39 @@ from perseus.impl.linear import EncodedLinear, linear, linear_multi
 from . import filling, pairs
 
 ROUTES = ("split", "lane")
+
+
+class Ops(Protocol):
+    """The leaf operations the kernels (block.py, norm.py) take: ``perseus.impl.ops.FheOps`` on
+    a session or the fake, ``NumpyOps`` on arrays, the lane-wise ops of a split pair."""
+
+    def add(self, a: Any, b: Any) -> Any: ...
+    def mult(self, a: Any, b: Any) -> Any: ...
+    def square(self, a: Any) -> Any: ...
+    def mult_pt(self, a: Any, v: Any, key: str | None = None) -> Any: ...
+    def add_pt(self, a: Any, v: Any, key: str | None = None) -> Any: ...
+    def bootstrap(self, a: Any) -> Any: ...
+
+
+class Geometry(Protocol):
+    """What the kernels ask of a layout (the list in the module docstring, as the type checker
+    sees it); ``SlotGeometry``, ``FilledGeometry``, ``PairGeometry`` and ``PlainGeometry``
+    implement it, the model's client side (``capacity``, ``encode_rows``, ``decode_rows``,
+    ``rotation_steps``) sits beside it on the first three."""
+
+    split_gain: float
+
+    def lane(self, v: Any) -> Any: ...
+    def ffn(self, v: Any) -> Any: ...
+    def weight(self, w: Any, name: Any) -> Any: ...
+    def linear(self, x: Any, w: Any) -> Any: ...
+    def up(self, x: Any, ws: Any) -> Any: ...
+    def down(self, xs: Any, w: Any) -> Any: ...
+    def masked_scale(self, x: Any, scale: Any, site: Any) -> Any: ...
+    def sum_all(self, x: Any) -> Any: ...
+    def hint(self, x: Any, products: int = 1) -> Any: ...
+    def section(self, fn: Any, xs: Any) -> Any: ...
+    def step(self, label: Any) -> Any: ...
 
 
 def _rows(rows, d: int, capacity: int) -> np.ndarray:

@@ -9,6 +9,7 @@
 #include <CKKS/Plaintext.cuh>
 
 #include <any>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -16,23 +17,43 @@
 
 namespace gpu_encode {
 
-Bridge::Bridge(Inference& inf) : inf_(inf) {
+namespace {
+
+using PtxImpl = typename Ptx::element_type;
+
+// The deleter of a device plaintext's wrap: when the last reference goes without evict(), the
+// graph name and tag keyed by this address are forgotten first (another plaintext may take the
+// address next), then the facade's destructor evicts the device copy. The runtime is held weakly:
+// a handle that outlives its session frees its device copy and nothing else.
+struct ForgetOnDrop {
+    std::weak_ptr<CKKSContext> fhe;
+    void operator()(PtxImpl* p) const noexcept {
+        if (auto f = fhe.lock()) f->forget_pt_key(static_cast<const void*>(p));
+        delete p;
+    }
+};
+
+}  // namespace
+
+Bridge::Bridge(Inference& inf) : inf_(inf), context_(inf.cc()) {
     auto& fctx = std::any_cast<FIDESlib::CKKS::Context&>(inf.cc()->gpu);
-    context_ = static_cast<const void*>(&*inf.cc());
     slots_ = inf.slots;
     dim_ = inf.size.dim;   // the port opens its session with dim = hidDim = d (gpu_smoke.open_session)
     enc_ = std::make_unique<GpuEncoder>(fctx, slots_, dim_);   // the shared_ptr itself: Plaintext(Context&) wants it
 }
 
 Bridge::~Bridge() {
-    // destructors do not throw: release_tiles() is noexcept and the encoder's own teardown clears
-    // rather than reports a context error
+    // destructors do not throw: release_tiles() is noexcept and the encoder's own teardown reports
+    // rather than throws a context error
     std::lock_guard<std::mutex> lk(mtx_);
     if (enc_) enc_->release_tiles();
 }
 
 void Bridge::check_session() const {
-    if (static_cast<const void*>(&*inf_.cc()) != context_ || inf_.slots != slots_ || inf_.size.dim != dim_)
+    // identity by ownership, then by value: a context destroyed and another allocated in its place
+    // is a change too, and the weak reference says so before anything is read through it
+    const auto live = context_.lock();
+    if (!live || live.get() != &*inf_.cc() || inf_.slots != slots_ || inf_.size.dim != dim_)
         throw std::runtime_error("gpu_encode: the session changed under its device encoder (a stale bridge); "
                                  "close the previous session before opening another");
 }
@@ -62,6 +83,18 @@ void Bridge::release_tiles() {
     enc_->release_tiles();
 }
 
+std::vector<double> Bridge::tile_values(TileId id, int& d) {
+    std::lock_guard<std::mutex> lk(mtx_);
+    check_session();
+    return enc_->download_tile(id, d);
+}
+
+bool Bridge::fits(const Ctx& ref) const {
+    std::lock_guard<std::mutex> lk(mtx_);
+    if (!ref) return false;
+    return inf_.encode_like_params(ref).second == 1;
+}
+
 GpuEncoder::Stats Bridge::stats() const {
     std::lock_guard<std::mutex> lk(mtx_);
     return enc_->stats();
@@ -78,6 +111,13 @@ const std::any& Bridge::meta_for_level(uint32_t level) {
     return it->second->cpu;
 }
 
+void Bridge::prune_dropped() {
+    // a handle dropped without evict() has already freed its device copy and forgotten its name and
+    // tag (ForgetOnDrop); only this table still knows the address
+    for (auto it = issued_.begin(); it != issued_.end();)
+        it = it->second.expired() ? issued_.erase(it) : std::next(it);
+}
+
 std::vector<Ptx> Bridge::encode_group(const std::vector<TileId>& tile_ids, const std::vector<int>& baby, int g, int s,
                                       const Ctx& ref, const std::vector<std::string>& names) {
     std::lock_guard<std::mutex> lk(mtx_);
@@ -90,7 +130,10 @@ std::vector<Ptx> Bridge::encode_group(const std::vector<TileId>& tile_ids, const
     if (!ref) throw std::invalid_argument("encode_group: null reference ciphertext");
     check_ciphertext_stream(ref);
     const auto [lv, nsd] = inf_.encode_like_params(ref);
-    if (nsd != 1) throw std::runtime_error("encode_group: the device encoder makes degree-1 plaintexts only");
+    if (nsd != 1)
+        throw std::runtime_error("encode_group: the device encoder makes degree-1 plaintexts only (fits() is false "
+                                 "for this ciphertext; the CPU route serves it)");
+    prune_dropped();
     GroupJob job;
     job.tiles = tile_ids;
     job.baby = baby;
@@ -104,7 +147,6 @@ std::vector<Ptx> Bridge::encode_group(const std::vector<TileId>& tile_ids, const
     cuda_check(cudaStreamWaitEvent(nullptr, enc_->last_ready_event(), 0), "encode_group", "cudaStreamWaitEvent");
 
     const std::any& meta = meta_for_level(lv);
-    using PtxImpl = typename Ptx::element_type;
     std::vector<Ptx> out;
     out.reserve(B);
     std::vector<uint32_t> registered;
@@ -113,7 +155,7 @@ std::vector<Ptx> Bridge::encode_group(const std::vector<TileId>& tile_ids, const
         for (size_t b = 0; b < B; ++b) {
             const uint32_t handle = inf_.cc()->RegisterDevicePlaintext(std::static_pointer_cast<void>(gps[b]));
             registered.push_back(handle);
-            Ptx pt = std::make_shared<PtxImpl>(CC(inf_.cc()));
+            Ptx pt(new PtxImpl(CC(inf_.cc())), ForgetOnDrop{inf_.fhe});
             pt->cpu = meta;
             pt->gpu = handle;
             pt->loaded = true;
@@ -121,14 +163,16 @@ std::vector<Ptx> Bridge::encode_group(const std::vector<TileId>& tile_ids, const
                 inf_.fhe->tag_plaintext_top(pt);
                 inf_.fhe->name_pt_if_absent(pt, names[b]);
             }
-            issued_.insert(static_cast<const void*>(pt.get()));
+            issued_.emplace(static_cast<const void*>(pt.get()), std::weak_ptr<PtxImpl>(pt));
             out.push_back(std::move(pt));
         }
     } catch (...) {
-        // a wrap that failed midway leaves no device plaintext without a facade to evict it
+        // a wrap that failed midway leaves no device plaintext without a facade to evict it, and no
+        // name or tag behind
         for (auto& pt : out) {
             issued_.erase(static_cast<const void*>(pt.get()));
             inf_.evict_plaintext(pt);
+            if (inf_.fhe) inf_.fhe->forget_pt(pt);
         }
         for (size_t i = out.size(); i < registered.size(); ++i) inf_.cc()->EvictDevicePlaintext(registered[i]);
         throw;
@@ -140,8 +184,17 @@ void Bridge::evict(Ptx& pt) {
     std::lock_guard<std::mutex> lk(mtx_);
     if (!pt) return;
     const void* key = static_cast<const void*>(pt.get());
-    if (!issued_.erase(key))
+    auto it = issued_.find(key);
+    if (it == issued_.end())
         throw std::invalid_argument("evict_ptx: not a device plaintext of this encoder (or already evicted)");
+    const auto live = it->second.lock();
+    if (!live || live.get() != pt.get()) {
+        // the address of a handle that was dropped, taken since by another plaintext: not ours
+        issued_.erase(it);
+        throw std::invalid_argument("evict_ptx: not a device plaintext of this encoder (the handle it was issued to "
+                                    "is gone)");
+    }
+    issued_.erase(it);
     inf_.evict_plaintext(pt);
     if (inf_.fhe) inf_.fhe->forget_pt(pt);
     pt->cpu.reset();   // no host values: a product after eviction fails instead of multiplying by zeros

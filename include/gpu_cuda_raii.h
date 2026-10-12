@@ -9,6 +9,7 @@
 #include <cufft.h>
 
 #include <cstddef>
+#include <cstdio>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -30,6 +31,12 @@ inline void cuda_check(cudaError_t e, const char* who, const char* what) {
 inline void cufft_check(cufftResult r, const char* who, const char* what) {
     if (r != CUFFT_SUCCESS)
         throw std::runtime_error(std::string(who) + ": " + what + ": cufft error " + std::to_string(int(r)));
+}
+// A failure met while tearing down (a destructor, a noexcept release, a wipe): reported on stderr,
+// never thrown. A sticky context error shows up here as the failing synchronize, and is what the
+// next real call reports again.
+inline void note_teardown(cudaError_t e, const char* who, const char* what) noexcept {
+    if (e != cudaSuccess) std::fprintf(stderr, "[%s] teardown: %s: %s\n", who, what, cudaGetErrorString(e));
 }
 
 // A device allocation: unique_ptr<T, DeviceFree>; T is the element type the pointer is used as.
