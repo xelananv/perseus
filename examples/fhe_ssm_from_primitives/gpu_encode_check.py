@@ -53,6 +53,61 @@ def open_plain_session(d: int, *, logn: int = 16, depth: int = 26):
     return session(options=opts, family="generic", mode="sync")
 
 
+def _bench(ops, inf, _core, rng, N, d, s, x, bench):
+    """The encoder bench: three group shapes, `bench` groups each, with the fence and the
+    eviction guard; returns one row per shape."""
+    rows = []
+    for n_tiles, g in ((1, 3), (4, 5), (8, 17)):
+        Ws = [rng.uniform(-0.3, 0.3, (d, d)) for _ in range(n_tiles)]
+        devs = [
+            filling.EncodedTile.encode(W, N, f"b{i}", dev_ops=ops) for i, W in enumerate(Ws)
+        ]
+        ids = [w.dev for w in devs for _ in range(s)]
+        baby = [b for _ in devs for b in range(s)]
+        names = [w.key(g, b) for w in devs for b in range(s)]
+        st0 = dict(_core.gpu_encode_stats(inf))
+        pts = ops.encode_group(ids, baby, g, s, x, names)  # warm-up (plans, module load)
+        ops.decrypt_slots(ops.mult_ptx(x, pts[-1]))
+        for pt in pts:
+            ops.evict_ptx(pt)
+        t1 = time.time()
+        for _ in range(bench):
+            pts = ops.encode_group(ids, baby, g, s, x, names)
+            for pt in pts:
+                ops.evict_ptx(pt)
+        # the fence: a product on a fresh group of the same shape waits for every encode
+        fence = ops.encode_group(ids, baby, g, s, x, names)
+        ops.decrypt_slots(ops.mult_ptx(x, fence[-1]))
+        for pt in fence:
+            ops.evict_ptx(pt)
+        wall = time.time() - t1
+        # an evicted plaintext is refused, never multiplied as zeros
+        try:
+            ops.mult_ptx(x, pts[-1])
+        except (ValueError, RuntimeError):
+            pass
+        else:
+            raise SystemExit("mult_ptx accepted an evicted plaintext")
+        st1 = dict(_core.gpu_encode_stats(inf))
+        B = len(ids)
+        row = {
+            "B": B,
+            "g": g,
+            "groups": bench,
+            "plaintexts": bench * B,
+            "wall_s": round(wall, 4),
+            "wall_ms_per_plaintext": round(1e3 * wall / (bench * B), 4),
+            "device_ms_per_plaintext": {
+                k: round((st1[k] - st0[k]) / (st1["plaintexts"] - st0["plaintexts"]), 4)
+                for k in ("k1_ms", "fft_ms", "k2_ms", "ntt_ms")
+            },
+            "timing_env": os.environ.get("FHE_GPU_ENCODE_TIMING", ""),
+        }
+        print(json.dumps(row), flush=True)
+        rows.append(row)
+    return rows
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--d", type=int, default=1024)
@@ -99,55 +154,7 @@ def main(argv=None):
             raise SystemExit("round trip of the input failed")
 
         if a.bench:
-            report["bench"] = []
-            for n_tiles, g in ((1, 3), (4, 5), (8, 17)):
-                Ws = [rng.uniform(-0.3, 0.3, (d, d)) for _ in range(n_tiles)]
-                devs = [
-                    filling.EncodedTile.encode(W, N, f"b{i}", dev_ops=ops) for i, W in enumerate(Ws)
-                ]
-                ids = [w.dev for w in devs for _ in range(s)]
-                baby = [b for _ in devs for b in range(s)]
-                names = [w.key(g, b) for w in devs for b in range(s)]
-                st0 = dict(_core.gpu_encode_stats(inf))
-                pts = ops.encode_group(ids, baby, g, s, x, names)  # warm-up (plans, module load)
-                ops.decrypt_slots(ops.mult_ptx(x, pts[-1]))
-                for pt in pts:
-                    ops.evict_ptx(pt)
-                t1 = time.time()
-                for _ in range(a.bench):
-                    pts = ops.encode_group(ids, baby, g, s, x, names)
-                    for pt in pts:
-                        ops.evict_ptx(pt)
-                # the fence: a product on a fresh group of the same shape waits for every encode
-                fence = ops.encode_group(ids, baby, g, s, x, names)
-                ops.decrypt_slots(ops.mult_ptx(x, fence[-1]))
-                for pt in fence:
-                    ops.evict_ptx(pt)
-                wall = time.time() - t1
-                # an evicted plaintext is refused, never multiplied as zeros
-                try:
-                    ops.mult_ptx(x, pts[-1])
-                except (ValueError, RuntimeError):
-                    pass
-                else:
-                    raise SystemExit("mult_ptx accepted an evicted plaintext")
-                st1 = dict(_core.gpu_encode_stats(inf))
-                B = len(ids)
-                row = {
-                    "B": B,
-                    "g": g,
-                    "groups": a.bench,
-                    "plaintexts": a.bench * B,
-                    "wall_s": round(wall, 4),
-                    "wall_ms_per_plaintext": round(1e3 * wall / (a.bench * B), 4),
-                    "device_ms_per_plaintext": {
-                        k: round((st1[k] - st0[k]) / (st1["plaintexts"] - st0["plaintexts"]), 4)
-                        for k in ("k1_ms", "fft_ms", "k2_ms", "ntt_ms")
-                    },
-                    "timing_env": os.environ.get("FHE_GPU_ENCODE_TIMING", ""),
-                }
-                print(json.dumps(row), flush=True)
-                report["bench"].append(row)
+            report["bench"] = _bench(ops, inf, _core, rng, N, d, s, x, a.bench)
             _core.release_tiles(inf)
             report["pass"] = True
             report["total_seconds"] = round(time.time() - t0, 1)

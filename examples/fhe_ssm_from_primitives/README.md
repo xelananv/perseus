@@ -84,21 +84,38 @@ source scripts/local_env.sh                    # the n32 chain's defaults
 M="--weights pbd430a_weights.npz --seeds pbd430a_seeds.json --config pbd430a_config.json"
 python -m examples.fhe_ssm_from_primitives.gpu_smoke $M --blocks 1 --out smoke.json
 python -m examples.fhe_ssm_from_primitives.gpu_run $M --mode eager --ticks 2 --out eager.json
-python -m examples.fhe_ssm_from_primitives.gpu_run $M --mode capture --graph-dir graphs/fhe_ssm --out capture.json
-python -m examples.fhe_ssm_from_primitives.plan --graph-dir graphs/fhe_ssm --name fhe_ssm     # CPU only
+python -m examples.fhe_ssm_from_primitives.gpu_run $M --mode capture --graph-dir graphs/fhe_ssm \
+    --tokens tokens.json --ticks 2 --out capture.json
+PLAN_HARD_ENV_CAP=1 python -m examples.fhe_ssm_from_primitives.plan --graph-dir graphs/fhe_ssm --name fhe_ssm  # CPU only
 python -m examples.fhe_ssm_from_primitives.gpu_run $M --mode planned --plan-dir bootstrap_placements/fhe_ssm \
     --tokens tokens.json --ticks 8 --out planned.json
 ```
 
 `gpu_run.py` checks every tick against the mirror and the closed form (reply, logits, top-1 on
 the tied head) and rewrites its report after each tick. The capture records tick 1 (tick 0's
-carried state is zero); `plan.py` runs Perseus's placer with the n32 recipe of
-`examples/gpt2_from_primitives/make_plan.sh` (read back from that file by the tests) and stamps
-the capture's contract into every plan, so a planned run in a different environment refuses
-it. `--tokens` teacher-forces a serve run's token record, e.g. the published 148-tick run's
-(fhe-ssm repository, `results/dense-demo-s31/pod_longrun_20260919/pod_pull/s37/serve_LONG/tokens.json`).
-The linears encode every diagonal plaintext on the CPU at its use (about 345,000 per tick): a
-full eager tick is slow; the C++ `diagonal::linear` is the planned replacement.
+carried state is zero), so two ticks are enough; its magnitudes come from the device probe
+(`FHE_MAG_GPU=0` selects the host decrypt, which takes hours at ring 2^16). `plan.py` runs
+Perseus's placer with the n32 recipe of `examples/gpt2_from_primitives/make_plan.sh` (read back
+from that file by the tests) and stamps the capture's contract into every plan, so a planned run
+in a different environment refuses it. `--tokens` teacher-forces a serve run's token record, e.g.
+the published 148-tick run's (fhe-ssm repository,
+`results/dense-demo-s31/pod_longrun_20260919/pod_pull/s37/serve_LONG/tokens.json`).
+
+Two switches matter on this model's graphs, whose residual stream crosses the blocks without a
+refresh. `PLAN_HARD_ENV_CAP=1` keeps the refresh envelope absolute: a block the placer cannot
+plan inside it is refused and the previous block is re-planned with a terminal-exit refresh (the
+default relaxes the envelope instead and plants refreshes where a bootstrap returns garbage). The
+ceiling, `--set MAX_LEVEL=48` or the recipe's 50: at 48 the plan carries no warning; at 50 the
+placer warns about values predicted at level 50 with no refresh, the planned runtime accepts them
+(a predicted ceiling level is not a divergence), and the plan has fewer refreshes and the lower
+error of the two. Measured on one RTX A6000, eight ticks of the same 64 conversations in one
+binary: eager 1,839.5 s, planned 1,345.0 s at 48, 1,143.8 s at 50, with the reply error 4–8×
+lower under either plan and top-1 1.0 on every planned tick.
+
+The weight diagonals are encoded on the device at their use (`FHE_GPU_ENCODE=0` selects the CPU
+encode in the same binary, 7–13× slower per block). On a GPU below compute capability 9.0 the
+pinned FIDESlib32bits does not build as is (one kernel uses thread-block clusters); the fork's
+measurement notes carry an arch-guarded patch for that file.
 
 ## Colab
 

@@ -201,26 +201,10 @@ def apply_tiles(ops, rxs, tiles):
         device = False
     y = None
     for g in range(G):
-        acc = None
         if device:
-            # one batched device encode for every (tile, baby) of this giant index, then the
-            # products and additions in exactly the CPU route's order (each tile's group summed,
-            # then the tiles' partials), so the recorded op stream is the same on both routes
-            ids = [w.dev for w in tiles for _ in range(s)]
-            baby = [b for _ in tiles for b in range(s)]
-            names = [w.key(g, b) or f"tile{w.dev}.{g}.{b}" for w in tiles for b in range(s)]
-            pts = ops.encode_group(ids, baby, g, s, rxs[0][0], names)
-            try:
-                for i, rx in enumerate(rxs):
-                    part = None
-                    for b, xb in enumerate(rx):
-                        p = ops.mult_ptx(xb, pts[i * s + b])
-                        part = p if part is None else ops.add(part, p)
-                    acc = part if acc is None else ops.add(acc, part)
-            finally:
-                for pt in pts:
-                    ops.evict_ptx(pt)
+            acc = _device_giant_groups(ops, rxs, tiles, g, s)
         else:
+            acc = None
             for rx, w in zip(rxs, tiles):
                 part = _giant_group(ops, rx, w, g)
                 acc = part if acc is None else ops.add(acc, part)
@@ -228,6 +212,29 @@ def apply_tiles(ops, rxs, tiles):
             acc = ops.rotate(acc, g * s * t)
         y = acc if y is None else ops.add(y, acc)
     return y
+
+
+def _device_giant_groups(ops, rxs, tiles, g: int, s: int):
+    """Giant index ``g`` of every tile on the device route: one batched device encode for every
+    (tile, baby), then the products and additions in exactly the CPU route's order (each tile's
+    group summed, then the tiles' partials), so the recorded op stream is the same on both routes.
+    The device plaintexts are evicted before returning."""
+    ids = [w.dev for w in tiles for _ in range(s)]
+    baby = [b for _ in tiles for b in range(s)]
+    names = [w.key(g, b) or f"tile{w.dev}.{g}.{b}" for w in tiles for b in range(s)]
+    pts = ops.encode_group(ids, baby, g, s, rxs[0][0], names)
+    acc = None
+    try:
+        for i, rx in enumerate(rxs):
+            part = None
+            for b, xb in enumerate(rx):
+                p = ops.mult_ptx(xb, pts[i * s + b])
+                part = p if part is None else ops.add(part, p)
+            acc = part if acc is None else ops.add(acc, part)
+    finally:
+        for pt in pts:
+            ops.evict_ptx(pt)
+    return acc
 
 
 def linear(ops, x, w: EncodedTile):
