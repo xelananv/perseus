@@ -503,7 +503,11 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
                   f"bootstraps {base} -> {best}")
 
     if cfg.prune:
-        sim, n_pruned = _prune_redundant(placer, sim, cfg.prune_keep)
+        # A forced site (the terminal-exit refresh of plan_graph_dir's retry) has no consumer
+        # inside its own block that needs it, so the prune would always take it back out and
+        # the retry could never move the next block's entry.
+        keep = set(cfg.prune_keep) | set(force_place or ())
+        sim, n_pruned = _prune_redundant(placer, sim, keep)
         if hasattr(placer, "meta"):
             placer.meta["pruned"] = n_pruned
         if cfg.verbose:
