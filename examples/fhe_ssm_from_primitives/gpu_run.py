@@ -16,7 +16,10 @@ Every tick is checked against the mirror (the same kernels and folds on numpy) a
 trainer's closed form: the reply's error, the logits' error and top-1 agreement on the tied
 head. The report is rewritten after every tick, so an interrupted run keeps what it measured.
 ``--tokens`` teacher-forces a serve run's token record (prompts then generations, as
-calibrate.py reads it); without it every conversation gets random tokens.
+calibrate.py reads it); without it every conversation gets random tokens. ``--free-run`` keeps
+each conversation's prompt teacher-forced and then feeds back the model's own top-1 on the tied
+head (the client's decode), as the published run generated its tokens; each tick then records the
+tokens it fed, the top-1s, and the share that picked the token the record has next.
 """
 
 from __future__ import annotations
@@ -55,8 +58,64 @@ def token_rows(params, streams, pos):
     return np.asarray(params.emb[[s[pos] for s in streams]], dtype=np.float64)
 
 
-def tick_record(model, rows, pos, mirror, exact, emb, before):
-    """One tick: the model against both references, its time and its refreshes."""
+def prompt_lengths(doc: dict, n: int) -> list[int]:
+    """Each conversation's prompt length in a serve record (``ids_lanes``): where its
+    free-running generation starts."""
+    ids = doc.get("ids_lanes")
+    if not ids or len(ids) < n or any(len(x) < 1 for x in ids[:n]):
+        raise SystemExit(
+            "--free-run needs a serve record whose 'ids_lanes' give every conversation its prompt"
+        )
+    return [len(x) for x in ids[:n]]
+
+
+def feed_back(streams: list[list[int]], top1: list[int], prompts: list[int], pos: int) -> int:
+    """Free-running: conversation k's input at pos + 1 becomes its own top-1 at pos once its
+    prompt is done (pos + 1 >= prompts[k]); the prompt stays teacher-forced. Returns how many
+    conversations were fed back."""
+    fed = 0
+    for k, s in enumerate(streams):
+        if prompts[k] <= pos + 1 < len(s):
+            s[pos + 1] = int(top1[k])
+            fed += 1
+    return fed
+
+
+def token_streams(a, vocab: int, n: int, ticks: int) -> tuple[list[list[int]], list[int] | None]:
+    """The conversations' token streams, from ``--tokens`` or random, and with ``--free-run``
+    each conversation's prompt length."""
+    prompts: list[int] | None = None
+    if a.tokens:
+        with open(a.tokens, encoding="utf-8") as f:
+            doc = json.load(f)
+        streams = streams_from_record(doc)[:n]
+        if len(streams) < n:
+            raise SystemExit(f"{a.tokens} holds {len(streams)} conversations, the layout {n}")
+        if a.free_run:
+            prompts = prompt_lengths(doc, n)
+    else:
+        rng = np.random.default_rng(a.seed)
+        streams = [[int(t) for t in rng.integers(0, vocab, ticks)] for _ in range(n)]
+    if any(len(st) < ticks for st in streams):
+        raise SystemExit(f"the token streams hold fewer than {ticks} tokens")
+    return streams, prompts
+
+
+def free_run_step(
+    rec: dict, streams: list[list[int]], record, prompts: list[int], pos: int
+) -> None:
+    """One tick of free running: the tokens this tick was fed, the share of the conversations now
+    generating whose top-1 is the record's next token, then the feedback for the next tick."""
+    rec["tokens"] = [int(s[pos]) for s in streams]
+    gen = [k for k in range(len(streams)) if prompts[k] <= pos + 1 < len(record[k])]
+    agree = [rec["top1"][k] == record[k][pos + 1] for k in gen]
+    rec["top1_agree_vs_record"] = float(np.mean(agree)) if gen else None
+    rec["fed_back"] = feed_back(streams, rec["top1"], prompts, pos)
+
+
+def tick_record(model, rows, pos, mirror, exact, emb, before, top1=False):
+    """One tick: the model against both references, its time and its refreshes; with ``top1``,
+    each conversation's top-1 on the tied head too (what the client would feed back)."""
     # the runtime's own count (deliberate + reactive + iterations), where it exposes one: the
     # port's n_bootstraps counts only its explicit hints and carries
     fhe = getattr(model.inf, "fhe", None)
@@ -68,6 +127,7 @@ def tick_record(model, rows, pos, mirror, exact, emb, before):
     want = exact.step(rows)
     got_logits, want_logits = rec["out"] @ emb.T, want @ emb.T
     per_conv = [rel_err_rms(got_logits[k], want_logits[k]) for k in range(len(rows))]
+    extra = {"top1": [int(t) for t in got_logits.argmax(axis=1)]} if top1 else {}
     return {
         "pos": pos,
         "seconds": round(seconds, 2),
@@ -82,6 +142,7 @@ def tick_record(model, rows, pos, mirror, exact, emb, before):
         "runtime_bootstraps": None if rt0 is None or rt1 is None else int(rt1) - int(rt0),
         "out_level": rec["out_level"],
         "free_gb": rec.get("free_gb"),
+        **extra,
     }
 
 
@@ -158,16 +219,9 @@ def run(a) -> dict:
             raise SystemExit(f"rotation keys missing from the session: {missing[:8]}")
         n = model.capacity
         ticks = max(a.ticks, a.capture_tick + 1) if a.mode == "capture" else a.ticks
-        if a.tokens:
-            with open(a.tokens, encoding="utf-8") as f:
-                streams = streams_from_record(json.load(f))[:n]
-            if len(streams) < n:
-                raise SystemExit(f"{a.tokens} holds {len(streams)} conversations, the layout {n}")
-        else:
-            rng = np.random.default_rng(a.seed)
-            streams = [list(rng.integers(0, params.vocab, ticks)) for _ in range(n)]
-        if any(len(st) < ticks for st in streams):
-            raise SystemExit(f"the token streams hold fewer than {ticks} tokens")
+        streams, prompts = token_streams(a, params.vocab, n, ticks)
+        if prompts is not None:
+            report.update(free_run=True, prompt_lengths=prompts)
         if a.mode == "capture":
             model.set_capture(a.graph_dir)
         elif a.mode == "planned":
@@ -179,11 +233,16 @@ def run(a) -> dict:
         mirror = MirrorModel(params, n, model.form, scales=folds)
         exact = ExactModel(params, n)
         emb = np.asarray(params.emb, dtype=np.float64)
+        record = [list(s) for s in streams]  # the record's own tokens, before any feedback
         model.start()
         for pos in range(ticks):
             before = model.rt.ops.n_bootstraps
             rows = token_rows(params, streams, pos)
-            rec = tick_record(model, rows, pos, mirror, exact, emb, before)
+            rec = tick_record(
+                model, rows, pos, mirror, exact, emb, before, top1=prompts is not None
+            )
+            if prompts is not None:
+                free_run_step(rec, streams, record, prompts, pos)
             report["ticks"].append(rec)
             write_json(out, report)
             print(json.dumps(rec), flush=True)
@@ -205,6 +264,8 @@ def main(argv=None) -> int:
     ap.add_argument("--pair-route", default="split", choices=("split", "lane"))
     ap.add_argument("--scales", default="shipped", help="'shipped' (default), 'none', or a file")
     ap.add_argument("--tokens", default=None, help="a serve run's token record (teacher-forced)")
+    ap.add_argument("--free-run", action="store_true",
+                    help="after each prompt of --tokens, feed back the model's own top-1")  # fmt: skip
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--fake", action="store_true", help="the numpy fake instead of a GPU session")
     ap.add_argument("--out", default="gpu_run.json")
@@ -213,6 +274,8 @@ def main(argv=None) -> int:
         ap.error("--capture-tick must be >= 0")
     if a.fake and a.mode == "planned":
         ap.error("planned mode needs a GPU session: the fake cannot execute a plan")
+    if a.free_run and not a.tokens:
+        ap.error("--free-run needs --tokens: a serve record's prompts")
     run(a)
     return 0
 

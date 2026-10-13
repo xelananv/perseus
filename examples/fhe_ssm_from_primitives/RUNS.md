@@ -55,7 +55,10 @@ the run; the report is rewritten after every tick, so a stopped run keeps what i
 answers: the published 148-tick run (eager OpenFHE, two cards, ring 2^17) had its logit error grow
 like tick^0.24; the planned ticks of the eight-tick runs were 4 to 8 times more accurate per tick, and the open question is whether the growth exponent moves or only
 the constant. Compare `relErrRms_vs_mirror`, `logits_relErrRms_vs_exact` and `top1_agree_vs_exact`
-per tick with the fhe-ssm repository's `FIDELITY_TREND.md`.
+per tick with the fhe-ssm repository's `FIDELITY_TREND.md`. Teacher-forced, the run replays the
+published run's tokens; with `--free-run` it feeds back its own top-1 after each prompt, as the
+published run did (`freeRun` in its record), and `top1_agree_vs_record` says how often it picked the
+same next token.
 
 ## Run 2: the same-binary pair
 

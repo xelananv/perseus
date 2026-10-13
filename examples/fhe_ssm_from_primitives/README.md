@@ -105,7 +105,10 @@ the switches the plan needs at run time: `FIDESLIB_BTS_REAL=1` where a refresh t
 route, `FIDESLIB_BTS_RAISE_DROPS` for the raise variants it uses), which `gpu_run.py --mode planned`
 exports before the session opens unless they are already set. `--tokens` teacher-forces a serve run's token record, e.g.
 the published 148-tick run's (fhe-ssm repository,
-`results/dense-demo-s31/pod_longrun_20260919/pod_pull/s37/serve_LONG/tokens.json`).
+`results/dense-demo-s31/pod_longrun_20260919/pod_pull/s37/serve_LONG/tokens.json`). `--free-run`
+keeps each conversation's prompt teacher-forced and then feeds back the model's own top-1 on the
+tied head, which is how that run generated its tokens (its record says `freeRun`); each tick then
+records the tokens fed, the top-1s, and the share that picked the token the record has next.
 
 The timings and plan sizes quoted in this section and in `RUNS.md` were measured before this branch
 existed, on one RTX A6000 with FIDESlib at the tree of 374f6df built with the arch-guarded patch

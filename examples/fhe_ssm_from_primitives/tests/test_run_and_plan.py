@@ -80,6 +80,50 @@ def test_runner_modes_on_the_fake(tmp_path, monkeypatch, mode):
 
 
 @pytest.mark.usefixtures("small_fake")
+def test_free_run_feeds_back_the_models_own_top1_after_each_prompt(tmp_path):
+    rng = np.random.default_rng(3)
+    prompts = [1 + k % 3 for k in range(64)]  # 1, 2 or 3 prompt tokens, then generation
+    ids = [[int(t) for t in rng.integers(0, 64, p)] for p in prompts]
+    gen = [[int(t) for t in rng.integers(0, 64, 5 - p)] for p in prompts]  # 5 tokens in all
+    rec = tmp_path / "tokens.json"
+    rec.write_text(json.dumps({"ids_lanes": ids, "generated_lanes": gen}))
+    out = tmp_path / "run.json"
+    argv = [*checkpoint(tmp_path), "--fake", "--tokens", str(rec), "--free-run",
+            "--ticks", "4", "--out", str(out)]  # fmt: skip
+    assert gpu_run.main(argv) == 0
+    rep = json.loads(out.read_text())
+    assert rep["free_run"] is True
+    assert rep["prompt_lengths"] == prompts
+    ticks = rep["ticks"]
+    for t, tick in enumerate(ticks):
+        # the prompt teacher-forced, then the previous tick's own top-1
+        want = [ids[k][t] if t < prompts[k] else ticks[t - 1]["top1"][k] for k in range(64)]
+        assert tick["tokens"] == want
+        assert tick["fed_back"] == sum(1 for p in prompts if p <= t + 1 < 5)
+        assert tick["relErrRms_vs_mirror"] < 1e-9  # the references saw the same tokens
+        assert tick["top1_agree_vs_exact"] == 1.0
+    # the share that picked the record's next token, over the conversations generating
+    record = [a + b for a, b in zip(ids, gen, strict=True)]
+    gen_k = [k for k in range(64) if prompts[k] <= 1]
+    assert ticks[0]["top1_agree_vs_record"] == pytest.approx(
+        np.mean([ticks[0]["top1"][k] == record[k][1] for k in gen_k])
+    )
+
+
+@pytest.mark.usefixtures("small_fake")
+def test_free_run_needs_a_record_with_the_prompts(tmp_path):
+    with pytest.raises(SystemExit):
+        gpu_run.main(
+            [*checkpoint(tmp_path), "--fake", "--free-run", "--out", str(tmp_path / "r.json")]
+        )
+    rec = tmp_path / "tokens.json"
+    rec.write_text(json.dumps({"streams": [[1, 2, 3, 4, 5]] * 64}))
+    with pytest.raises(SystemExit, match="ids_lanes"):
+        gpu_run.main([*checkpoint(tmp_path), "--fake", "--tokens", str(rec), "--free-run",
+                      "--out", str(tmp_path / "r.json")])  # fmt: skip
+
+
+@pytest.mark.usefixtures("small_fake")
 def test_capture_runs_past_the_capture_tick(tmp_path, monkeypatch):
     monkeypatch.setenv("FHE_GRAPH_DIR", "before")
     monkeypatch.setenv("FHE_GRAPH_CAPTURE_TOKEN", "before")
