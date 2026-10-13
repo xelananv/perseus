@@ -38,6 +38,17 @@ def weight(seed, shape=(D, D)):
     return np.random.default_rng(seed).standard_normal(shape) / np.sqrt(shape[0])
 
 
+def ladder_rotations(fhe, start, stop):
+    """Rotation calls one rotate-and-sum ladder costs on this fake: a hoisted radix group where it
+    has the keys, plain rungs elsewhere (perseus.impl.layout.ladder_chunks). Measured on a
+    throwaway ciphertext, not derived, so the tests follow the fake's own ladder."""
+    n0 = len(fhe.calls)
+    fhe.rotate_and_sum(fake.FakeCt(np.zeros(fhe.slots), 34), start, stop)
+    n = sum(c.startswith("rotate") for c in fhe.calls[n0:])
+    del fhe.calls[n0:]
+    return n
+
+
 def test_tile_params_mirror_compute_dg_params():
     assert filling.tile_params(N, D) == (32, 32, 32)  # t, s, G
     assert filling.tile_params(N, E) == (8, 64, 64)  # one 4096-wide piece: 8 lanes only
@@ -82,12 +93,15 @@ def test_tiled_channel_mix_shapes_exact(pairs):
 
 def test_norm_statistic_32_conversations():
     fhe, _inf, ops = session()
+    one_ladder = ladder_rotations(fhe, N // D, N)
     X = rows(32, 8)
     v = filling.per_conversation_sum(ops, ops.square(fake.FakeCt(filling.pack(X, N), 34)), N, D)
     want = (X**2).sum(axis=1)
     got = v.vec.reshape(D, 32)  # slot i*t + k -> [i, k]
     assert np.abs(got - want[None, :]).max() < 1e-10  # every channel slot of lane k
-    assert sum(c.startswith("rotate") for c in fhe.calls) == 10  # log2(1024)
+    assert (
+        sum(c.startswith("rotate") for c in fhe.calls) == one_ladder
+    )  # one ladder over the d channels
 
 
 def test_norm_statistic_64_pairs_through_lane_packed_ops():
