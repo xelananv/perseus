@@ -3,7 +3,7 @@
 and check that it imports.
 
 The machine is probed first; what the repository's build needs and the runtime lacks is
-installed: CUDA >= 12.6 from NVIDIA's apt repository, gcc 12, LibArchive's and Python's
+installed: CUDA 13.0 from NVIDIA's apt repository, gcc 12, LibArchive's and Python's
 headers, CMake >= 3.24 and pybind11, and NCCL from NVIDIA's ``nvidia-nccl-cu12`` wheel linked
 into a prefix the way the repository's README describes. Then the repository's own scripts run:
 ``scripts/install_deps.sh`` (the patched OpenFHE and FIDESlib32bits) and
@@ -31,9 +31,15 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
-CUDA_MIN, GCC_MIN, CMAKE_MIN = (12, 6), 12, (3, 24)
-CUDA_PKG = "cuda-toolkit-12-6"
-CUDA_HOME_NEW = "/usr/local/cuda-12.6"
+# CUDA 13.0: the pinned FIDESlib32bits does not compile with nvcc 12.x (12.6, 12.8 and 12.9 all crash in
+# the front end on a static declared in an if statement's initializer, src/CKKS/Bootstrap.cu); 13.0 does.
+# CUDA 13 keeps the CCCL headers (<cuda/atomic>, included by FIDESlib's host sources) in include/cccl,
+# which nvcc searches and a host compiler does not: the build puts it on CPATH. CUDA 13 needs NVIDIA
+# driver 580.65 or newer.
+CUDA_MIN, GCC_MIN, CMAKE_MIN = (13, 0), 12, (3, 24)
+CUDA_PKG = "cuda-toolkit-13-0"
+CUDA_HOME_NEW = "/usr/local/cuda-13.0"
+DRIVER_MIN = (580, 65)
 # exact versions, the ones a GPU build of this example was made with, so a rebuild is reproducible
 CMAKE_PIN, PYBIND11_PIN, NCCL_PIN = "cmake==4.4.4", "pybind11==3.1.0", "nvidia-nccl-cu12==2.32.3"
 KEYRING = (
@@ -109,6 +115,10 @@ def probe() -> dict:
     )
     return {
         "gpu": gpu.strip() if gpu and gpu.strip() else None,
+        "driver": version(
+            _out(["nvidia-smi", "--query-gpu=driver_version", "--format=csv,noheader"]),
+            r"^(\d+)\.(\d+)",
+        ),
         "nvcc": version(_out(["nvcc", "--version"]), r"release (\d+)\.(\d+)"),
         "nvcc_home": str(Path(nvcc).resolve().parents[1])
         if (nvcc := shutil.which("nvcc"))
@@ -147,6 +157,12 @@ def require(p: dict) -> None:
             f"{gpu[0]} is compute capability {gpu[1][0]}.{gpu[1][1]}; FIDESlib32bits needs "
             f"{MIN_CAP[0]}.{MIN_CAP[1]} or newer (its CKKS/Discard.cu uses the PTX discard "
             "instruction): pick an L4, A100 or newer runtime"
+        )
+    driver = p.get("driver")
+    if driver is not None and driver < DRIVER_MIN:
+        raise SystemExit(
+            f"NVIDIA driver {driver[0]}.{driver[1]:02d}: the CUDA {CUDA_MIN[0]}.{CUDA_MIN[1]} toolkit this "
+            f"build needs runs on driver {DRIVER_MIN[0]}.{DRIVER_MIN[1]} or newer"
         )
     if not p.get("root"):
         raise SystemExit("this script installs system packages: run it as root (Colab does)")
@@ -207,6 +223,7 @@ def plan(p: dict, jobs: int, nccl_home: str) -> list[Step]:
         "JOBS": str(jobs),
         "NCCL_HOME": nccl_home,
         "PATH": f"{cuda_home}/bin:{os.environ.get('PATH', '')}",
+        "CPATH": ":".join(x for x in (f"{cuda_home}/include/cccl", os.environ.get("CPATH")) if x),
         "LD_LIBRARY_PATH": f"{nccl_home}/lib:{os.environ.get('LD_LIBRARY_PATH', '')}",
     }
     steps += [
@@ -255,7 +272,7 @@ def write_env(steps: list[Step], path: Path) -> Path:
     """The toolchain the build used, as a shell file the session's shell sources before
     ``scripts/local_env.sh`` (which would otherwise pick its own CUDA and miss the NCCL prefix)."""
     env = next(s.env for s in steps if s.name == "deps")
-    keys = ("CUDA_HOME", "NCCL_HOME", "CC", "CXX")
+    keys = ("CUDA_HOME", "NCCL_HOME", "CC", "CXX", "CPATH")
     lines = [f'export {k}="{env[k]}"' for k in keys]
     lines.append('export LD_LIBRARY_PATH="$NCCL_HOME/lib:${LD_LIBRARY_PATH:-}"')
     path.parent.mkdir(parents=True, exist_ok=True)

@@ -10,6 +10,7 @@ from examples.fhe_ssm_from_primitives import colab_build as cb
 
 FRESH = {
     "gpu": "NVIDIA L4, 8.9, 23034 MiB",
+    "driver": (580, 82),
     "nvcc": (12, 5),
     "nvcc_home": "/usr/local/cuda-12.5",
     "cuda_new": False,
@@ -27,8 +28,8 @@ FRESH = {
 READY = {
     **FRESH,
     "gpu": "NVIDIA A100-SXM4-80GB, 8.0, 81920 MiB",
-    "nvcc": (12, 8),
-    "nvcc_home": "/opt/cuda-12.8",
+    "nvcc": (13, 0),
+    "nvcc_home": "/opt/cuda-13.0",
     "gcc": (13,),
     "libarchive": True,
     "pybind11": True,
@@ -87,8 +88,20 @@ def test_ready_runtime_installs_nothing():
     steps = cb.plan(READY, 8, "/n")
     assert names(steps) == ["nccl", "submodule", "deps", "core", "import"]
     env = by_name(steps, "core").env
-    assert env["CUDA_HOME"] == "/opt/cuda-12.8"
+    assert env["CUDA_HOME"] == "/opt/cuda-13.0"
+    assert env["CPATH"].split(":")[0] == "/opt/cuda-13.0/include/cccl"
     assert (env["CC"], env["CHAIN"], env["JOBS"]) == ("gcc", "n32", "8")
+
+
+def test_a_cuda_12_runtime_gets_cuda_13():
+    # nvcc 12.x crashes on the pinned FIDESlib, so a runtime that has one still gets the 13.0 toolkit
+    for nvcc in ((12, 6), (12, 8), (12, 9)):
+        steps = cb.plan(
+            {**READY, "nvcc": nvcc, "nvcc_home": f"/opt/cuda-{nvcc[0]}.{nvcc[1]}"}, 8, "/n"
+        )
+        assert names(steps)[:2] == ["nvidia-repo", "apt"]
+        assert cb.CUDA_PKG in by_name(steps, "apt").cmd
+        assert by_name(steps, "core").env["CUDA_HOME"] == cb.CUDA_HOME_NEW
 
 
 @pytest.mark.parametrize(
@@ -115,6 +128,7 @@ def test_every_plan_keeps_the_invariants(probe):
         ({"gpu": "Tesla T4, 7.5, 15360 MiB"}, "needs 8.0 or newer"),
         ({"gpu": "garbled"}, "compute capability"),
         ({"root": False}, "root"),
+        ({"driver": (575, 64)}, "driver 580.65 or newer"),
         ({"distro": None}, "distribution"),
     ],
 )
@@ -159,6 +173,7 @@ def test_env_file_carries_the_build_toolchain(tmp_path):
     steps = cb.plan(FRESH, 2, "/n")
     text = cb.write_env(steps, tmp_path / "env.sh").read_text()
     assert f'export CUDA_HOME="{cb.CUDA_HOME_NEW}"' in text
+    assert f'export CPATH="{cb.CUDA_HOME_NEW}/include/cccl' in text
     assert 'export NCCL_HOME="/n"' in text
     assert 'export CC="gcc-12"' in text
     assert "LD_LIBRARY_PATH" in text

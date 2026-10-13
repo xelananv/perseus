@@ -144,7 +144,11 @@ PRO 5000, each within one build of 471a93e; FIDESlib's own device encode,
 copy, each giant group is one batched encode per input level, and a group the encoder cannot
 serve (a pending rescale on a one-prime chain) takes the CPU route from the tile fetched back. On
 a GPU below compute capability 9.0 the pinned FIDESlib32bits does not build as is (one kernel uses
-thread-block clusters); the fork's measurement notes carry an arch-guarded patch for that file.
+thread-block clusters); the fork's measurement notes carry an arch-guarded patch for that file. This
+branch's FIDESlib needs CUDA 13.0 or newer (nvcc 12.6, 12.8 and 12.9 crash on one of its lines, a
+static declared in an if statement's initializer), hence an NVIDIA driver of 580.65 or newer, and with
+CUDA 13 the host compiler needs `$CUDA_HOME/include/cccl` on its include path (`CPATH`), where CUDA 13
+keeps the `<cuda/atomic>` FIDESlib's host sources include; `colab_build.py` sets both.
 The encoder's and the probe's own checks are ctest tests labelled `gpu` (`ctest -L gpu` in the
 tests build directory, no further environment); the repository's CI has no GPU runner, so they
 run by hand. `python examples/fhe_ssm_from_primitives/lint.py --check` runs ruff and mypy over
