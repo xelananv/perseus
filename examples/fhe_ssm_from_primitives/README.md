@@ -108,12 +108,13 @@ the published 148-tick run's (fhe-ssm repository,
 `results/dense-demo-s31/pod_longrun_20260919/pod_pull/s37/serve_LONG/tokens.json`).
 
 The timings and plan sizes quoted in this section and in `RUNS.md` were measured before this branch
-existed, on one RTX A6000 (one figure on an RTX PRO 5000, named where it appears), with FIDESlib at
-the tree of 374f6df built with the arch-guarded patch described below: the eight-tick runs with one
-build of the `fhe-ssm-port` branch at 471a93e, the same binary for every run, and the step-by-step
-chain of `RUNS.md` with a fresh clone of 5d82074. This branch tracks upstream dev, with its FIDESlib
-pin and planner recipe: dev's planner plans that clone's capture at the same 953 refreshes per tick,
-and the timings are to be measured anew.
+existed, on one RTX A6000 with FIDESlib at the tree of 374f6df built with the arch-guarded patch
+described below: the eight-tick runs with one build of the `fhe-ssm-port` branch at 471a93e, the same
+binary for every run, and the step-by-step chain of `RUNS.md` with a fresh clone of 5d82074. One
+figure, named where it appears, is an RTX PRO 5000's, where FIDESlib builds without the patch. This
+branch tracks upstream dev, with its FIDESlib pin and planner recipe: its planner (dev's, with the
+re-cut passes keeping the forced refreshes) plans that clone's capture at the same 953 refreshes per
+tick, and the timings are to be measured anew.
 
 Two switches matter on this model's graphs, whose residual stream crosses the blocks without a
 refresh. `PLAN_HARD_ENV_CAP=1` keeps the refresh envelope absolute: a block the placer cannot

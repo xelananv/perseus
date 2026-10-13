@@ -40,8 +40,8 @@ encryption round trip, one linear tile, two block ticks); the capture about 15 m
 plan about 6 minutes on the CPU. The plan at the recipe's ceiling (MAX_LEVEL 50) has 953 refreshes
 per tick on that capture (959 on an earlier capture of the same model), with 36 planner warnings
 about values predicted at level 50 and no refresh; the planned runtime accepts a predicted ceiling
-level and every planned tick ran with top-1 agreement 1.0. Dev's planner on this branch plans the
-same capture at 953 refreshes per tick.
+level and every planned tick ran with top-1 agreement 1.0. This branch's planner plans the same
+capture at 953 refreshes per tick.
 
 ## Run 1: 148 ticks under the plan
 
@@ -80,8 +80,8 @@ PLAN_HARD_ENV_CAP=1 python -m examples.fhe_ssm_from_primitives.plan --graph-dir 
 ```
 
 CPU only, needs scipy. The min-cut placer gave 1,297 refreshes per tick at ceiling 48 and 953 to 959
-at 50 on captures of this model with the fork's planner, and dev's planner gives 953 at 50 on the
-fresh clone's capture (48 not run); the ILP was not run on them. A 24-block graph whose residual stream crosses
+at 50 on captures of this model with the fork's planner, and this branch's planner gives 953 at 50
+on the fresh clone's capture (48 not run); the ILP was not run on them. A 24-block graph whose residual stream crosses
 blocks without a refresh is new ground for the placer comparison, and whether the ILP needs the hard
 envelope at all is part of the answer. A planned run with `--plan-dir bootstrap_placements/fhe_ssm_ilp`
 then measures what the plan predicts.
