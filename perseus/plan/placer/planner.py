@@ -662,7 +662,7 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
             if not cands:
                 break
             trial = rescale_anchors | cands
-            p2 = PlacerCls(**{**placer_kwargs, "verbose": False}, realized=set(trial),
+            p2 = PlacerCls(**{**placer_kwargs, "verbose": False}, placed=set(forced), realized=set(trial),
                            hint_force=hint_force)
             try:
                 s2 = p2.run()
@@ -677,6 +677,9 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
             log.info(f"[plan] rescale_opt: {len(rescale_anchors)} realize anchor(s), "
                   f"bootstraps {base} -> {best}")
 
+    # every re-cut trial below starts from the forced sites too: a trial accepted without them would
+    # drop the terminal-exit refresh the cross-block retry placed, and the next block would enter
+    # exactly where it was refused
     if cfg.shared_realize and exact:
         hint_outs = {n.output for n in g.nodes if n.hint_level is not None and n.output}
         best_sr = len(placer.placed) + sum(1 for f in sim.hint_fired.values() if f)
@@ -686,7 +689,7 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
             if not cands:
                 break
             trial = rescale_anchors | cands
-            p2 = PlacerCls(**{**placer_kwargs, "verbose": False}, realized=set(trial), hint_force=hint_force)
+            p2 = PlacerCls(**{**placer_kwargs, "verbose": False}, placed=set(forced), realized=set(trial), hint_force=hint_force)
             try:
                 s2 = p2.run()
             except PlanInfeasible:
@@ -713,7 +716,7 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
             if not cands:
                 break
             trial = rescale_anchors | cands
-            p2 = PlacerCls(**{**placer_kwargs, "verbose": False}, realized=set(trial),
+            p2 = PlacerCls(**{**placer_kwargs, "verbose": False}, placed=set(forced), realized=set(trial),
                            hint_force=hint_force)
             try:
                 s2 = p2.run()
