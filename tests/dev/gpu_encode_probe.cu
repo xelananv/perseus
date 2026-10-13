@@ -25,6 +25,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <map>
 #include <memory>
 #include <random>
@@ -83,6 +84,10 @@ std::vector<double> diagonal_slots(const std::vector<double>& W, int d, int n, i
 }  // namespace
 
 int main(int argc, char** argv) {
+    // The reference is the library's host encode (the OpenFHE element of MakeCKKSPackedPlaintext). Under
+    // FIDESLIB_GPU_ENCODE=1 (FIDESlib's own device encode, on in the GPT-2 environment) the facade leaves that
+    // element unencoded for the device, and the comparison below would blame this encoder for it.
+    setenv("FIDESLIB_GPU_ENCODE", "0", 1);
     const uint32_t L = argc > 1 ? static_cast<uint32_t>(std::atoi(argv[1])) : 34u;
     const int g = argc > 2 ? std::atoi(argv[2]) : 3;
     const unsigned seed = argc > 3 ? static_cast<unsigned>(std::atoi(argv[3])) : 7u;
