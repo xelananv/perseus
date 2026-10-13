@@ -79,46 +79,88 @@ def test_runner_modes_on_the_fake(tmp_path, monkeypatch, mode):
         assert os.environ["FHE_GRAPH_CAPTURE_TOKEN"] == "1"
 
 
-@pytest.mark.usefixtures("small_fake")
-def test_free_run_feeds_back_the_models_own_top1_after_each_prompt(tmp_path):
+def free_run_record(tmp_path, policy, gen_token=None):
+    """A serve record for the 64 conversations of the small fake: prompts of 1, 2 or 3 tokens, then
+    generations to 5 tokens in all (``gen_token``: every generated token that one)."""
     rng = np.random.default_rng(3)
-    prompts = [1 + k % 3 for k in range(64)]  # 1, 2 or 3 prompt tokens, then generation
+    prompts = [1 + k % 3 for k in range(64)]
     ids = [[int(t) for t in rng.integers(0, 64, p)] for p in prompts]
-    gen = [[int(t) for t in rng.integers(0, 64, 5 - p)] for p in prompts]  # 5 tokens in all
+    gen = [[int(t) for t in rng.integers(0, 64, 5 - p)] for p in prompts]
+    if gen_token is not None:
+        gen = [[gen_token] * (5 - p) for p in prompts]
     rec = tmp_path / "tokens.json"
-    rec.write_text(json.dumps({"ids_lanes": ids, "generated_lanes": gen}))
+    rec.write_text(json.dumps({"ids_lanes": ids, "generated_lanes": gen, "decodePolicy": policy}))
+    return rec, prompts, ids, gen
+
+
+def free_run(tmp_path, rec):
     out = tmp_path / "run.json"
     argv = [*checkpoint(tmp_path), "--fake", "--tokens", str(rec), "--free-run",
             "--ticks", "4", "--out", str(out)]  # fmt: skip
     assert gpu_run.main(argv) == 0
-    rep = json.loads(out.read_text())
-    assert rep["free_run"] is True
-    assert rep["prompt_lengths"] == prompts
-    ticks = rep["ticks"]
-    for t, tick in enumerate(ticks):
-        # the prompt teacher-forced, then the previous tick's own top-1
-        want = [ids[k][t] if t < prompts[k] else ticks[t - 1]["top1"][k] for k in range(64)]
-        assert tick["tokens"] == want
-        assert tick["fed_back"] == sum(1 for p in prompts if p <= t + 1 < 5)
-        assert tick["relErrRms_vs_mirror"] < 1e-9  # the references saw the same tokens
-        assert tick["top1_agree_vs_exact"] == 1.0
-    # the share that picked the record's next token, over the conversations generating
-    record = [a + b for a, b in zip(ids, gen, strict=True)]
-    gen_k = [k for k in range(64) if prompts[k] <= 1]
-    assert ticks[0]["top1_agree_vs_record"] == pytest.approx(
-        np.mean([ticks[0]["top1"][k] == record[k][1] for k in gen_k])
-    )
+    return json.loads(out.read_text())
 
 
 @pytest.mark.usefixtures("small_fake")
-def test_free_run_needs_a_record_with_the_prompts(tmp_path):
+def test_free_run_greedy_feeds_back_the_top1_after_each_prompt(tmp_path):
+    rec, prompts, ids, _gen = free_run_record(tmp_path, {"policy": "greedy"})
+    rep = free_run(tmp_path, rec)
+    assert rep["free_run"] is True
+    assert rep["prompt_lengths"] == prompts
+    assert rep["decode_policy"]["policy"] == "greedy"
+    ticks = rep["ticks"]
+    for t, tick in enumerate(ticks):
+        # the prompt teacher-forced, then the previous tick's pick, which greedy makes the top-1
+        want = [ids[k][t] if t < prompts[k] else ticks[t - 1]["pick"][k] for k in range(64)]
+        assert tick["tokens"] == want
+        assert tick["pick"] == tick["top1"]
+        assert tick["fed_back"] == sum(1 for p in prompts if p <= t + 1 < 5)
+        assert tick["relErrRms_vs_mirror"] < 1e-9  # the references saw the same tokens
+        assert tick["pick_agree_vs_exact"] == 1.0
+
+
+@pytest.mark.usefixtures("small_fake")
+def test_free_run_feeds_back_the_policys_pick_not_the_argmax(tmp_path):
+    # a policy that bans every token but 5: the pick differs from the argmax, and only the pick
+    # may be fed; the record's generations are all 7, so a conversation leaves the record at its
+    # first generated position
+    policy = {
+        "policy": "norepeat",
+        "penalty": 1.0,
+        "ngram": 0,
+        "ban": [t for t in range(64) if t != 5],
+    }
+    rec, prompts, ids, _gen = free_run_record(tmp_path, policy, gen_token=7)
+    rep = free_run(tmp_path, rec)
+    ticks = rep["ticks"]
+    assert any(tick["top1"] != tick["pick"] for tick in ticks)
+    for t, tick in enumerate(ticks):
+        assert tick["pick"] == [5] * 64
+        want = [ids[k][t] if t < prompts[k] else 5 for k in range(64)]
+        assert tick["tokens"] == want
+        # agreement with the record only over conversations still on it: before their first
+        # generated token they are, and the record's next token there is 7, never 5
+        on = [k for k in range(64) if prompts[k] <= t + 1 < 5 and t < prompts[k]]
+        assert tick["on_record"] == len(on)
+        assert tick["pick_agree_vs_record"] == (0.0 if on else None)
+    assert rep["diverged_at"] == [p if p < 4 else None for p in prompts]
+
+
+@pytest.mark.usefixtures("small_fake")
+def test_free_run_needs_a_record_with_the_prompts_and_the_policy(tmp_path):
     with pytest.raises(SystemExit):
         gpu_run.main(
             [*checkpoint(tmp_path), "--fake", "--free-run", "--out", str(tmp_path / "r.json")]
         )
     rec = tmp_path / "tokens.json"
-    rec.write_text(json.dumps({"streams": [[1, 2, 3, 4, 5]] * 64}))
+    rec.write_text(
+        json.dumps({"streams": [[1, 2, 3, 4, 5]] * 64, "decodePolicy": {"policy": "greedy"}})
+    )
     with pytest.raises(SystemExit, match="ids_lanes"):
+        gpu_run.main([*checkpoint(tmp_path), "--fake", "--tokens", str(rec), "--free-run",
+                      "--out", str(tmp_path / "r.json")])  # fmt: skip
+    rec.write_text(json.dumps({"ids_lanes": [[1]] * 64, "generated_lanes": [[2, 3, 4, 5]] * 64}))
+    with pytest.raises(SystemExit, match="decode policy"):
         gpu_run.main([*checkpoint(tmp_path), "--fake", "--tokens", str(rec), "--free-run",
                       "--out", str(tmp_path / "r.json")])  # fmt: skip
 

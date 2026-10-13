@@ -106,9 +106,16 @@ route, `FIDESLIB_BTS_RAISE_DROPS` for the raise variants it uses), which `gpu_ru
 exports before the session opens unless they are already set. `--tokens` teacher-forces a serve run's token record, e.g.
 the published 148-tick run's (fhe-ssm repository,
 `results/dense-demo-s31/pod_longrun_20260919/pod_pull/s37/serve_LONG/tokens.json`). `--free-run`
-keeps each conversation's prompt teacher-forced and then feeds back the model's own top-1 on the
-tied head, which is how that run generated its tokens (its record says `freeRun`); each tick then
-records the tokens fed, the top-1s, and the share that picked the token the record has next.
+keeps each conversation's prompt teacher-forced and then feeds back the pick of the record's decode
+policy (`decodePolicy`, `decode.py`) on the decrypted logits, with the conversation's fed tokens as
+the policy's history, which is how that run generated its tokens. Its policy is `norepeat`: token 0
+banned, a 1.3 repetition penalty over the last 64 fed tokens, no repeated 4-gram. Run on the closed
+form's logits along that record, it picks the record's next token at 7,463 of the 7,481 generated
+positions, where the plain argmax picks it at 5,020. Each tick records the tokens fed, the raw top-1s
+and the picks; the fidelity is the share of picks equal to the same policy's pick on the closed
+form's logits on the same history (`pick_agree_vs_exact`), and agreement with the record counts only
+the conversations whose fed tokens still match it (`on_record`, `pick_agree_vs_record`, and
+`diverged_at`, each conversation's first tick off the record).
 
 The timings and plan sizes quoted in this section and in `RUNS.md` were measured before this branch
 existed, on one RTX A6000 with FIDESlib at the tree of 374f6df built with the arch-guarded patch
