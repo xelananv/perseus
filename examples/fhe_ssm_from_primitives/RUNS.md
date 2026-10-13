@@ -2,12 +2,14 @@
 
 The five commands of the README's GPU section, with the tick counts of the three runs that extend
 what was measured on one RTX A6000 (48 GB). Everything they need is public: the checkpoint comes
-from Hugging Face (hash-pinned), the token record from the fhe-ssm repository.
+from Hugging Face (hash-pinned), the token record from the fhe-ssm repository. The durations and
+plan sizes below were measured on the `fhe-ssm-port` branch at commit 5d82074 (FIDESlib 374f6df);
+this branch tracks upstream dev, with its FIDESlib pin and planner recipe, and is measured anew.
 
 ## Setup
 
 ```bash
-git clone --recurse-submodules -b fhe-ssm-port https://github.com/xelananv/perseus && cd perseus
+git clone --recurse-submodules -b fhe-ssm-port-dev https://github.com/xelananv/perseus && cd perseus
 uv sync && NATIVE_SIZE=32 bash scripts/install_deps.sh && CHAIN=n32 bash scripts/local_build_core.sh
 source scripts/local_env.sh                       # the n32 chain's defaults
 python -c "from examples.fhe_ssm_from_primitives import colab; print(colab.fetch_model('.'))"

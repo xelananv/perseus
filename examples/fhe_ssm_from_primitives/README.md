@@ -100,9 +100,16 @@ carried state is zero), so two ticks are enough; its magnitudes come from the de
 (`FHE_MAG_GPU=0` selects the host decrypt, which takes hours at ring 2^16). `plan.py` runs
 Perseus's placer with the n32 recipe of `examples/gpt2_from_primitives/make_plan.sh` (read back
 from that file by the tests) and stamps the capture's contract into every plan, so a planned run
-in a different environment refuses it. `--tokens` teacher-forces a serve run's token record, e.g.
+in a different environment refuses it. It also writes the plan's `PLAN_CMD.txt` (graph, recipe, and
+the switches the plan needs at run time: `FIDESLIB_BTS_REAL=1` where a refresh takes the real-payload
+route, `FIDESLIB_BTS_RAISE_DROPS` for the raise variants it uses), which `gpu_run.py --mode planned`
+exports before the session opens unless they are already set. `--tokens` teacher-forces a serve run's token record, e.g.
 the published 148-tick run's (fhe-ssm repository,
 `results/dense-demo-s31/pod_longrun_20260919/pod_pull/s37/serve_LONG/tokens.json`).
+
+The timings and plan sizes quoted in this section and in `RUNS.md` were measured on the
+`fhe-ssm-port` branch at commit 5d82074 (FIDESlib 374f6df) on one RTX A6000; this branch tracks
+upstream dev (its FIDESlib pin and planner recipe), whose own measurements replace them when taken.
 
 Two switches matter on this model's graphs, whose residual stream crosses the blocks without a
 refresh. `PLAN_HARD_ENV_CAP=1` keeps the refresh envelope absolute: a block the placer cannot
@@ -115,8 +122,9 @@ error of the two. Measured on one RTX A6000, eight ticks of the same 64 conversa
 binary: eager 1,839.5 s, planned 1,345.0 s at 48, 1,143.8 s at 50, with the reply error 4–8×
 lower under either plan and top-1 1.0 on every planned tick.
 
-The weight diagonals are encoded on the device at their use (`FHE_GPU_ENCODE=0` selects the CPU
-encode in the same binary, 7–13× slower per block): a tile registered on the device keeps no host
+The weight diagonals are encoded on the device at their use (`FHE_GPU_ENCODE=0` selects the
+library's host encode in the same binary, 7–13× slower per block; FIDESlib's own device encode,
+`FIDESLIB_GPU_ENCODE`, is a separate switch that this example leaves alone): a tile registered on the device keeps no host
 copy, each giant group is one batched encode per input level, and a group the encoder cannot
 serve (a pending rescale on a one-prime chain) takes the CPU route from the tile fetched back. On
 a GPU below compute capability 9.0 the pinned FIDESlib32bits does not build as is (one kernel uses
@@ -166,7 +174,10 @@ gate, the channel-mix activation times gate) takes one of two routes:
 Per tick of the 24-block model at ring 2^16 with 64 conversations as split pairs (derived from the
 code, checked at the full shape in `tests/test_filled_model.py`): 336 tiles x 1,024 = 344,064
 plaintext products for the linears; 598 rotations per block (558 for the linears, 40 for two norms
-on two halves) plus 20 for the final norm; 11 conjugations per block plus 1.
+on two halves) plus 20 for the final norm; 11 conjugations per block plus 1. The norms' ladders are
+the plain ten rungs on both routes: the example exports `LADDER_RADIX_BITS=0` before a session or a
+fake is made (`port_env`), since Perseus's fake hoists radix groups by default where it has the
+keys and the C++ `rotate_and_sum` does not, and the layout carries no keys for the groups.
 
 **Parking**: fewer conversations than the capacity are filled with copies of conversation 0
 (`geometry.park`). A lane left at zero enters every norm below the Newton seed's window and its

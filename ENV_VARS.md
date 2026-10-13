@@ -128,7 +128,7 @@ Regenerate this file with `python scripts/utils/scan_env_vars.py`.
 
 | variable | meaning |
 |---|---|
-| `FHE_GPU_ENCODE` | Encode the filled layout's weight diagonals on the device from resident tiles (include/gpu_encode_bridge.h; the default where `perseus._core` has the encoder and the session runs on a GPU); 0 = the CPU encode in the same binary. The port's own encoder, not a library switch. |
+| `FHE_GPU_ENCODE` | Encode the filled layout's weight diagonals on the device from resident tiles (include/gpu_encode_bridge.h; the default where `perseus._core` has the encoder and the session runs on a GPU); 0 = the library's host encode in the same binary. The port's own encoder; FIDESlib's `FIDESLIB_GPU_ENCODE` is a separate switch for the library's own encode of a host plaintext. |
 | `FHE_GPU_ENCODE_SYNC` | Synchronize after every stage of the device encoder (debugging: a launch error is reported at its stage). |
 | `FHE_GPU_ENCODE_TIMING` | Accumulate the device encoder's per-stage device times (gather, FFT, twist/round/reduce, NTT) in its stats; the host then waits for every batch, so the overlap with the products is lost. |
 | `FHE_MAG_RING_GB` | Pinned ring the asynchronous magnitude capture stores ciphertexts in. |

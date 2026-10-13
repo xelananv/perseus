@@ -330,7 +330,8 @@ class FheOps:
     # group's diagonal plaintexts made there at the level a product with `ref` needs, products
     # through the same fhe->mult the CPU path records. Absent on the fake and on cores without it.
     # On a device session it is the default route (measured bit-identical to the CPU encode and
-    # 7-13x faster per block); FHE_GPU_ENCODE=0 selects the CPU route in the same binary.
+    # 7-13x faster per block); FHE_GPU_ENCODE=0 selects the CPU route in the same binary. Not
+    # FIDESlib's FIDESLIB_GPU_ENCODE, which moves the library's own encode of a host plaintext.
     @property
     def gpu_encode(self) -> bool:
         if os.environ.get("FHE_GPU_ENCODE", "1") in ("", "0"):
