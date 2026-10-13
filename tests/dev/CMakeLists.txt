@@ -24,17 +24,20 @@ if(TARGET test_ks_digit_intt)
         ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src)
 endif()
 
-# The device encoder's probes (examples/fhe_ssm_from_primitives): plain executables (no gtest) that
-# exercise the library itself and exit non-zero on a parity failure, registered as ctest tests with
-# the label `gpu` (they need a device: `ctest -L gpu`).
+# The device encoder's probes (examples/fhe_ssm_from_primitives): plain executables with their own
+# main that exercise the library itself and exit non-zero on a parity failure, registered as ctest
+# tests with the label `gpu` (they need a device: `ctest -L gpu`). They include test_helpers.h, which
+# includes gtest, so they link GTest::gtest (not gtest_main) for its headers wherever gtest comes from
+# (find_package or the root CMakeLists.txt's FetchContent), not only where a system copy exists.
 #   gpu_encode_layout_probe  FIDESlib's limb order and the device-plaintext wrap
 #   gpu_encode_probe         COEFF integers, EVAL words and a product against the CPU encode
 #   gpu_mag_probe_check      the capture's device magnitude probe against the host path
 function(add_dev_probe name)
     add_executable(${name} ${name}.cu)
-    target_link_libraries(${name} PRIVATE cachemir_lib)
+    target_link_libraries(${name} PRIVATE cachemir_lib GTest::gtest)
     target_include_directories(${name} PRIVATE
-        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src)
+        ${CMAKE_SOURCE_DIR}/include ${CMAKE_SOURCE_DIR}/tests ${CMAKE_SOURCE_DIR}/third_party/FIDESlib/src
+        ${GTEST_INCLUDE_DIRS})
     set_target_properties(${name} PROPERTIES
         CUDA_SEPARABLE_COMPILATION ON CUDA_RESOLVE_DEVICE_SYMBOLS ON
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)
