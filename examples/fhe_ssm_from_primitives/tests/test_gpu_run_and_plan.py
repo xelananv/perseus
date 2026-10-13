@@ -8,6 +8,9 @@ import json
 import os
 import re
 import shlex
+import subprocess
+import sys
+import types
 from pathlib import Path
 
 import numpy as np
@@ -216,6 +219,87 @@ def test_planned_runs_export_the_plans_switches_unless_already_set(tmp_path):
     got = plan.export_plan_runtime(tmp_path, environ)
     assert got == {"FIDESLIB_BTS_REAL": "1", "FIDESLIB_BTS_RAISE_DROPS": "1,3"}
     assert environ == {"FIDESLIB_BTS_RAISE_DROPS": "1,3,5", "FIDESLIB_BTS_REAL": "1"}
+    # what the run reports beside the plan's request: the values in effect
+    assert plan.effective_runtime(got, environ) == {
+        "FIDESLIB_BTS_REAL": "1",
+        "FIDESLIB_BTS_RAISE_DROPS": "1,3,5",
+    }
+    assert plan.effective_runtime({"FIDESLIB_BTS_REAL": "1"}, {}) == {"FIDESLIB_BTS_REAL": ""}
+
+
+def test_the_runner_variables_come_from_the_script():
+    names = plan.runner_vars()
+    assert {"MAX_LEVEL", "BTS_LEVEL", "FORBID_STEPS", "FIRST_ENTRY_LEVEL", "BTS_OUT_DEG"} <= names
+    assert {"PLAN_PRUNE", "PLAN_SHARED_REALIZE"} <= names
+    assert not {"GRAPH_DIR", "OUT_NAME", "PYTHON"} & names
+
+
+def test_an_override_wins_and_the_plan_file_records_what_the_runner_got():
+    shell = {
+        "PLAN_SHARED_REALIZE": "1",
+        "PLAN_KS_REALIZE": "1",
+        "PLAN_HARD_ENV_CAP": "1",
+        "FORBID_STEPS": "tail",
+        "HOME": "/h",
+    }
+    over = {"PLAN_SHARED_REALIZE": "", "PLAN_KS_REALIZE": "", "PLAN_CF_MAX": "12"}
+    full = plan.runner_env("graphs/x", "n", over, shell)
+    # VAR= unsets VAR for the runner, whether or not the recipe has it and whatever the shell exports
+    assert "PLAN_SHARED_REALIZE" not in full
+    assert "PLAN_KS_REALIZE" not in full
+    assert full["PLAN_CF_MAX"] == "12"
+    assert full["FORBID_STEPS"] == "tail"
+    assert full["HOME"] == "/h"
+    rec = plan.recipe_of(full)
+    assert rec == {k: full[k] for k in rec}  # every value as the runner got it
+    assert rec["FORBID_STEPS"] == "tail"
+    assert rec["PLAN_HARD_ENV_CAP"] == "1"
+    assert "PLAN_SHARED_REALIZE" not in rec
+    assert not {"HOME", "PYTHON", "CUDA_VISIBLE_DEVICES", "GRAPH_DIR", "OUT_NAME"} & set(rec)
+    assert set(plan.RECIPE) - {"PLAN_SHARED_REALIZE"} <= set(rec)
+
+
+def test_main_writes_the_runners_environment_into_the_plan_file(tmp_path, monkeypatch):
+    graphs = tmp_path / "graphs"
+    (graphs / "block_0").mkdir(parents=True)
+    (graphs / "block_0" / "graph.json").write_text("{}")
+    (graphs / "capture_env.json").write_text(json.dumps({"env": {"CHAIN": "n32"}}))
+    seen: dict[str, str] = {}
+
+    def fake_run(cmd, **kw):
+        assert cmd == ["bash", str(plan.RUNNER)]
+        seen.update(kw["env"])
+        out = tmp_path / "bootstrap_placements" / kw["env"]["OUT_NAME"]
+        out.mkdir(parents=True)
+        plan_file = out / "block_0_placement.json"
+        plan_file.write_text(json.dumps({"placements": [], "real_route": ["v_1"]}))
+
+    monkeypatch.setattr(plan, "ROOT", tmp_path)
+    monkeypatch.setattr(plan, "subprocess", types.SimpleNamespace(run=fake_run))
+    monkeypatch.setenv("PLAN_SHARED_REALIZE", "1")
+    monkeypatch.setenv("FORBID_STEPS", "tail")
+    plan.main(["--graph-dir", str(graphs), "--name", "p", "--set", "PLAN_SHARED_REALIZE="])
+    assert "PLAN_SHARED_REALIZE" not in seen
+    assert seen["FORBID_STEPS"] == "tail"
+    lines = (tmp_path / "bootstrap_placements" / "p" / "PLAN_CMD.txt").read_text().splitlines()
+    recipe = dict(kv.split("=", 1) for kv in shlex.split(lines[1][len("recipe=") :]))
+    assert recipe == plan.recipe_of(seen)
+    assert lines[2] == "runtime=FIDESLIB_BTS_REAL=1"
+
+
+def test_collecting_this_example_sets_no_environment():
+    """Importing the package and this directory's conftest, which is what collection does, leaves
+    LADDER_RADIX_BITS alone, so the repository's own tests in the same run keep their default."""
+    code = (
+        "import os, runpy; import examples.fhe_ssm_from_primitives; "
+        f"runpy.run_path({str(Path(__file__).with_name('conftest.py'))!r}); "
+        "print(os.environ.get('LADDER_RADIX_BITS'))"
+    )
+    env = {k: v for k, v in os.environ.items() if k != "LADDER_RADIX_BITS"}
+    r = subprocess.run(
+        [sys.executable, "-c", code], cwd=ROOT, env=env, capture_output=True, text=True, check=True
+    )
+    assert r.stdout.strip() == "None"
 
 
 def test_the_capture_environment_does_not_leak_between_tests():

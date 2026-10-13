@@ -24,10 +24,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
-from collections.abc import MutableMapping
+from collections.abc import Mapping, MutableMapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -74,6 +75,46 @@ def plan_env(graph_dir: str, name: str, overrides: dict[str, str] | None = None)
     return {k: v for k, v in env.items() if v != "" or k in SET_EMPTY}
 
 
+def runner_vars() -> frozenset[str]:
+    """The variables ``run_bootstrap_all_blocks.sh`` reads, from the script itself (every ``${NAME``),
+    without the three that name its inputs and interpreter rather than the plan."""
+    names = set(re.findall(r"\$\{([A-Z_][A-Z0-9_]*)", RUNNER.read_text(encoding="utf-8")))
+    return frozenset(names - {"GRAPH_DIR", "OUT_NAME", "PYTHON"})
+
+
+def runner_env(
+    graph_dir: str,
+    name: str,
+    overrides: dict[str, str] | None = None,
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """The runner's whole environment: the caller's, without the recipe's variables and without any
+    variable an override names, then ``plan_env``'s. An override always wins, and ``--set VAR=``
+    leaves VAR unset whether or not the recipe has it."""
+    src = os.environ if environ is None else environ
+    over = overrides or {}
+    shell = {k: v for k, v in src.items() if k not in RECIPE and k not in over}
+    return {
+        **shell,
+        **plan_env(graph_dir, name, over),
+        "CUDA_VISIBLE_DEVICES": "",
+        "PYTHON": sys.executable,
+    }
+
+
+def recipe_of(full: Mapping[str, str]) -> dict[str, str]:
+    """The planner's part of the runner's environment, as ``PLAN_CMD.txt``'s ``recipe=`` line records
+    it: the recipe's variables, the PLAN_* family the planner reads, and the runner script's own (the
+    levels, FORBID_STEPS, the first entry), each with the value the runner was given."""
+    keep = runner_vars()
+    return {
+        k: v
+        for k, v in sorted(full.items())
+        if k not in ("GRAPH_DIR", "OUT_NAME", "PYTHON")
+        and (k in RECIPE or k.startswith("PLAN_") or k in keep)
+    }
+
+
 def stamp(graph_dir: Path, plans: list[Path], is_dense: bool = False) -> int:
     """The capture's contract into every plan (make_plan.sh's stamp): a dense plan runs
     without the sparse keys, so its contract says so."""
@@ -111,16 +152,19 @@ def runtime_switches(plans: list[Path]) -> dict[str, str]:
     return out
 
 
-def write_plan_cmd(out_dir: Path, graph_dir: str, env: dict[str, str], plans: list[Path]) -> Path:
-    """``PLAN_CMD.txt`` in the repository's form: ``graph=``, ``recipe=`` (the runner's variables,
-    so ``tests/test_paper_plans.py`` regenerates the plan with the plain runner) and ``runtime=``
-    (``runtime_switches``, exported by ``gpu_run.py --mode planned`` before the session opens)."""
-    recipe = " ".join(
-        f"{k}={shlex.quote(v)}" for k, v in env.items() if k not in ("GRAPH_DIR", "OUT_NAME")
+def write_plan_cmd(
+    out_dir: Path, graph_dir: str, recipe: Mapping[str, str], plans: list[Path]
+) -> Path:
+    """``PLAN_CMD.txt`` in the repository's form: ``graph=``, ``recipe=`` (``recipe_of`` the runner's
+    environment, so ``tests/test_paper_plans.py`` regenerates the plan with the plain runner) and
+    ``runtime=`` (``runtime_switches``, exported by ``gpu_run.py --mode planned`` before the session
+    opens)."""
+    line = " ".join(
+        f"{k}={shlex.quote(v)}" for k, v in recipe.items() if k not in ("GRAPH_DIR", "OUT_NAME")
     )
     runtime = " ".join(f"{k}={v}" for k, v in runtime_switches(plans).items())
     p = out_dir / "PLAN_CMD.txt"
-    p.write_text(f"graph={graph_dir}\nrecipe={recipe}\nruntime={runtime}\n", encoding="utf-8")
+    p.write_text(f"graph={graph_dir}\nrecipe={line}\nruntime={runtime}\n", encoding="utf-8")
     return p
 
 
@@ -147,13 +191,23 @@ def export_plan_runtime(
     return runtime
 
 
+def effective_runtime(
+    requested: Mapping[str, str], environ: Mapping[str, str] | None = None
+) -> dict[str, str]:
+    """The values in effect for the switches a plan asks for ("" where unset): what a planned run
+    reports beside the plan's own request, since an exported value wins."""
+    env = os.environ if environ is None else environ
+    return {k: env.get(k, "") for k in requested}
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--graph-dir", required=True, help="block_<b>/graph.json captures")
     ap.add_argument("--name", required=True, help="bootstrap_placements/<name>/")
     ap.add_argument("--set", action="append", default=[], metavar="VAR=VALUE",
                     help="override a recipe variable (VAR= unsets it)")  # fmt: skip
-    ap.add_argument("--dry-run", action="store_true", help="print the environment, plan nothing")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="print the planner's variables the runner would get, plan nothing")  # fmt: skip
     a = ap.parse_args(argv)
     overrides = {}
     for kv in a.set:
@@ -161,24 +215,20 @@ def main(argv=None) -> int:
         if not sep or not k:
             ap.error(f"--set {kv!r}: VAR=VALUE")
         overrides[k] = v
-    env = plan_env(a.graph_dir, a.name, overrides)
+    full = runner_env(a.graph_dir, a.name, overrides)
     if a.dry_run:
-        print(json.dumps(env, indent=1, sort_keys=True))
+        print(json.dumps(recipe_of(full), indent=1, sort_keys=True))
         return 0
     graph_dir = Path(a.graph_dir)
     blocks = sorted(graph_dir.glob("block_*/graph.json"))
     if not blocks:
         raise SystemExit(f"no block_<b>/graph.json under {graph_dir}: capture first")
-    full = {**{k: v for k, v in os.environ.items() if k not in RECIPE}, **env,
-            "CUDA_VISIBLE_DEVICES": "", "PYTHON": sys.executable}  # fmt: skip
     subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=full, check=True)
     plans = sorted((ROOT / "bootstrap_placements" / a.name).glob("block_*_placement.json"))
-    n = stamp(graph_dir, plans, dense(env))
-    # the recipe line carries the planner switches the shell exported beyond the recipe (PLAN_HARD_ENV_CAP,
-    # PLAN_PLACER, ...), so the plan regenerates from the file alone
-    extra = {k: v for k, v in sorted(os.environ.items()) if k.startswith("PLAN_") and k not in env}
+    n = stamp(graph_dir, plans, dense(full))
+    # the recipe line is what the runner was given, so the plan regenerates from the file alone
     cmd = write_plan_cmd(
-        ROOT / "bootstrap_placements" / a.name, a.graph_dir, {**env, **extra}, plans
+        ROOT / "bootstrap_placements" / a.name, a.graph_dir, recipe_of(full), plans
     )
     print(
         f"planned {len(blocks)} captured stages -> {len(plans)} plans; stamped {n}; {cmd.name}: {plan_runtime(cmd.parent) or 'no runtime switches'}"

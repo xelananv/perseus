@@ -131,7 +131,15 @@ def run(a) -> dict:
     out = Path(a.out)
     report: dict = {"mode": a.mode, "fake": a.fake, "blocks": params.n_layers, "ticks": []}
     if a.mode == "planned":
-        report["plan_runtime"] = runtime
+        effective = plan_mod.effective_runtime(runtime)
+        report["plan_runtime"] = {"plan": runtime, "effective": effective}
+        if effective != runtime:
+            print(
+                f"[gpu_run] the environment overrides the plan's runtime switches: the plan asks for "
+                f"{runtime}, in effect {effective}",
+                file=sys.stderr,
+                flush=True,
+            )
     with session as s:
         inf = s if a.fake else s.inf
         model = FheSsmModel(
