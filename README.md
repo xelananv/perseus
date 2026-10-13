@@ -347,4 +347,7 @@ The device encoder, the capture's device magnitude probe and the fhe-ssm port
 `tests/dev/gpu_encode_layout_probe.cu`, `tests/dev/gpu_encode_probe.cu`,
 `tests/dev/gpu_mag_probe_check.cu`) are copyright (c) 2026 Alexander Ananyev and licensed under
 the MIT License (`examples/fhe_ssm_from_primitives/LICENSE`); each file says so in its first line.
-They may be redistributed as part of Perseus under its license with that notice retained.
+They may be redistributed as part of Perseus under its license with that notice retained. Any
+commercial use of these files as part of Perseus requires prior written permission from Alessandro
+Zirilli or Davide Marincione, under Perseus's Business Source License 1.1; on their own the files
+are MIT.
