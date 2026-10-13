@@ -52,6 +52,8 @@ class ImplModel:
         self.rt = Rt(ops, dims or Dims.from_inf(inf))
         self.plans = None
         self.plan_variants = {}
+        self._route_class = None       # ensure_routes
+        self._base_routes = None
         self.plan_variant = None
         self.graph_dir = None
         # weight-upload overlap through the runtime's residency ring (needs the real core)
@@ -63,11 +65,13 @@ class ImplModel:
         # on a remote node and every token then stalls on remote pinned memory).
         if self.overlap and hasattr(core, "prewarm_stage_arenas"):
             core.prewarm_stage_arenas(inf)
-        # K/V residency (the C++ offload_block_kv): a stage's cache ciphertexts are copied to
-        # the pinned KV arena on a side stream after the stage and reloaded ahead of its next
-        # use, so only two blocks' caches sit on the device at any time
+        # K/V residency (the C++ offload_block_kv), IMPL_KV_OFFLOAD=1: a stage's cache ciphertexts are copied
+        # to the pinned KV arena on a side stream after the stage and reloaded ahead of its next use, so only two
+        # blocks' caches sit on the device at any time. Off by default: the caches stay resident (2.2 GB on the
+        # n32 decode) and the per-stage device fences the offload needs go away (-0.08 s/token with the other
+        # barrier removals, 2026-10-11)
         if kv_offload is None:
-            kv_offload = os.environ.get("IMPL_KV_OFFLOAD", "1") not in ("", "0")
+            kv_offload = os.environ.get("IMPL_KV_OFFLOAD", "0") not in ("", "0")
         self.kv_offload = bool(kv_offload) and hasattr(inf, "kv_store")
         self._parked = {}              # stage -> keys whose ciphertexts live in the arena
         self._ring_order = []          # prefixes of the ring's stages, in order
@@ -90,6 +94,41 @@ class ImplModel:
         """(ciphertexts, keys) a stage keeps across tokens (its K/V cache), or None. With
         `kv_offload` they are parked in the pinned KV arena between the stage's uses."""
         return None
+
+    def replay_kv_pushes(self, payloads, level=36):
+        """Fill the caches with positions 0..n-1 computed elsewhere (a numpy fake run, a public prefix): every
+        position's pushes are replayed on this session from its payloads (attention.kv_push's `payload_log`),
+        each encrypted as a public value (a fresh encryption of zero plus it) at `level`. The pushes themselves
+        (refresh, masks, bucketing) run here, so the caches carry this session's levels, degrees and pack tags.
+        `payloads[b]` is block b's log. Run after start(); decode then begins at position n."""
+        import numpy as np
+        from .attention import kv_push
+        ops = self.rt.ops
+        zero = np.zeros(self.rt.dims.dim)
+
+        def enc(v):
+            ct = ops.add_pt(self.core.encode_token_input(self.inf, zero), np.asarray(v))
+            return ops.level_drop(ct, level)
+        n = len(payloads[0]) if payloads else 0
+        for pos in range(n):
+            self.rt.declare_step(pos, self.step_masks(pos))
+            self.rt.begin_step(pos)
+            for b, (kv, log) in enumerate(zip(self.kv, payloads)):
+                p = log[pos]
+                with self.rt.step(f"blk{b}"), self.rt.step("kv_push"):
+                    kv_push(self.rt, kv, tuple(enc(c) for c in p) if isinstance(p, tuple) else enc(p))
+        if self.kv_offload:
+            # parked as a decode leaves them: in the pinned KV arena, reloaded by the stage loop
+            ops.device_sync()
+            for i in range(len(self.kv)):
+                caches = self.stage_caches(i)
+                if caches and caches[0]:
+                    cts, ks = caches
+                    self.inf.kv_store(cts, ks)
+                    self.inf.kv_sync()
+                    self.inf.kv_evict(cts)
+                    self._parked[i] = set(ks)
+        return n
 
     def start(self):
         """Reset per-sequence state (K/V caches, seeds)."""
@@ -126,6 +165,39 @@ class ImplModel:
                 if os.path.exists(p):
                     self.plan_variants[v][b] = load(p)
         return self
+
+    def routes_for(self, pos):
+        """(class, {slots}): the sparse routes position `pos` needs beyond the session's own (hook; None: none)."""
+        return None
+
+    def ensure_routes(self, pos):
+        """Make the resident sparse routes those position `pos` (+ SM_ROUTE_AHEAD) needs: unneeded routes are dropped
+        first, then missing ones built, so the device never holds both sets. Routes are not part of the plan: the
+        runtime refreshes a planned site on the route its value's period needs (planned_route_for). Building needs
+        the secret key (in a deployment: the client's keys, asked for ahead of the boundary)."""
+        if not hasattr(self.inf, "add_sparse_route"):
+            return
+        if self._base_routes is None:
+            self._base_routes = set(self.inf.sparse_routes)
+        ahead = int(os.environ.get("SM_ROUTE_AHEAD", "0") or 0)
+        want = self.routes_for(pos + ahead)
+        if want is None:
+            return
+        cls, slots = want
+        if cls == self._route_class:
+            return
+        target = self._base_routes | set(slots)
+        current = set(self.inf.sparse_routes)
+        t0 = time.time()
+        dropped = sorted(current - target)
+        for s in dropped:
+            self.inf.drop_sparse_route(int(s))
+        built = sorted(target - current)
+        for s in built:
+            self.inf.add_sparse_route(int(s))
+        self._route_class = cls
+        print(f"[routes] position {pos}: class {cls}, routes {sorted(self.inf.sparse_routes)} "
+              f"(dropped {dropped}, built {built}) in {time.time() - t0:.1f}s", flush=True)
 
     def _plan_for(self, b):
         if self.plans is None:
@@ -259,7 +331,8 @@ class ImplModel:
 
     # ── per-token bookkeeping ──
     def token_begin(self, pos):
-        """Adopt this step's staged masks, evict the previous step's, start the counters."""
+        """Adopt this step's staged masks, evict the previous step's, start the counters, build its routes."""
+        self.ensure_routes(pos)
         if pos not in self.rt._step_items:
             self.rt.declare_step(pos, self.step_masks(pos))
         t_wait = time.time()
@@ -306,6 +379,11 @@ class ImplModel:
                        minflt=ru1.ru_minflt - ru0.ru_minflt, majflt=ru1.ru_majflt - ru0.ru_majflt)
         if hasattr(self.core, "device_free_gb"):
             rec["free_gb"] = round(float(self.core.device_free_gb()), 1)
+        if hasattr(self.core, "gpu_pool_stats"):
+            st = self.core.gpu_pool_stats()
+            rc = self.inf.recycled_polys() if hasattr(self.inf, "recycled_polys") else (0, 0.0)
+            rec["pool_gb"] = (round(st["reserved_gb"] - st["idle_gb"] - rc[1], 1), round(st["reserved_gb"], 1),
+                              round(st["trimmable_gb"], 1), round(rc[1], 1))
         try:
             with open("/proc/self/status") as f:
                 for line in f:

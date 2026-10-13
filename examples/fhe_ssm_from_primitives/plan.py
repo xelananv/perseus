@@ -44,6 +44,9 @@ RECIPE = {
     "PLAN_SPARSE_SLOTS": "512,1",
     "PLAN_SPARSE_BTS_OUT": "1:26,512:36",
     "PLAN_PRUNE": "1",
+    "PLAN_REAL_ROUTE": "1",
+    "PLAN_RAISE_DROP_SET": "1,3,5",
+    "PLAN_SHARED_REALIZE": "1",
 }
 
 

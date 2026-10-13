@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
+
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .ir import ADD_FAMILY, MULT_FAMILY, Graph, Node, is_literal_input, is_plaintext_name
 
@@ -13,9 +15,30 @@ class SimResult:
     node_out: dict[int, float]
     hint_fired: dict[int, bool]
     over_budget: list[tuple[int, float]]
+    #: pending-rescale degree of each node's output BEFORE any refresh override (node_out holds the level)
+    node_deg: dict[int, int] = field(default_factory=dict)
 
     def effective(self, v: str, unit: int) -> float:
         return self.consumed.get(v, 0.0) + (unit if self.deg.get(v, 1) == 2 else 0)
+
+    def input_state(self, g: Graph, v: str) -> tuple[float, int]:
+        """(consumed depth, pending-rescale degree) a refresh of `v` STARTS at: the producing node's own output
+        before the sim overwrote it with the landing, or, for a hint node, the ciphertext entering the hint.
+        `consumed[v]`/`deg[v]` are the landing for a placed site, which is the one level a refresh-envelope
+        check must not read. Unknown degree counts as pending (deg 2)."""
+        p = g.producer_of.get(v)
+        if p is not None and p.hint_level is not None and p.cipher_inputs:
+            src = p.cipher_inputs[0]
+            return self.consumed.get(src, 0.0), self.deg.get(src, 1)
+        if p is None or p.idx not in self.node_out:
+            return self.consumed.get(v, 0.0), self.deg.get(v, 1)
+        return self.node_out[p.idx], self.node_deg.get(p.idx, 2)
+
+    def input_eff(self, g: Graph, v: str, unit: int) -> float:
+        """Effective consumed depth a refresh of `v` STARTS at (`input_state`, plus one unit when a rescale is
+        pending): what the refresh envelope is measured in."""
+        c, d = self.input_state(g, v)
+        return c + (unit if d == 2 else 0)
 
 
 @dataclass(frozen=True)
@@ -63,6 +86,7 @@ def simulate(
     realized: set[str] | None = None,
     hint_force: dict[str, bool] | None = None,
     deliberate_clamp0: bool = False,
+    dense_fallback: tuple[float, float, int] | None = None,
 ) -> SimResult:
     unit = g.level_unit
     offs = step_offsets if step_offsets is not None else step_bts_offsets(g, bootstrap_level)
@@ -78,6 +102,7 @@ def simulate(
         dg[v] = d
 
     node_out: dict[int, float] = {}
+    node_deg: dict[int, int] = {}
     hint_fired: dict[int, bool] = {}
     over: list[tuple[int, float]] = []
 
@@ -103,6 +128,12 @@ def simulate(
                     base = 0.0
                 lc[n.output] = base
                 dg[n.output] = 2
+                # StC-first runs with the K/V push in the shipped order (IMPL_STC_FIRST_KV=0): it lands where that
+                # order lands (PLAN_STC_FIRST_KV_LANDING = level:deg, absolute)
+                _kvl = os.environ.get("PLAN_STC_FIRST_KV_LANDING")
+                if _kvl:
+                    _lv, _, _dg = _kvl.partition(":")
+                    lc[n.output], dg[n.output] = float(_lv) - bootstrap_level, int(_dg or 2)
             continue
 
         if n.hint_level is not None:
@@ -118,6 +149,11 @@ def simulate(
                     c, d = refreshed[n.output]
                 else:
                     c, d = 0.0, 2
+                # StC-first (PLAN_STC_FIRST_ENTRY): a dense refresh whose input has no room for the StC levels takes
+                # the shipped order at run time and lands where that order lands
+                if (dense_fallback is not None and n.output not in (sparse_refreshed or ())
+                        and bootstrap_level + ic_eff > dense_fallback[0] + 1e-9):
+                    c, d = dense_fallback[1], dense_fallback[2]
             else:
                 c, d = ic, (dg.get(ins[0], 1) if ins else 1)
         elif not ins:
@@ -163,6 +199,8 @@ def simulate(
             c = (n.output_level - bootstrap_level if n.output_level is not None
                  else (lc.get(ins[0], 0.0) if ins else 0.0))
             d = n.output_deg if n.output_deg is not None else (dg.get(ins[0], 1) if ins else 1)
+            if ins and lc.get(ins[0], 0.0) >= c:     # no-op drop
+                c, d = lc.get(ins[0], 0.0), dg.get(ins[0], 1)
         elif n.op == "fold_bootstrap":
             c = (n.output_level - bootstrap_level
                  if n.output_level is not None else float(unit))
@@ -173,6 +211,9 @@ def simulate(
         if n.output:
             if n.output in refreshed and n.hint_level is None:
                 lc[n.output], dg[n.output] = refreshed[n.output]
+                if (dense_fallback is not None and n.output not in (sparse_refreshed or ())
+                        and bootstrap_level + c + (unit if d == 2 else 0) > dense_fallback[0] + 1e-9):
+                    lc[n.output], dg[n.output] = dense_fallback[1], dense_fallback[2]
             else:
                 lc[n.output] = c
                 dg[n.output] = d
@@ -180,6 +221,7 @@ def simulate(
                 lc[n.output] += unit
                 dg[n.output] = 1
         node_out[n.idx] = c
+        node_deg[n.idx] = d
 
         b = budget.node_budget(
             n, is_terminal=(n is terminal),
@@ -189,4 +231,4 @@ def simulate(
             over.append((n.idx, c - b))
 
     return SimResult(consumed=lc, deg=dg, node_out=node_out,
-                     hint_fired=hint_fired, over_budget=over)
+                     hint_fired=hint_fired, over_budget=over, node_deg=node_deg)

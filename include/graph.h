@@ -36,6 +36,7 @@ struct GraphNode {
     int  pack_stride  = 0;
     int  pack_count   = 0;
     int  pack_width   = 1;   // Block support width (1 = classic AP)
+    int  pack_field   = 0;   // packtag::Field: 0 unknown, 1 real, 2 imaginary, 3 complex
 
     bool   has_fold       = false;
     double fold_stride    = 0.0;
@@ -85,6 +86,13 @@ public:
 
     GraphNode* last_node() {
         return nodes_.empty() ? nullptr : &nodes_.back();
+    }
+
+    // The latest node that produced `output` (nullptr if none).
+    GraphNode* last_node_for(const std::string& output) {
+        for (auto it = nodes_.rbegin(); it != nodes_.rend(); ++it)
+            if (it->output == output) return &*it;
+        return nullptr;
     }
 
     std::size_t size() const { return nodes_.size(); }
@@ -174,6 +182,10 @@ public:
                 out << "      \"pack_stride\": " << node.pack_stride << ",\n";
                 out << "      \"pack_count\": " << node.pack_count << ",\n";
                 out << "      \"pack_width\": " << node.pack_width;
+            }
+            if (node.pack_field != 0) {
+                out << ",\n";
+                out << "      \"pack_field\": " << node.pack_field;
             }
             if (node.has_fold) {
                 out << ",\n";
@@ -283,6 +295,10 @@ public:
 
     GraphNode* last_node() {
         return graph_ ? graph_->last_node() : nullptr;
+    }
+
+    GraphNode* last_node_for(const std::string& output) {
+        return graph_ ? graph_->last_node_for(output) : nullptr;
     }
 
     std::string to_json() const {

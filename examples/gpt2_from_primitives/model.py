@@ -19,6 +19,7 @@ from perseus.impl.config import Configs
 from perseus.impl.driver import ImplModel
 from perseus.impl.norm import norm_step_masks
 
+from . import slotcache
 from .block import transformer_block
 from .head import (cutmax_argmax, cutmax_argmax_packed, decode_logits, decode_z, feedback_embed,
                    final_ln, lm_head, make_ones, pack_tiles)
@@ -61,9 +62,19 @@ class Gpt2Model(ImplModel):
     # ── weights (host numpy, lazily encoded) ──
     def block_weights(self, b):
         if b not in self._bw:
-            self._bw[b] = W.block_weights(self.store, self.cfgs, b, self.rt.dims,
-                                          self.fold[0], self.fold[1], self.complex_packing)
+            ge = self.cfgs.block(b)[3]
+            fold = self.rt.ops.gelu_fold and ge.method == "thor_composite"
+            args = (b, self.rt.dims, self.fold[0], self.fold[1], self.complex_packing,
+                    1.0 / ge.xmax if fold else 1.0)
+            self._bw[b] = slotcache.cached(self._slot_key(), "block", args, lambda: W.block_weights(
+                self.store, self.cfgs, b, self.rt.dims, args[2], args[3], args[4], up_scale=args[5]))
         return self._bw[b]
+
+    def _slot_key(self):
+        """The slot-vector cache's model reference (slotcache.model_ref), once per model."""
+        if getattr(self, "_skey", None) is None:
+            self._skey = slotcache.model_ref(self.store._zip.filename, self.cfgs) if slotcache.enabled() else None
+        return self._skey
 
     def lnf_params(self):
         if self._lnf is None:
@@ -72,16 +83,20 @@ class Gpt2Model(ImplModel):
 
     def lm_tiles(self):
         if self._lm is None:
-            Wlm = W.lm_head_matrix(self.store, self.cfgs.ln_f, self.rt.dims, self.vocab, self.fold[2])
-            self._lm = W.lm_head_tiles(Wlm, self.rt.dims, self.vocab, self.W_tile,
-                                       paired=self.complex_packing)
+            def build():
+                Wlm = W.lm_head_matrix(self.store, self.cfgs.ln_f, self.rt.dims, self.vocab, self.fold[2])
+                return W.lm_head_tiles(Wlm, self.rt.dims, self.vocab, self.W_tile, paired=self.complex_packing)
+            self._lm = slotcache.cached(self._slot_key(), "lm", (self.rt.dims, self.vocab, self.W_tile,
+                                                                 self.complex_packing, self.fold[2]), build)
         return self._lm
 
     def fb_tiles(self):
         if self._fb is None:
-            Wlm = W.lm_head_matrix(self.store, self.cfgs.ln_f, self.rt.dims, self.vocab, self.fold[2])
-            self._fb = W.feedback_tiles(Wlm, self.rt.dims, self.vocab, self.W_tile,
-                                        packed=self.complex)
+            def build():
+                Wlm = W.lm_head_matrix(self.store, self.cfgs.ln_f, self.rt.dims, self.vocab, self.fold[2])
+                return W.feedback_tiles(Wlm, self.rt.dims, self.vocab, self.W_tile, packed=self.complex)
+            self._fb = slotcache.cached(self._slot_key(), "fb", (self.rt.dims, self.vocab, self.W_tile,
+                                                                 self.complex, self.fold[2]), build)
         return self._fb
 
     def preload(self):
@@ -100,6 +115,14 @@ class Gpt2Model(ImplModel):
                                   validate=validate, variants=("feedback",))
 
     # ── the hooks ──
+    def routes_for(self, pos):
+        """SM_PERIODIC=2: the Gp x tH-slot route of the softmax's (Gp tH)-periodic values."""
+        from perseus.impl.attention import sm_periodic
+        if not getattr(self.rt.ops, "sm_periodic_general", False):
+            return None
+        gp = max(1, sm_periodic(self.rt, pos + 1))
+        return gp, ({gp * self.rt.dims.tH} if gp > 1 else set())
+
     def start(self):
         for kv in self.kv:
             kv.reset()
@@ -136,7 +159,7 @@ class Gpt2Model(ImplModel):
                 cap = self.enter_stage(b, pos)
                 with self.rt.step(f"blk{b}"):
                     x = transformer_block(self.rt, x, self.block_weights(b), self.kv[b],
-                                          self.cfgs.block(b), pos)
+                                          self.cfgs.block(b), pos, last=(b == self.n_layers - 1))
                 self.exit_stage(b, cap)
                 return x
             return compute
@@ -174,7 +197,10 @@ class Gpt2Model(ImplModel):
         if os.environ.get("IMPL_CUTMAX_MARKS"):          # refreshes per phase, like [cutmax_bts]
             tap = lambda name, ct: marks.__setitem__(name, int(self.inf.fhe.total_bootstraps))
             b0 = int(self.inf.fhe.total_bootstraps)
-        with self.rt.step("cutmax"):
+        # IMPL_STC_FIRST_ARGMAX=0: the CutMax stage bootstraps in the shipped order (its near-tie decisions need that
+        # order's precision; its plan is cut at the shipped landing), the decode blocks keep StC-first
+        from perseus.impl import bootstrap as _pyb
+        with self.rt.step("cutmax"), _pyb.stc_first(os.environ.get("IMPL_STC_FIRST_ARGMAX", "1") not in ("", "0")):
             if self.complex and len(tiles) == 1:              # the paired LM-head tile
                 z = [cutmax_argmax_packed(self.rt, tiles[0], self.vocab, self.cfgs.cutmax, None, tap=tap)]
             elif self.complex and len(tiles) == 2:
@@ -205,12 +231,18 @@ class Gpt2Model(ImplModel):
         return decode_z(self.rt, z, self.vocab, self.W_tile)
 
     # ── drivers ──
-    def run_decode(self, inputs, gt_logits=None, on_token=None, argmax=False):
+    def run_decode(self, inputs, gt_logits=None, on_token=None, argmax=False, first=0):
         """Teacher-forced decode (src/app/pipeline.cu): one forward per oracle row,
-        logits decrypted per token, optional CutMax on the tiles. Returns per-token dicts."""
-        self.start()
+        logits decrypted per token, optional CutMax on the tiles. Returns per-token dicts.
+        `first` > 0: positions before it are already in the caches (replay_kv_pushes)."""
+        if first == 0:
+            self.start()
+        else:
+            self.ones = None
         results = []
         for t, row in enumerate(inputs):
+            if t < first:
+                continue
             self.token_begin(t)
             x = self.encode_input(row)
             tiles = self.decode_token(x, t)

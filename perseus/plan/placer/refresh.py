@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import logging
 from collections.abc import Iterable
 from dataclasses import dataclass, field
@@ -23,9 +24,12 @@ class RefreshSpec:
     out_consumed: float = 0.0
     out_deg: int = 1
     reason: str = ""
+    raise_drop: int = 0
     # `cf == policy.cf_max` because the search ran out of range (btserr.ceiling_binds).
     # Never enters a plan file: emit reads the named fields it needs, nothing dumps a spec.
     clamped: bool = False
+    # StC-first runs: a dense site bootstrapped in the shipped order (plan 'shipped_order', PLAN_STC_FIRST_MAG_MAX)
+    shipped: bool = False
 
     def overshoot(self, target: float) -> float:
         import math
@@ -52,6 +56,19 @@ class CfClampReport:
     @property
     def num_clamped(self) -> int:
         return len(self.clamped)
+
+
+def _step_landing_floor(step: str):
+    """The PLAN_STEP_LANDING floor (absolute level) of a refresh in `step`, or None."""
+    spec = os.environ.get("PLAN_STEP_LANDING", "")
+    best = None
+    for item in spec.split(","):
+        if ":" not in item:
+            continue
+        key, lv = item.rsplit(":", 1)
+        if key and key in step.split("."):
+            best = max(best or 0, int(lv))
+    return best
 
 
 @dataclass
@@ -103,22 +120,55 @@ class RefreshPlanner:
             levels_free=1 if self.policy.allow_prescale else 0,
         )
         choice = btserr.choose_site(self.table, self.policy, **site)
+        # StC-first (policy.slim_cubic > 0): a dense site whose slot magnitude the StC-first order cannot hold at the
+        # shipped order's precision (PLAN_STC_FIRST_MAG_MAX, after the drift margin) bootstraps in the shipped order:
+        # priced without the slim term, landed where that order lands (PLAN_STC_FIRST_FALLBACK = level:deg)
+        shipped = False
+        _mag_max = os.environ.get("PLAN_STC_FIRST_MAG_MAX")
+        _fb = os.environ.get("PLAN_STC_FIRST_FALLBACK")
+        # PLAN_STC_FIRST_STEPS (comma list of step names, the last dotted part): only those steps' dense sites keep
+        # StC-first, every other dense site takes the shipped order
+        _steps = os.environ.get("PLAN_STC_FIRST_STEPS")
+        _step_ok = True
+        if _steps is not None and p is not None:
+            _step_ok = (p.step or "").split(".")[-1] in {x.strip() for x in _steps.split(",") if x.strip()}
+        _too_big = bool(_mag_max) and p is not None and (p.max_abs or 0.0) * self.policy.mag_safety > float(_mag_max)
+        if (self.policy.slim_cubic > 0 and not choice.route and _fb and p is not None
+                and (_too_big or not _step_ok)):
+            import dataclasses as _dc
+            choice = btserr.choose_site(self.table, _dc.replace(self.policy, slim_cubic=0.0), **site)
+            shipped = not choice.route
         # one extra search, only for a site pinned at cf_max; the choice above is unchanged
         clamped = btserr.ceiling_binds(self.table, self.policy, choice.cf, **site)
 
-        if v in self.site_out_levels:
-            base = float(self.site_out_levels[v]) - self.bootstrap_level
-        elif choice.route and choice.route in self.sparse_out_levels:
-            base = float(self.sparse_out_levels[choice.route]) - self.bootstrap_level
+        if choice.route and choice.route in self.sparse_out_levels:
+            base_route = float(self.sparse_out_levels[choice.route]) - self.bootstrap_level
         elif choice.route:
             if choice.route not in self._warned_routes:
                 self._warned_routes.add(choice.route)
                 log.info(f"[plan]  routing sites sparse at s={choice.route} with no measured "
                       f"landing level; assuming dense. Measure it from a "
                       f"`[planted_bts] ... out=` ledger and pass --sparse-bts-out.")
-            base = max(0.0, self.step_bts_offset.get(p.step, 0.0)) if p else 0.0
+            base_route = max(0.0, self.step_bts_offset.get(p.step, 0.0)) if p else 0.0
         else:
-            base = max(0.0, self.step_bts_offset.get(p.step, 0.0)) if p else 0.0
+            base_route = max(0.0, self.step_bts_offset.get(p.step, 0.0)) if p else 0.0
+        raise_drop = 0
+        if v in self.site_out_levels:
+            base = float(self.site_out_levels[v]) - self.bootstrap_level
+            # a landing deeper than the route's own is a level-aware (partial) ModRaise
+            unit = float(self.graph.level_unit) or 1.0
+            raise_drop = max(0, int(round((base - base_route) / unit)))
+        else:
+            base = base_route
+        # PLAN_STEP_LANDING="softmax:32,...": refreshes in those steps are planned to land no shallower than that
+        # (their route changes with the cache length under SM_PERIODIC=2; a shallower landing is headroom)
+        floor = _step_landing_floor(p.step if p else "")
+        if floor is not None:
+            base = max(base, float(floor) - self.bootstrap_level)
+        out_deg = self.out_deg
+        if shipped:
+            _lv, _, _dg = _fb.partition(":")
+            base, out_deg = float(_lv) - self.bootstrap_level, int(_dg or 1)
         restore = float(self.graph.level_unit) if choice.prescale is not None else 0.0
         return RefreshSpec(
             var=v,
@@ -130,9 +180,11 @@ class RefreshPlanner:
             prescale=choice.prescale,
             offset=choice.offset,
             out_consumed=base + restore,
-            out_deg=self.out_deg,
+            out_deg=out_deg,
             reason=choice.reason,
+            raise_drop=raise_drop,
             clamped=clamped,
+            shipped=shipped,
         )
 
     def cf_clamp_report(self, sites: Iterable[str]) -> CfClampReport:

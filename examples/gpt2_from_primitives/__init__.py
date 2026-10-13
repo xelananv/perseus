@@ -52,6 +52,33 @@ The three modes, the same loop the C++ / EncGPT2 run:
               live per block (strict: the op sequence must match the capture); CutMax is planned
               too when its plan is present; ``--no-plan-argmax`` runs it eager
 
+A capture spends most of its time decrypting every node for its magnitudes. ``--structure-only`` records the
+graph without them and ``capture_mags.py`` fills them from the numpy fake running the same kernels on the same token
+(perseus/impl/magtape.py: exact values, the nodes matched one by one by op type and step)::
+
+    run_decode --tokens 1 --capture graphs/X --structure-only    (add --argmax to capture CutMax)
+    capture_mags graphs/X [--argmax]
+
+Long contexts. A plan names ciphertexts by a per-block counter, so it binds only while every token issues the same
+ops: the q.K^T adds a product per 32-token cache group and SM_PERIODIC switches the softmax's path when the cache
+outgrows one group, so a plan captured at token 0 stops binding at token 32. With ``IMPL_SCOPED_NAMES=1`` every step
+names its ciphertexts on its own counter (the q.K^T keyed by the cache's group count) and, with ``SM_PERIODIC=0``, one
+capture plans every length; the plan declares both in its ``runtime=`` line::
+
+    run_decode --tokens 1 --capture graphs/X --structure-only --set IMPL_SCOPED_NAMES=1 --set SM_PERIODIC=0
+
+``SM_PERIODIC=2`` keeps the periodic softmax at every length: with G groups the scores repeat every Gp tH blocks (Gp
+the power of two >= G). The ops whose count depends on Gp run in sub-steps keyed by it (``gp``), so one plan from the
+token-0 capture serves every length. The softmax's refreshes then need a Gp x 512-slot route, which the session builds
+when the cache enters the class (``ImplModel.ensure_routes``, ``SM_ROUTE_AHEAD``); routes past 1024 slots are
+multi-stage and land deeper than SparseB's, so the plan takes a landing floor on those steps::
+
+    S="--set IMPL_SCOPED_NAMES=1 --set SM_PERIODIC=2"
+    run_decode --tokens 1 --capture graphs/X --structure-only $S; capture_mags graphs/X $S
+    FORBID_STEPS=.var,.mean,.qkv,.gp PLAN_STEP_LANDING=softmax:32,softmax_v:32 make_plan.sh graphs/X X
+    # runtime= adds: SM_PERIODIC=2 IMPL_SCOPED_NAMES=1 FIDESLIB_BTS_SPARSE_B_MAX=1024 SPARSE_LEVEL_BUDGET=3,3
+    run_decode --tokens N --plan X
+
 Planning CutMax (block 13) is a second round, ``make_plan.sh <graph> <name> argmax``, from
 the same eager capture. Its entry is taken from the tail plan's exit (level and degree)
 rather than from the capture: what enters CutMax is what the planned tail produces, and a

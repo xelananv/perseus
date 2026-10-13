@@ -4,14 +4,198 @@ reductions and P.V (src/algorithms/attention/cachemir/cachemir_attention.cu), an
 sublayer order with its bootstrap hints (src/model/mha.cu)."""
 from __future__ import annotations
 
+import contextlib
 import math
+import os
+
+import numpy as np
 
 from .config import SoftmaxCfg
 from .layout import (active_mask, complex_vlane_mask, hrs_pos0, qkt_complex_odd_mask,
                      qkt_group_mask, real_head_half_mask, real_head_tok0_mask, score_mask,
-                     vlane_mask, vpair_mask_complex)
+                     stride_mask, vlane_mask, vpair_mask_complex)
 from .linear import linear, linear_multi
-from .poly import eval_chebyshev, goldschmidt_inv_ndf, im_cleanse, rotsum, rotsum_neg
+from . import smcheb
+from .poly import (eval_chebyshev, goldschmidt_inv_ndf, goldschmidt_recip, im_cleanse, rotsum,
+                   rotsum_neg)
+
+
+def sm_periodic(rt, kc: int) -> int:
+    """The scores' period in tH blocks, Gp (0: not periodic). SM_PERIODIC=1 while every cached token fits one group
+    (kc <= t): q.K^T keeps the score of (h, tok) in every tH block instead of block 0 only, so the THOR softmax and
+    its head sums run on tH-periodic ciphertexts (their refreshes route sparse, the head sum needs no lane-copy
+    ladder) and P.V is one product with the summed V. SM_PERIODIC=2 carries this past one group: group g's scores sit
+    in every block b with b % Gp == g, Gp the power of two >= the group count."""
+    ops, d = rt.ops, rt.dims
+    if not getattr(ops, "sm_periodic", False) or getattr(ops, "fused_sm_den", False):
+        return 0                                     # FUSED_SM_DEN=1 keeps its block-0 ladder + fold
+    if kc <= d.t:
+        return 1
+    if getattr(ops, "sm_periodic_general", False):
+        gp = 1 << ((kc + d.t - 1) // d.t - 1).bit_length()
+        return gp if gp * d.tH <= d.N else 0
+    return 0
+
+
+def _general(rt) -> bool:
+    return bool(getattr(rt.ops, "sm_periodic_general", False))
+
+
+def _gp_scope(rt, per: int):
+    """SM_PERIODIC=2: the ops whose count depends on Gp run in a sub-step keyed by it, so every name a plan pins is
+    the same at every cache length (one token-0 plan binds throughout; plan with FORBID_STEPS .gp)."""
+    return rt.step("gp", shape=f"p{int(per)}")
+
+
+def _gp_out(rt, x):
+    """The sub-step's result named in the enclosing step (an identity add)."""
+    return rt.ops.add(x, 0.0)
+
+
+def sm_fold_affine(rt, cfg: SoftmaxCfg):
+    """(alpha, beta) of the exp's Chebyshev input map y = alpha x - beta when SM_FOLD=1 folds it into the q.K^T
+    group masks (alpha) and the score mask (alpha mask - beta); (1, 0) otherwise."""
+    if not getattr(rt.ops, "sm_fold", False):
+        return 1.0, 0.0
+    sf = 2.0 ** (-cfg.log2delta1 - cfg.log2delta2)
+    a, b = cfg.cheb_a / sf, cfg.cheb_b / sf
+    return 2.0 / (b - a), (a + b) / (b - a)
+
+
+def _group_mask_item(d, num_tok: int, g: int, per: int, scale: float = 1.0):
+    if per:
+        key = ("qkt.gmask.p", num_tok, g) + ((int(per),) if per > 1 else ())
+        build = lambda: qkt_group_mask(d, num_tok, g, periodic=per)
+    else:
+        key, build = ("qkt.gmask", num_tok, g), lambda: qkt_group_mask(d, num_tok, g)
+    if scale == 1.0:
+        return key, build
+    return key + ("x", scale), lambda: scale * build()
+
+
+def _odd_mask_item(d, num_tok: int, g: int, scale: float = 1.0, per: int = 0):
+    key = ("qkt.gmask.c", num_tok, g) + ((int(per),) if per else ())
+    build = lambda: qkt_complex_odd_mask(d, num_tok, g, per)
+    if scale == 1.0:
+        return key, build
+    return key + ("x", scale), lambda: scale * build()
+
+
+def _fold_mask_items(rt, cfg: SoftmaxCfg, kc: int):
+    """The per-step masks SM_FOLD adds: one seed-scaled head-sum mask per reciprocal round."""
+    if not (getattr(rt.ops, "sm_fold", False) and getattr(rt.ops, "sm_den_recip", False)
+            and not getattr(rt.ops, "fused_sm_den", False)):
+        return []
+    item = _hrs_pack_item if getattr(rt.ops, "hrs_pack", False) else _hrs_seed_item
+    return [item(rt.dims, 0.5 * beta * scale * scale, _seed_site(cfg, k))
+            for k, (_a, beta, _i, scale, _c) in enumerate(_recip_rounds_ops(rt.ops, cfg, kc))]
+
+
+def _softmax_mask_items(d, cfg: SoftmaxCfg, kc: int, per: int, affine=(1.0, 0.0)):
+    mean = (cfg.clip_hi + cfg.clip_lo) / 2.0
+    sfx = (".p" if per == 1 else f".p{int(per)}") if per else ""
+    al, be = affine
+    if (al, be) == (1.0, 0.0):
+        score = (("sm.score" + sfx, cfg.clip_lo, mean, kc), lambda: score_mask(d, cfg.clip_lo, mean, kc, periodic=per))
+    else:
+        score = (("sm.score" + sfx, cfg.clip_lo, mean, kc, "affine", al, be),
+                 lambda: al * score_mask(d, cfg.clip_lo, mean, kc, periodic=per) - be)
+    return [score, (("sm.active" + sfx, kc), lambda: active_mask(d, kc, periodic=per))]
+
+
+def _recip_rounds(cfg: SoftmaxCfg, kc: int, lean: bool):
+    """(alpha, beta, iters, scale) of each reciprocal round of _softmax_recip (`lean`: SM_GS_FIRST's first count)."""
+    c = 0.5 * math.sqrt(kc) * 0.25
+    rounds = [(cfg.init_alpha, cfg.init_beta, first_iters(cfg, lean), 1.0)]
+    for i in range(cfg.log2delta2):
+        r = cfg.kc_r(i, kc)
+        rounds.append((cfg.refine_alpha[i] * math.sqrt(r), cfg.refine_beta[i] * r,
+                       int(cfg.per_step_refine_iters[i]), c))
+    return rounds
+
+
+def _recip_rounds_ops(ops, cfg: SoftmaxCfg, kc: int):
+    """(alpha, beta, iters, scale, cheb) of each reciprocal round under the session's switches: SM_CHEB_GS=1 takes the
+    Chebyshev-scaled rounds of impl smcheb (cheb = (kappas, mu)), else _recip_rounds with cheb None."""
+    if getattr(ops, "sm_cheb_gs", False):
+        return smcheb.rounds(cfg, kc)
+    return [r + (None,) for r in _recip_rounds(cfg, kc, getattr(ops, "sm_gs_first", False))]
+
+
+def _seed_site(cfg: SoftmaxCfg, rnd: int) -> str:
+    """The staging site of a reciprocal round's seed mask: one per (round, layer config), so a per-token seed is
+    encoded only at the level its own block's round runs at (a shared site accumulates every block's level)."""
+    tag = abs(hash((cfg.init_alpha, cfg.init_beta, tuple(cfg.refine_alpha), tuple(cfg.refine_beta)))) % 10 ** 8
+    return f"hrs.seed{rnd}.{tag}"
+
+
+def _hrs_seed_item(d, seed: float, site: str):
+    return (site, seed), lambda: seed * hrs_pos0(d)
+
+
+class Rope:
+    """Rotary position embedding (RoPE, the rotate-half convention of HF Llama) on the
+    head-interleaved cachemir layout. Feature r = lane * H + h sits at slot r * t, so lane j of
+    every head lives in the slot block [j tH, (j + 1) tH) and its rotary partner, lane j +- d_head/2,
+    is exactly N/2 slots away: rope(x) = x cos + rotate(x, N/2) sin', with sin' = -sin on the
+    first half of the lanes and +sin on the second. The cos / sin' vectors fold into the selection
+    mask the site multiplies by anyway (the q tok0 mask, the K push mask), so RoPE costs one
+    rotation and one plaintext product, no level. `inv_freq`: the d_head/2 frequencies (HF's
+    rotary_emb.inv_freq, scaling included)."""
+
+    def __init__(self, inv_freq):
+        self.inv_freq = tuple(float(f) for f in inv_freq)
+
+    def lane_cs(self, d, pos: int):
+        if d.d_head_real != d.d_head or 2 * len(self.inv_freq) != d.d_head:
+            raise ValueError(f"RoPE needs unpadded heads and d_head/2 frequencies "
+                             f"(d_head={d.d_head}, real {d.d_head_real}, {len(self.inv_freq)} freqs)")
+        ang = pos * np.asarray(self.inv_freq)
+        c, sn = np.cos(ang), np.sin(ang)
+        return np.concatenate([c, c]), np.concatenate([-sn, sn])
+
+    def slot_vecs(self, d, pos: int):
+        """(cos, sin') per slot: lane j = slot // tH."""
+        c, sn = self.lane_cs(d, pos)
+        return np.repeat(c, d.tH), np.repeat(sn, d.tH)
+
+
+def _rope_items(rt, rope, pos, site, base_build):
+    d = rt.dims
+    def build(k):
+        return lambda: rope.slot_vecs(d, pos)[k] * base_build()
+    return [((site + ".rope.c", pos), build(0)), ((site + ".rope.s", pos), build(1))]
+
+
+def rope_mask(rt, x, site, base_build, rope=None, pos=None):
+    """rt.mult_mask(x, site, base_build), with RoPE at position `pos` folded in when `rope` is
+    given: x (base cos) + rotate(x, N/2) (base sin')."""
+    if rope is None:
+        return rt.mult_mask(x, site, base_build)
+    (kc, bc), (ks, bs) = _rope_items(rt, rope, pos, site, base_build)
+    a = rt.mult_mask(x, kc, bc)
+    b = rt.mult_mask(rt.ops.rotate(x, rt.dims.N // 2), ks, bs)
+    return rt.ops.add(a, b)
+
+
+def rope_step_masks(rt, rope, pos: int, packing: str = "cachemir"):
+    """The per-step RoPE masks of position `pos`: the q.K^T query mask and the K push mask of
+    `packing` ("cachemir" on a complex payload pushes K + iV; "cachemir_complex"; "real")."""
+    d = rt.dims
+    if packing == "cachemir_complex" and getattr(rt.ops, "kv_lanes", False):
+        packing = "cachemir_complex.lanes"
+    push = {"cachemir_complex": ("kpush.tok0h", lambda: real_head_half_mask(d)),
+            "cachemir_complex.lanes": ("kpush.tok0", lambda: real_head_tok0_mask(d)),
+            "cachemir": ("kpush.tok0h.c", lambda: 0.5 * real_head_half_mask(d)),
+            "real": ("kpush.tok0h", lambda: real_head_half_mask(d))}[packing]
+    return (_rope_items(rt, rope, pos, "tok0", lambda: real_head_tok0_mask(d))
+            + _rope_items(rt, rope, pos, *push))
+
+
+def _hrs_pack_item(d, seed: float, site: str):
+    """SM_HRS_PACK: both head-sum masks on one ciphertext, the sum on the real part and seed * the sum on the
+    imaginary part, halved so that z + conj(z) and i (conj(z) - z) return them unscaled."""
+    return (site + ".pk", seed), lambda: (0.5 + 0.5j * seed) * hrs_pos0(d)
 
 
 class KVCache:
@@ -70,18 +254,57 @@ class ComplexKVCache:
         return cts, keys
 
 
-def cache_kv_push_packed_complex(rt, kv: ComplexKVCache, P_in):
+def _vpair_item(d, i_re: int, i_im: int, rr: int, kv_lanes: bool):
+    """The V pair selector of a push: on 2 V_raw (scale 0.5), or on V_raw itself under KV_LANES (scale 1)."""
+    if kv_lanes:
+        return ("v.cpc.l", i_re, i_im, rr), lambda: vpair_mask_complex(d, i_re, i_im, rr, 1.0)
+    return ("v.cpc", i_re, i_im, rr), lambda: vpair_mask_complex(d, i_re, i_im, rr)
+
+
+def _kv_bts_scope():
+    """IMPL_STC_FIRST_KV=0: the K/V push refresh takes the shipped order under FIDESLIB_BTS_STC_FIRST (its payload is
+    small in the slots but tiny in the coefficients, where the shipped order is ~4 bits more precise)."""
+    if os.environ.get("IMPL_STC_FIRST_KV", "1") not in ("", "0"):
+        return contextlib.nullcontext()
+    from perseus.impl import bootstrap as _pyb
+    return _pyb.stc_first(False)
+
+
+def cache_kv_push_packed_complex(rt, kv: ComplexKVCache, P_in, q=None, rope=None, pos=None):
     """cache_kv_push_packed_complex: the fused K + iV linear output refreshed by ONE
     bootstrap, split by conjugation (2K on the real axis, -2iV on the imaginary one), K
     masked and bucketed (odd groups packed by the monomial i), V realified (times i, the
-    monomial: no level) and scattered into the pair buckets."""
+    monomial: no level) and scattered into the pair buckets.
+    `q` (KV_LANES + QKV_LANES): the Q linear output rides the same real payload on token lane
+    2 and comes back refreshed, on lane 0 (the one refresh serves Q, K and V)."""
     ops, d = rt.ops, rt.dims
-    P = ops.copy(P_in)
-    ops.bootstrap(P)
-    conj = ops.conjugate(P)
-    K = ops.add(P, conj)                                   # 2 K_raw
-    V = ops.sub(conj, P)                                   # -2i V_raw, realified by the monomial i
-    K = rt.mult_mask(K, "kpush.tok0h", lambda: real_head_half_mask(d))
+    kvl = getattr(ops, "kv_lanes", False)
+    q_out = None
+    if kvl:
+        # KV_LANES: realify first (both halves fill every token lane), keep K on lane 0 and V on lane 1, and refresh
+        # that real payload by the real route; the K mask and the V pair masks below select the two lanes
+        conj = ops.conjugate(P_in)
+        Kc = rt.mult_mask(ops.add(P_in, conj), "kv.lane0", lambda: stride_mask(d.N, d.hid, d.t, 0.5))   # K_raw
+        Vc = rt.mult_mask(ops.mult_i(ops.sub(conj, P_in)), "kv.lane0", lambda: stride_mask(d.N, d.hid, d.t, 0.5))
+        X = ops.add(Kc, ops.rotate(Vc, -1))
+        if q is not None:
+            # QKV_LANES: Q (real; 2 Re by its conjugate, the lane mask's 0.5) on lane 2 of the same payload. The
+            # three masks sit at one level, so the refresh input is the linear output plus one unit, as without Q
+            Qc = rt.mult_mask(ops.add(q, ops.conjugate(q)), "kv.lane0", lambda: stride_mask(d.N, d.hid, d.t, 0.5))
+            X = ops.add(X, ops.rotate(Qc, -2))
+        with _kv_bts_scope():
+            ops.bootstrap_real(X)
+        if q is not None:
+            q_out = ops.rotate(X, 2)        # lane 2 back to lane 0; complex_qkt's tok0 mask drops the K / V lanes
+        K = rope_mask(rt, X, "kpush.tok0", lambda: real_head_tok0_mask(d), rope, pos)
+    else:
+        P = ops.copy(P_in)
+        with _kv_bts_scope():
+            ops.bootstrap(P)
+        conj = ops.conjugate(P)
+        K = ops.add(P, conj)                               # 2 K_raw
+        V = ops.sub(conj, P)                               # -2i V_raw, realified by the monomial i
+        K = rope_mask(rt, K, "kpush.tok0h", lambda: real_head_half_mask(d), rope, pos)
     K = ops.rotate(K, -(kv.k_count % d.t))
     # bucket_k_complex
     if kv.k_count % d.t == 0:
@@ -89,21 +312,25 @@ def cache_kv_push_packed_complex(rt, kv: ComplexKVCache, P_in):
     else:
         ops.inplace_add(kv.k_pend[-1], K)
     kv.k_count += 1
-    if len(kv.k_pend) == 2 and kv.k_count % d.t == 0:      # even + odd pair complete
-        bucket = ops.add(kv.k_pend[0], ops.mult_i(kv.k_pend[1]))   # pack: even + i odd (monomial)
-        kv.k_buckets.append(bucket)
-        kv.k_pend.clear()
+    # with step-scoped names the pair pack (2 ops, every 2t tokens) runs last, so it cannot move
+    # the names of the V half below
+    late_pack = getattr(rt, "scoped_names_requested", False)
+    if not late_pack:
+        _pack_k_pair(ops, kv, d)
     rr = kv.v_count % d.t
-    v = ops.rotate(V, -rr) if rr else ops.copy(V)
-    v = ops.mult_i(v)                                      # 2 V_raw, no level
+    if kvl:
+        v = ops.rotate(X, 1 - rr) if rr != 1 else ops.copy(X)   # V_raw, lane 1 -> lane rr
+    else:
+        v = ops.rotate(V, -rr) if rr else ops.copy(V)
+        v = ops.mult_i(v)                                  # 2 V_raw, no level
     # bucket_v_complex
     c = kv.v_count // d.t
     keys, builds, lanes = [], [], []
     for p in range(d.d_head_real // 2):
         i_re = ((c - 2 * p) % d.d_head + d.d_head) % d.d_head
         i_im = ((c - 2 * p - 1) % d.d_head + d.d_head) % d.d_head
-        keys.append(("v.cpc", i_re, i_im, rr))
-        builds.append(lambda i_re=i_re, i_im=i_im: vpair_mask_complex(d, i_re, i_im, rr))
+        key, build = _vpair_item(d, i_re, i_im, rr, kvl)
+        keys.append(key); builds.append(build)
     tmps = rt.mult_masks(v, keys, builds)
     for p, tmp in enumerate(tmps):
         if kv.v_buckets[p] is None:
@@ -111,14 +338,25 @@ def cache_kv_push_packed_complex(rt, kv: ComplexKVCache, P_in):
         else:
             ops.inplace_add(kv.v_buckets[p], tmp)
     kv.v_count += 1
+    if late_pack:
+        _pack_k_pair(ops, kv, d)
+    return q_out
 
 
-def complex_qkt(rt, kv: ComplexKVCache, query):
+def _pack_k_pair(ops, kv: ComplexKVCache, d):
+    """Pack the two pending K groups into one complex bucket (even + i odd, the monomial) once
+    both are complete."""
+    if len(kv.k_pend) == 2 and kv.k_count % d.t == 0:
+        kv.k_buckets.append(ops.add(kv.k_pend[0], ops.mult_i(kv.k_pend[1])))
+        kv.k_pend.clear()
+
+
+def complex_qkt(rt, kv: ComplexKVCache, query, scale: float = 1.0, rope=None, pos=None):
     """complex_qkt (cachemir_complex_attention.cu): one product per K bucket serves two
     token groups; the even group's scores come out of 2 Re, the odd group's out of the
     imaginary axis through the odd mask; pending real groups run the real q.K^T."""
     ops, d = rt.ops, rt.dims
-    q = rt.mult_mask(query, "tok0", lambda: real_head_tok0_mask(d))
+    q = rope_mask(rt, query, "tok0", lambda: real_head_tok0_mask(d), rope, pos)
     q = rotsum_neg(ops, q, d.t)
     kc = kv.k_count
     attn = None
@@ -128,26 +366,29 @@ def complex_qkt(rt, kv: ComplexKVCache, query):
             attn = r
         else:
             ops.inplace_add(attn, r)
+    per = sm_periodic(rt, kc)
     for gc, bucket in enumerate(kv.k_buckets):
         g_even, g_odd = 2 * gc, 2 * gc + 1
         result = ops.mult(q, bucket)
         result = rotsum(ops, result, d.tH, d.N)
+        if per:
+            result = ops.tag_reduce(result, d.tH)
         conj = ops.conjugate(result)
         res_e = ops.add(result, conj)
         n_even = min(d.t, kc - g_even * d.t)
-        accum(rt.mult_mask(res_e, ("qkt.gmask", n_even, g_even),
-                           lambda n=n_even, g=g_even: qkt_group_mask(d, n, g)))
+        accum(rt.mult_mask(res_e, *_group_mask_item(d, n_even, g_even, per, scale)))
         if g_odd * d.t < kc:
             res_o = ops.sub(result, conj)
             n_odd = min(d.t, kc - g_odd * d.t)
-            accum(rt.mult_mask(res_o, ("qkt.gmask.c", n_odd, g_odd),
-                               lambda n=n_odd, g=g_odd: qkt_complex_odd_mask(d, n, g)))
+            accum(rt.mult_mask(res_o, *_odd_mask_item(d, n_odd, g_odd, scale, per)))
     for j, pend in enumerate(kv.k_pend):
         g = 2 * len(kv.k_buckets) + j
         result = ops.mult(q, pend)
         result = rotsum(ops, result, d.tH, d.N)
+        if per:
+            result = ops.tag_reduce(result, d.tH)             # the ladder's output is tH-periodic
         n = min(d.t, kc - g * d.t)
-        result = rt.mult_mask(result, ("qkt.gmask", n, g), lambda n=n, g=g: qkt_group_mask(d, n, g))
+        result = rt.mult_mask(result, *_group_mask_item(d, n, g, per, scale))
         accum(im_cleanse(ops, result))
     return attn
 
@@ -158,6 +399,41 @@ def complex_softmax_v(rt, kv: ComplexKVCache, probs):
     the pair products, then the token ladder, 2 Re and the tok0 half mask."""
     ops, d = rt.ops, rt.dims
     n_pairs = d.d_head_real // 2
+    per = sm_periodic(rt, kv.k_count)
+    if per and _general(rt):
+        # SM_PERIODIC=2 (every Gp, 1 included): pair j's rotation 2j tH only matters mod Gp, so the buckets of each
+        # class are summed and each class takes one product
+        scores_b = ops.copy(probs)
+        rot1 = ops.rotate(scores_b, d.tH)
+        conj_S_all = ops.sub(scores_b, ops.mult_i(rot1))   # s_2j - i s_2j+1 (monomial)
+        with _gp_scope(rt, per):
+            classes = {}
+            for j in range(n_pairs):
+                r = (2 * j) % per
+                if r in classes:
+                    ops.inplace_add(classes[r], kv.v_buckets[j])
+                else:
+                    classes[r] = ops.copy(kv.v_buckets[j])
+            rs = sorted(classes)
+        res = ops.mult(classes[rs[0]], conj_S_all)
+        with _gp_scope(rt, per):
+            if len(rs) > 1:
+                ops.mult_add_many(res, [classes[r] for r in rs[1:]],
+                                  ops.rotate_many(conj_S_all, [r * d.tH for r in rs[1:]]))
+        res = _gp_out(rt, res)
+        res = rotsum(ops, res, 1, d.t)
+        res = im_cleanse(ops, res)
+        return rt.mult_mask(res, "tok0.h", lambda: real_head_half_mask(d))
+    if per == 1:
+        # tH-periodic scores: every pair's rotated score vector is (1 - i) P, so the pair products collapse into
+        # one with the summed buckets; Re((V_re + i V_im)(1 - i) P) puts V P on both lanes of every pair
+        vs = ops.copy(kv.v_buckets[0])
+        for b in kv.v_buckets[1:n_pairs]:
+            ops.inplace_add(vs, b)
+        res = ops.mult(vs, ops.sub(probs, ops.mult_i(probs)))
+        res = rotsum(ops, res, 1, d.t)
+        res = im_cleanse(ops, res)
+        return rt.mult_mask(res, "tok0.h", lambda: real_head_half_mask(d))
     scores_b = ops.copy(probs)
     rot1 = ops.rotate(scores_b, d.tH)
     conj_S_all = ops.sub(scores_b, ops.mult_i(rot1))       # s_2j - i s_2j+1 (monomial)
@@ -170,10 +446,10 @@ def complex_softmax_v(rt, kv: ComplexKVCache, probs):
     return rt.mult_mask(res, "tok0.h", lambda: real_head_half_mask(d))
 
 
-def cache_k_push(rt, kv: KVCache, key):
+def cache_k_push(rt, kv: KVCache, key, rope=None, pos=None):
     """cachemir_kv_cache.cu: mask, rotate, bootstrap, im_cleanse, accumulate."""
     ops, d = rt.ops, rt.dims
-    m = rt.mult_mask(key, "kpush.tok0h", lambda: real_head_half_mask(d))
+    m = rope_mask(rt, key, "kpush.tok0h", lambda: real_head_half_mask(d), rope, pos)
     # the C++ rotates unconditionally (a rotation by 0 at the first token of a group), which
     # keeps the op sequence, hence the graph variable names a plan pins, identical per token
     r = ops.rotate(m, -(kv.k_count % d.t))
@@ -204,13 +480,13 @@ def cache_v_push(rt, kv: KVCache, value):
     kv.v_count += 1
 
 
-def cache_kv_push_pair(rt, kv: KVCache, key, value):
+def cache_kv_push_pair(rt, kv: KVCache, key, value, rope=None, pos=None):
     """cachemir_kv_cache.cu, the complex-payload arm (CKKS_COMPLEX=1, "Mode-A"): K
     and V are packed as K + iV, refreshed by ONE bootstrap and split by conjugation. The K
     mask carries an extra 0.5 (its 2 Re doubling happens before the pack), the V lanes are
     selected on the imaginary axis (2i V times -0.5 i = V)."""
     ops, d = rt.ops, rt.dims
-    m = rt.mult_mask(key, "kpush.tok0h.c", lambda: 0.5 * real_head_half_mask(d))
+    m = rope_mask(rt, key, "kpush.tok0h.c", lambda: 0.5 * real_head_half_mask(d), rope, pos)
     r = ops.rotate(m, -(kv.k_count % d.t))
     rr = kv.v_count % d.t
     v = ops.rotate(value, -rr) if rr else ops.copy(value)
@@ -237,17 +513,20 @@ def cache_kv_push_pair(rt, kv: KVCache, key, value):
     kv.v_count += 1
 
 
-def qkt(rt, kv: KVCache, query):
+def qkt(rt, kv: KVCache, query, scale: float = 1.0, rope=None, pos=None):
     """cachemir_attention.cu: scores at slot g*tH + h*t + tok%t."""
     ops, d = rt.ops, rt.dims
-    q = rt.mult_mask(query, "tok0", lambda: real_head_tok0_mask(d))
+    q = rope_mask(rt, query, "tok0", lambda: real_head_tok0_mask(d), rope, pos)
     q = rotsum_neg(ops, q, d.t)
     attn = None
+    per = sm_periodic(rt, kv.k_count)
     for g, kg in enumerate(kv.k_groups):
         num_tok = min(d.t, kv.k_count - g * d.t)
         res = ops.mult(q, kg)
         res = rotsum(ops, res, d.tH, d.N)
-        res = rt.mult_mask(res, ("qkt.gmask", num_tok, g), lambda: qkt_group_mask(d, num_tok, g))
+        if per:
+            res = ops.tag_reduce(res, d.tH)
+        res = rt.mult_mask(res, *_group_mask_item(d, num_tok, g, per, scale))
         res = im_cleanse(ops, res)
         if attn is None:
             attn = res
@@ -264,16 +543,51 @@ def fold_sm_prescale(copies: float, s0_expected: float) -> float:
     return max(1e-6, min(1.0, 0.3 * copies / s0_expected))
 
 
-def head_reduce_sum(rt, x, s0_expected: float = 0.0):
+def head_reduce_sum(rt, x, s0_expected: float = 0.0, periodic: bool = False, seed: float | None = None,
+                    seed_site: str = "hrs.seed"):
     """cachemir_attention.cu: per-head total broadcast over the head's t slots and
     over the lane copies. With FUSED_SM_DEN the lane-copy ladder stops at the sparse slot
     count and a fold bootstrap finishes it (the denominator comes out refreshed);
-    `s0_expected` sizes the fold's prescale."""
+    `s0_expected` sizes the fold's prescale. `periodic`: x is already tH-periodic (SM_PERIODIC), every lane copy
+    holds the sum after the head ladder. `seed`: also return seed * the sum, from a second position mask on the same
+    head ladder (SM_FOLD: the reciprocal's seed slope rides the mask instead of a ciphertext x constant product)."""
     ops, d = rt.ops, rt.dims
     out = rotsum(ops, x, 1, d.t)
-    out = rt.mult_mask(out, "hrs.pos0", lambda: hrs_pos0(d))
-    out = rotsum_neg(ops, out, d.t)
-    if ops.fused_sm_den:
+    if seed is not None and getattr(ops, "hrs_pack", False) and ops.complex_payload:
+        if ops.fused_sm_den:
+            raise ValueError("SM_FOLD=1 does not combine with FUSED_SM_DEN=1")
+        # SM_HRS_PACK: one replicate ladder for both sums (the input is real), split by one conjugation
+        z = rotsum_neg(ops, rt.mult_mask(out, *_hrs_pack_item(d, seed, seed_site)), d.t)
+        cz = ops.conjugate(z)
+        h = ops.mult_i(ops.sub(cz, z))
+        out = ops.add(z, cz)
+    else:
+        if seed is not None:
+            tot = out
+        out = rt.mult_mask(out, "hrs.pos0", lambda: hrs_pos0(d))
+        out = rotsum_neg(ops, out, d.t)
+        if seed is not None:
+            if ops.fused_sm_den:
+                raise ValueError("SM_FOLD=1 does not combine with FUSED_SM_DEN=1")
+            h = rotsum_neg(ops, rt.mult_mask(tot, *_hrs_seed_item(d, seed, seed_site)), d.t)
+    if seed is not None:
+        if not periodic:
+            h = rotsum(ops, h, d.tH, d.N)
+        elif _general(rt):
+            with _gp_scope(rt, periodic):
+                if periodic > 1:
+                    h = rotsum(ops, h, d.tH, int(periodic) * d.tH)
+            h = _gp_out(rt, h)
+        h = ops.tag_reduce(h, d.tH)
+    if periodic:
+        if ops.fused_sm_den:
+            raise ValueError("SM_PERIODIC=1 does not combine with FUSED_SM_DEN=1")
+        if _general(rt):     # the groups' partial sums sit in the Gp blocks of one period
+            with _gp_scope(rt, periodic):
+                if periodic > 1:
+                    out = rotsum(ops, out, d.tH, int(periodic) * d.tH)
+            out = _gp_out(rt, out)
+    elif ops.fused_sm_den:
         s_eff = ops.fold_slots_for(d.tH)
         if s_eff > d.tH:
             out = rotsum(ops, out, d.tH, s_eff)
@@ -281,33 +595,76 @@ def head_reduce_sum(rt, x, s0_expected: float = 0.0):
         ops.fold_bootstrap(out, s_eff, 1, p)
     else:
         out = rotsum(ops, out, d.tH, d.N)
-    return ops.tag_reduce(out, d.tH)                        # tH-periodic
+    out = ops.tag_reduce(out, d.tH)                         # tH-periodic
+    return out if seed is None else (out, h)
 
 
-def softmax_thor(rt, scores, cfg: SoftmaxCfg, kc: int):
-    """cachemir_attention.cu."""
+def _thor_exp(rt, scores, cfg: SoftmaxCfg, kc: int, folded: bool = False):
+    """The masked exponentials of softmax_thor, before its divisions."""
     ops, d = rt.ops, rt.dims
-    mean = (cfg.clip_hi + cfg.clip_lo) / 2.0
-    ct = rt.add_mask(scores, ("sm.score", cfg.clip_lo, mean, kc),
-                     lambda: score_mask(d, cfg.clip_lo, mean, kc))
+    affine = sm_fold_affine(rt, cfg) if folded else (1.0, 0.0)   # `folded`: q.K^T already applied alpha (mha)
+    score_item, active_item = _softmax_mask_items(d, cfg, kc, sm_periodic(rt, kc), affine)
+    ct = rt.add_mask(scores, *score_item)
     sf = 2.0 ** (-cfg.log2delta1 - cfg.log2delta2)
     if not cfg.cheb_coeffs:
         raise ValueError("softmax: cfg.cheb_coeffs is empty (only the Chebyshev exp is ported)")
-    z = eval_chebyshev(ops, ct, cfg.cheb_coeffs, cfg.cheb_a / sf, cfg.cheb_b / sf)
+    if affine != (1.0, 0.0):    # the scores arrive as alpha x - beta (SM_FOLD): the identity map costs no level
+        z = eval_chebyshev(ops, ct, cfg.cheb_coeffs, -1.0, 1.0)
+    else:
+        z = eval_chebyshev(ops, ct, cfg.cheb_coeffs, cfg.cheb_a / sf, cfg.cheb_b / sf)
     for _ in range(cfg.log2delta1):
         z = ops.square(z)
     z = im_cleanse(ops, z)
-    z = rt.mult_mask(z, ("sm.active", kc), lambda: active_mask(d, kc))
-    s = head_reduce_sum(rt, z, s0_expected=2.0 / cfg.init_alpha)
+    return rt.mult_mask(z, *active_item)
+
+
+def first_iters(cfg: SoftmaxCfg, lean: bool) -> int:
+    """The first division's Goldschmidt count: the refine rounds renormalize after it, so
+    SM_GS_FIRST runs it at the config's gs_iters_first when there is one."""
+    return cfg.gs_iters_first if lean and cfg.gs_iters_first else cfg.gs_iters_scaled
+
+
+def _softmax_recip(rt, z, cfg: SoftmaxCfg, kc: int):
+    """softmax_thor's divisions as z * (1/s) (SM_DEN_RECIP=1): the Goldschmidt iterations run
+    on the head sum's own tH-periodic ciphertext (goldschmidt_recip), whose refreshes route
+    sparse, and the scores take one product per round instead of one per iteration. The
+    refinement scalar c leaves the scores, z / s = (c z) / (c s): it only calibrates the seed.
+    Same arithmetic as the default path."""
+    ops = rt.ops
+    fold = getattr(ops, "sm_fold", False) and not getattr(ops, "fused_sm_den", False)
+    for k, (alpha, beta, iters, scale, cheb) in enumerate(_recip_rounds_ops(ops, cfg, kc)):
+        if k:
+            z = ops.square(im_cleanse(ops, y))
+        if fold:
+            s, sh = head_reduce_sum(rt, z, s0_expected=2.0 / (alpha * scale), periodic=sm_periodic(rt, kc),
+                                    seed=0.5 * beta * scale * scale, seed_site=_seed_site(cfg, k))
+            y = ops.mult(z, goldschmidt_recip(ops, s, alpha, beta, iters, scale, Dh=sh, cheb=cheb))
+        else:
+            s = head_reduce_sum(rt, z, s0_expected=2.0 / (alpha * scale), periodic=sm_periodic(rt, kc))
+            y = ops.mult(z, goldschmidt_recip(ops, s, alpha, beta, iters, scale, cheb=cheb))
+    return y
+
+
+def softmax_thor(rt, scores, cfg: SoftmaxCfg, kc: int, folded: bool = False):
+    """cachemir_attention.cu; with SM_DEN_RECIP=1 the divisions are _softmax_recip's. `folded`: the scores come from a
+    q.K^T scaled by sm_fold_affine's alpha (SM_FOLD), the exp's input map rides the score mask."""
+    ops = rt.ops
+    z = _thor_exp(rt, scores, cfg, kc, folded)
+    if ops.sm_den_recip:
+        return _softmax_recip(rt, z, cfg, kc)
+    if getattr(ops, "sm_cheb_gs", False):
+        raise ValueError("SM_CHEB_GS=1 needs SM_DEN_RECIP=1")
+    s = head_reduce_sum(rt, z, s0_expected=2.0 / cfg.init_alpha, periodic=sm_periodic(rt, kc))
     F_init = ops.mult(s, -cfg.init_beta)
     F_init = ops.add(F_init, cfg.init_alpha)
-    y = goldschmidt_inv_ndf(ops, z, s, F_init, cfg.gs_iters_scaled)
+    y = goldschmidt_inv_ndf(ops, z, s, F_init, first_iters(cfg, ops.sm_gs_first))
     for i in range(cfg.log2delta2):
         y = im_cleanse(ops, y)
         z = ops.square(y)
         z = ops.mult(z, 0.5 * math.sqrt(kc) * 0.25)
         r = cfg.kc_r(i, kc)
-        s = head_reduce_sum(rt, z, s0_expected=2.0 / (cfg.refine_alpha[i] * math.sqrt(r)))
+        s = head_reduce_sum(rt, z, s0_expected=2.0 / (cfg.refine_alpha[i] * math.sqrt(r)),
+                            periodic=sm_periodic(rt, kc))
         sa, sb = math.sqrt(r), r
         F_init = ops.mult(s, -cfg.refine_beta[i] * sb)
         F_init = ops.add(F_init, cfg.refine_alpha[i] * sa)
@@ -319,6 +676,34 @@ def softmax_v(rt, kv: KVCache, probs):
     """cachemir_attention.cu: sum_i V_lane_i * rotate(P, i*tH), token reduction,
     im_cleanse and the tok0 half mask."""
     ops, d = rt.ops, rt.dims
+    per = sm_periodic(rt, kv.k_count)
+    if per and _general(rt):
+        # SM_PERIODIC=2 (every Gp): the lanes of each class i mod Gp summed, one product per class
+        with _gp_scope(rt, per):
+            vs = [None] * per
+            for i, lane in enumerate(kv.v_lanes[:d.d_head_real]):
+                r = i % per
+                if vs[r] is None:
+                    vs[r] = ops.copy(lane)
+                else:
+                    ops.inplace_add(vs[r], lane)
+        res = ops.mult(vs[0], probs)
+        with _gp_scope(rt, per):
+            if per > 1:
+                ops.mult_add_many(res, vs[1:], ops.rotate_many(probs, [r * d.tH for r in range(1, per)]))
+        res = _gp_out(rt, res)
+        res = rotsum(ops, res, 1, d.t)
+        res = im_cleanse(ops, res)
+        return rt.mult_mask(res, "tok0.h", lambda: real_head_half_mask(d))
+    if per:
+        # tH-periodic scores: every rotate(P, i tH) is P, so the lane products collapse into one with the summed lanes
+        vs = ops.copy(kv.v_lanes[0])
+        for lane in kv.v_lanes[1:d.d_head_real]:
+            ops.inplace_add(vs, lane)
+        res = ops.mult(vs, probs)
+        res = rotsum(ops, res, 1, d.t)
+        res = im_cleanse(ops, res)
+        return rt.mult_mask(res, "tok0.h", lambda: real_head_half_mask(d))
     res = ops.mult(kv.v_lanes[0], probs)
     shifted = ops.rotate_many(probs, [i * d.tH for i in range(1, d.d_head_real)])  # hoisted
     ops.mult_add_many(res, kv.v_lanes[1:d.d_head_real], shifted)                   # one relin
@@ -327,34 +712,79 @@ def softmax_v(rt, kv: KVCache, probs):
     return rt.mult_mask(res, "tok0.h", lambda: real_head_half_mask(d))
 
 
-def mha(rt, x, w, kv, sm_cfg: SoftmaxCfg):
+def kv_push(rt, kv, payload, q=None, rope=None, pos=None):
+    """Push one token into the caches: `payload` is the fused K + iV linear output (a ComplexKVCache) or (k, v).
+    `q` (QKV_LANES): the Q linear output riding the same refresh; the refreshed Q is returned (else None).
+    A cache with a `payload_log` list (the fake's prefix run) also keeps a copy of the payload's slot vectors, to
+    replay the pushes on another session (driver.ImplModel.replay_kv_pushes; a replay pushes without Q, which
+    leaves the K / V lanes and their levels as they are). `rope` / `pos`: RoPE of K at position `pos`."""
+    ops = rt.ops
+    log = getattr(kv, "payload_log", None)
+    if log is not None:
+        import numpy as np
+        vec = lambda c: np.array(getattr(c, "vec", c))
+        log.append(vec(payload) if isinstance(kv, ComplexKVCache) else tuple(vec(c) for c in payload))
+    if isinstance(kv, ComplexKVCache):
+        return cache_kv_push_packed_complex(rt, kv, payload, q, rope=rope, pos=pos)
+    elif ops.complex_payload:
+        cache_kv_push_pair(rt, kv, *payload, rope=rope, pos=pos)   # one bootstrap for K and V
+    else:
+        cache_k_push(rt, kv, payload[0], rope=rope, pos=pos)
+        cache_v_push(rt, kv, payload[1])
+
+
+def mha(rt, x, w, kv, sm_cfg: SoftmaxCfg, rope: Rope | None = None, pos: int | None = None,
+        pre_linear=None, pre_out=None):
     """src/model/mha.cu: qkv -> cache push -> attention core -> out projection.
     ``w`` has .q .k .v .out (EncodedLinear), or .kv (the fused K + iV linear) and .q for
-    the cachemir_complex packing, whose ``kv`` is a ComplexKVCache."""
+    the cachemir_complex packing, whose ``kv`` is a ComplexKVCache. ``rope``: rotary position
+    embedding of q and K at position ``pos`` (folded into their selection masks). ``pre_linear``:
+    called on the qkv projection's input after its refresh hint (e.g. a level drop that runs the
+    projection at the bottom of the chain), ``pre_out`` on the out projection's."""
+    if rope is not None and pos is None:
+        raise ValueError("mha: RoPE needs the token position")
+    rp = dict(rope=rope, pos=pos)
     ops = rt.ops
+    tap = getattr(rt, "tap", None) or (lambda name, ct: None)     # debug hook (the model's taps)
     cplx = isinstance(kv, ComplexKVCache)
+    qkvl = cplx and getattr(ops, "kv_lanes", False) and getattr(ops, "qkv_lanes", False)
     with rt.step("qkv"):
-        ops.bootstrap_hint(x, ops.headroom(1), True)
+        # QKV_LANES: the hint fires only past the session limit; at or under it the linear runs on the LayerNorm
+        # output as is and its output, K, V and Q on three token lanes, is what the push refreshes (one unit deeper:
+        # the lane masks), at the top of the envelope
+        ops.bootstrap_hint(x, ops.headroom(0 if qkvl else 1), True)
+        if pre_linear is not None:
+            x = pre_linear(x)
         if cplx:
             P, q = linear_multi(rt, x, [w.kv, w.q])
         else:
             k, v, q = linear_multi(rt, x, [w.k, w.v, w.q])
+    tap("attn.q", q)
+    tap("attn.kv", P if cplx else k)
     with rt.step("kv_push"):
-        if cplx:
-            cache_kv_push_packed_complex(rt, kv, P)
-        elif ops.complex_payload:
-            cache_kv_push_pair(rt, kv, k, v)           # one bootstrap for K and V
+        if qkvl:
+            q = kv_push(rt, kv, P, q, **rp)
         else:
-            cache_k_push(rt, kv, k)
-            cache_v_push(rt, kv, v)
-    with rt.step("qkt"):
-        scores = complex_qkt(rt, kv, q) if cplx else qkt(rt, kv, q)
+            kv_push(rt, kv, P if cplx else (k, v), **rp)
+    # the q.K^T issues one product per cache group: its op count is the cache's shape
+    shape = (f"{len(kv.k_buckets)}x{len(kv.k_pend)}" if cplx else f"{len(kv.k_groups)}") \
+        if getattr(rt, "scoped_names", False) else None
+    with rt.step("qkt", shape=shape):
+        a = sm_fold_affine(rt, sm_cfg)[0]
+        scores = complex_qkt(rt, kv, q, a, **rp) if cplx else qkt(rt, kv, q, a, **rp)
+        folded = bool(getattr(ops, "sm_fold", False))
+    tap("attn.q_pushed", q)
+    tap("attn.scores", scores)
     with rt.step("softmax"):
-        probs = softmax_thor(rt, scores, sm_cfg, kv.k_count)
+        probs = softmax_thor(rt, scores, sm_cfg, kv.k_count, folded)
+    tap("attn.probs", probs)
     with rt.step("softmax_v"):
         x = complex_softmax_v(rt, kv, probs) if cplx else softmax_v(rt, kv, probs)
+    tap("attn.pv", x)
     with rt.step("out_proj"):
         ops.bootstrap_hint(x, ops.headroom(1), True)
+        if pre_out is not None:
+            x = pre_out(x)
         return linear(rt, x, w.out)
 
 
@@ -363,28 +793,27 @@ def complex_attention_step_masks(rt, cfg: SoftmaxCfg, kc: int, pos_in_group: int
     masks, the even / odd group masks of the complete K buckets plus the pending groups',
     and the V pair masks of the push at `pos_in_group`."""
     d = rt.dims
-    mean = (cfg.clip_hi + cfg.clip_lo) / 2.0
-    items = [(("sm.score", cfg.clip_lo, mean, kc), lambda: score_mask(d, cfg.clip_lo, mean, kc)),
-             (("sm.active", kc), lambda: active_mask(d, kc))]
+    per = sm_periodic(rt, kc)
+    affine = sm_fold_affine(rt, cfg)
+    items = _softmax_mask_items(d, cfg, kc, per, affine) + _fold_mask_items(rt, cfg, kc)
     Nb = kc // (2 * d.t)
     G = (kc + d.t - 1) // d.t
     for gc in range(Nb):
         ge, go = 2 * gc, 2 * gc + 1
         n = min(d.t, kc - ge * d.t)
-        items.append((("qkt.gmask", n, ge), lambda n=n, g=ge: qkt_group_mask(d, n, g)))
+        items.append(_group_mask_item(d, n, ge, per, affine[0]))
         if go * d.t < kc:
             n = min(d.t, kc - go * d.t)
-            items.append((("qkt.gmask.c", n, go), lambda n=n, g=go: qkt_complex_odd_mask(d, n, g)))
+            items.append(_odd_mask_item(d, n, go, affine[0], per))
     for g in range(2 * Nb, G):
         n = min(d.t, kc - g * d.t)
-        items.append((("qkt.gmask", n, g), lambda n=n, g=g: qkt_group_mask(d, n, g)))
+        items.append(_group_mask_item(d, n, g, per, affine[0]))
     rr = pos_in_group
     c = (kc - 1) // d.t                     # the push's v_count // t
     for p in range(d.d_head_real // 2):
         i_re = ((c - 2 * p) % d.d_head + d.d_head) % d.d_head
         i_im = ((c - 2 * p - 1) % d.d_head + d.d_head) % d.d_head
-        items.append((("v.cpc", i_re, i_im, rr),
-                      lambda i_re=i_re, i_im=i_im: vpair_mask_complex(d, i_re, i_im, rr)))
+        items.append(_vpair_item(d, i_re, i_im, rr, getattr(rt.ops, "kv_lanes", False)))
     return items
 
 
@@ -394,13 +823,13 @@ def attention_step_masks(rt, cfg: SoftmaxCfg, kc: int, pos_in_group: int):
     of the push at `pos_in_group` = v_count % t (cachemir_kv_cache.cu / cachemir_attention.cu;
     the C++ step_mask_walk_block)."""
     d = rt.dims
-    mean = (cfg.clip_hi + cfg.clip_lo) / 2.0
-    items = [(("sm.score", cfg.clip_lo, mean, kc), lambda: score_mask(d, cfg.clip_lo, mean, kc)),
-             (("sm.active", kc), lambda: active_mask(d, kc))]
+    per = sm_periodic(rt, kc)
+    affine = sm_fold_affine(rt, cfg)
+    items = _softmax_mask_items(d, cfg, kc, per, affine) + _fold_mask_items(rt, cfg, kc)
     n_groups = (kc + d.t - 1) // d.t
     for g in range(n_groups):
         num_tok = min(d.t, kc - g * d.t)
-        items.append((("qkt.gmask", num_tok, g), lambda n=num_tok, g=g: qkt_group_mask(d, n, g)))
+        items.append(_group_mask_item(d, num_tok, g, per, affine[0]))
     rr = pos_in_group
     if rt.ops.complex_payload:
         for i in range(d.d_head_real):

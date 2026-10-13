@@ -8,6 +8,7 @@
 
 #include <cuda_runtime.h>
 
+#include <cstdlib>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -15,6 +16,19 @@
 namespace py = pybind11;
 
 namespace {
+
+// Block stages keep their weight plaintexts on the device across tokens: no per-token evict, reload, lift or
+// block_sync drain after the first token (the GPT-2 n32 decode keeps all 12 with ~29 GB still free).
+// IMPL_RESIDENT_BLOCKS=k keeps only the first k (0 = every block evicted after its stage, the old ring).
+// IMPL_KEEP_MASKS (default 1; 0 = evict them): the encode cache's device copies survive the end of the token (reloaded from their dumps otherwise)
+bool keep_masks() {
+    static const bool v = [] { const char* e = std::getenv("IMPL_KEEP_MASKS"); return !e || std::atoi(e) > 0; }();   // default on
+    return v;
+}
+int resident_blocks() {
+    static const int k = [] { const char* e = std::getenv("IMPL_RESIDENT_BLOCKS"); return e ? std::atoi(e) : 1 << 30; }();
+    return k;
+}
 
 struct PyStage {
     py::object state;                   // None | _core.EncodedBlock (cached-block stage)
@@ -95,8 +109,14 @@ py::object run_stages(Inference& inf, py::object x, std::vector<PyStage> specs,
 
     const bool blk_prefetch = !any_loader;
 
-    for (auto& r : rs)
-        if (r.blk) evict_block_from_device(inf, *r.blk);
+    {
+        int ord = 0;
+        for (auto& r : rs)
+            if (r.blk) {
+                r.blk->resident = (ord++ < resident_blocks());
+                if (!r.blk->resident) evict_block_from_device(inf, *r.blk);
+            }
+    }
 
     py::object* xp = &x;
 
@@ -122,6 +142,11 @@ py::object run_stages(Inference& inf, py::object x, std::vector<PyStage> specs,
             }
             st.install = [blk](Inference& i) { install_block_state_copy(i, *blk); };
             st.release = [blk](Inference& i) {
+                if (blk->resident) {
+                    // resident: drain the upload once (the token that loaded it), then nothing per token
+                    if (!blk->resident_synced) { WithStep _w(i, "block_sync"); cudaDeviceSynchronize(); blk->resident_synced = true; }
+                    return;
+                }
                 { WithStep _w(i, "block_sync"); cudaDeviceSynchronize(); }
                 { WithStep _w(i, "weight_evict"); evict_block_from_device(i, *blk); }
             };
@@ -190,7 +215,7 @@ py::object run_stages(Inference& inf, py::object x, std::vector<PyStage> specs,
         py::gil_scoped_release nogil;
         run_residency_pipeline(inf, std::move(stages), ov);
         // residency release of the transient mask device copies (mirrors run_cached_blocks)
-        { WithStep _w(inf, "enc_cache_evict"); inf.evict_enc_cache_device(); }
+        if (!keep_masks()) { WithStep _w(inf, "enc_cache_evict"); inf.evict_enc_cache_device(); }
         if (any_loader) finish_host_reclaim();   // mirrors run_blocks' callers
     }
     return x;

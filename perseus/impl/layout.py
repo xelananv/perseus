@@ -186,6 +186,53 @@ def encode_weight_matrix_outputpack(W, N: int, d_in: int, d_out: int) -> np.ndar
     return pt
 
 
+@functools.lru_cache(maxsize=8)
+def weight_index(N: int, d_in: int, d_out: int, outputpack: bool = False):
+    """The gather behind encode_weight_matrix (and _outputpack): the flat index row * d_out +
+    col of W each plaintext slot reads, as an (n_pt, N) int32 array (a pair of them, the real
+    and imaginary lanes, for `outputpack`). It depends on the shape only, so a model whose layers
+    share shapes builds each once and encodes a matrix as one take (a Llama-sized layer is ~4.6k
+    plaintexts; the per-plaintext index arithmetic dominated its encode)."""
+    p = cm_params(N, d_in, d_out)
+    M_out = N // p.tp_out
+    cascade_shift = (p.t * p.tp) // p.tp_out
+    i = np.arange(N)
+    ks = [(2 * k, 2 * k + 1) for k in range(p.r_o // 2)] if outputpack else [(k,) for k in range(p.r_o)]
+    if outputpack and p.r_o % 2:
+        raise ValueError(f"output pack needs an even r_o, got {p.r_o}")
+    out = [np.empty((p.r_i * len(ks), N), dtype=np.int32) for _ in ks[0]]
+    for j in range(p.r_i):
+        g = j // p.bstep_c
+        ip = (i - g * p.bstep_c * p.t * p.t) % N
+        row = ((ip // p.t + j * p.t + ip % p.tp_in) % p.d) + ((ip % p.t) // p.tp_in) * p.d
+        for kk, group in enumerate(ks):
+            for lane, k in enumerate(group):
+                col = interleave_idx((ip // p.tp_out - k * cascade_shift) % M_out, p.d, d_out)
+                out[lane][j * len(ks) + kk] = row * d_out + col
+    for a in out:
+        a.setflags(write=False)
+    return tuple(out) if outputpack else out[0]
+
+
+def encode_weight_matrix_fast(W, N: int, d_in: int, d_out: int, outputpack: bool = False) -> np.ndarray:
+    """encode_weight_matrix / encode_weight_matrix_outputpack through weight_index: the same
+    values (a gather), without the per-plaintext index arithmetic."""
+    W = np.asarray(W)
+    if W.shape != (d_in, d_out):
+        raise ValueError(f"weight must be ({d_in}, {d_out}), got {W.shape}")
+    flat = W.reshape(-1)
+    if outputpack:
+        if np.iscomplexobj(W):
+            raise ValueError("output pack needs a real weight")
+        re, im = weight_index(N, d_in, d_out, True)
+        out = np.empty(re.shape, dtype=np.complex128)
+        out.real = flat.take(re)
+        out.imag = flat.take(im)
+        return out
+    idx = weight_index(N, d_in, d_out)
+    return flat.astype(np.complex128 if np.iscomplexobj(W) else np.float64, copy=False).take(idx)
+
+
 def encode_bias_vector(b, N: int, d_in: int, d_out: int, fill: bool = True) -> np.ndarray:
     """encode_bias_vector (cachemir_linear_utils.cu)."""
     b = np.asarray(b).ravel()
@@ -252,6 +299,22 @@ def active_token_mask(N: int, d: int, t: int, scale: float) -> np.ndarray:
     return stride_mask(N, d, t, scale)
 
 
+def lanes_mask(N: int, d: int, stride: int, vals) -> np.ndarray:
+    """Prefill: vals[l] on the slots i*stride + l (i < d) of every token lane l < len(vals)."""
+    out = np.zeros(N, dtype=np.complex128 if np.iscomplexobj(np.asarray(vals)) else np.float64)
+    idx = np.arange(d) * stride
+    for lane, v in enumerate(vals):
+        out[idx + lane] = v
+    return out
+
+
+def lanes_periodic(N: int, stride: int, vals, fill: float = 0.0) -> np.ndarray:
+    """Prefill: vals[s % stride] on every slot s (lanes past len(vals) at `fill`)."""
+    per = np.full(stride, float(fill))
+    per[:len(vals)] = vals
+    return np.tile(per, N // stride)
+
+
 def active_expanded_mask(dims: Dims, scale: float, fill: float = 0.0) -> np.ndarray:
     """active_expanded_mask_vec (inference.h + cachemir_masks.h): slot m*tp_E
     for every m whose interleaved feature lies below the real MLP width."""
@@ -260,6 +323,12 @@ def active_expanded_mask(dims: Dims, scale: float, fill: float = 0.0) -> np.ndar
     ok = interleave_idx(m, dims.hid, dims.E) < dims.E_real
     out[m[ok] * dims.tp_E] = scale
     return out
+
+
+def active_expanded_lanes(dims: Dims, scale: float, n_lanes: int) -> np.ndarray:
+    """active_expanded_mask on token lanes 0..n_lanes-1 of the stride tp_E (prefill)."""
+    base = active_expanded_mask(dims, scale)
+    return sum(np.roll(base, lane) for lane in range(n_lanes))
 
 
 def real_head_tok0_mask(dims: Dims, tok_offset: int = 0) -> np.ndarray:
@@ -280,30 +349,40 @@ def _tok_slot(dims: Dims, h: int, tok: int) -> int:
     return tok // dims.t * dims.t * dims.H + h * dims.t + tok % dims.t
 
 
-def score_mask(dims: Dims, clip_lo: float, mean: float, kc: int) -> np.ndarray:
+def _tile_tH(dims: Dims, out: np.ndarray, periodic) -> np.ndarray:
+    """`periodic` = Gp (True = 1): the first Gp tH blocks repeated over the vector, i.e. group g's scores in every block
+    b with b % Gp == g (Gp = 1: the scores of a single group, kc <= t, in every block)."""
+    gp = int(periodic)
+    return np.tile(out[:gp * dims.tH], dims.N // (gp * dims.tH)) if gp else out
+
+
+def score_mask(dims: Dims, clip_lo: float, mean: float, kc: int, periodic=False) -> np.ndarray:
     """score_mask_vec (cachemir_attention_utils.h)."""
     out = np.full(dims.N, clip_lo - mean)
     for h in range(dims.H):
         for tok in range(kc):
             out[_tok_slot(dims, h, tok)] = -mean
-    return out
+    return _tile_tH(dims, out, periodic)
 
 
-def active_mask(dims: Dims, kc: int) -> np.ndarray:
+def active_mask(dims: Dims, kc: int, periodic=False) -> np.ndarray:
     """active_mask_vec (cachemir_attention_utils.h): 0.5/kc on the active slots."""
     out = np.zeros(dims.N)
     for h in range(dims.H):
         for tok in range(kc):
             out[_tok_slot(dims, h, tok)] = 0.5 / kc
-    return out
+    return _tile_tH(dims, out, periodic)
 
 
-def qkt_group_mask(dims: Dims, num_tok: int, g: int) -> np.ndarray:
-    """qkt_group_mask_vec (cachemir_attention_utils.h)."""
+def qkt_group_mask(dims: Dims, num_tok: int, g: int, periodic=False) -> np.ndarray:
+    """qkt_group_mask_vec (cachemir_attention_utils.h); `periodic` = Gp (True = 1) keeps every tH block b with
+    b % Gp == g instead of block g only."""
     gscale = 0.5 / math.sqrt(dims.d_head_real)
     i = np.arange(dims.N)
     h = (i % dims.tH) // dims.t
-    ok = (i // dims.tH == g) & (i % dims.t < num_tok) & (h < dims.H_real)
+    gp = int(periodic)
+    blk = (i // dims.tH) % gp == g if gp else i // dims.tH == g
+    ok = blk & (i % dims.t < num_tok) & (h < dims.H_real)
     return np.where(ok, gscale, 0.0)
 
 
@@ -328,16 +407,61 @@ def complex_vlane_mask(dims: Dims, i: int, right_rot: int, imag_scale: float = -
     return 1j * imag_scale * vlane_mask(dims, i, right_rot, 0.5)
 
 
-def qkt_complex_odd_mask(dims: Dims, num_tok: int, g: int) -> np.ndarray:
+def qkt_complex_odd_mask(dims: Dims, num_tok: int, g: int, periodic=False) -> np.ndarray:
     """qkt_complex_odd_mask_vec: the group mask on the negative imaginary axis, for the odd
     group of a complex K bucket (its scores come out as 2i q.K_odd)."""
-    return -1j * qkt_group_mask(dims, num_tok, g)
+    return -1j * qkt_group_mask(dims, num_tok, g, periodic)
 
 
 def vpair_mask_complex(dims: Dims, i_re: int, i_im: int, right_rot: int, scale: float = 0.5) -> np.ndarray:
     """vpair_mask_complex_vec: one complex selector extracting source lane i_re onto the real
     axis and i_im onto the imaginary axis of a V pair bucket (disjoint slots)."""
     return vlane_mask(dims, i_re, right_rot, scale) + 1j * vlane_mask(dims, i_im, right_rot, scale)
+
+
+def ladder_chunks(start: int, stop: int, bits: int) -> list[list[int]]:
+    """The radix grouping of the rotate-and-sum ladder x += rot(x, g), g = start, 2 start, ... (|g| < stop) under
+    LADDER_RADIX_BITS = bits: consecutive rungs in groups of `bits` from the bottom, each group done as
+    x + sum_j rot(x, j h) for j = 1 .. 2^len - 1 (h its first gap) from one hoisted decomposition. Returns the
+    step lists; a 1-rung group is the plain rung. src/bindings/ops.cu rotate_and_sum mirrors this rule."""
+    sign, gap = (1 if start > 0 else -1), abs(int(start))
+    gaps = []
+    while gap < stop:
+        gaps.append(gap)
+        gap *= 2
+    out = []
+    for i in range(0, len(gaps), max(1, bits)):
+        n = min(max(1, bits), len(gaps) - i)
+        out.append([sign * j * gaps[i] for j in range(1, 1 << n)])
+    return out
+
+
+def gpt2_ladders(dims: Dims) -> list[tuple[int, int]]:
+    """The (start, stop) of every rotate-and-sum ladder the GPT-2 port issues (head sums, LN mean and
+    variance, the all-slot sums, the linear input/output ladders; census of a fake decode)."""
+    t, tH, N = dims.t, dims.tH, dims.N
+    return [(-1, t), (1, t), (1, 8), (1, N), (t - 1, 8 * (t - 1)), (t - 1, t * (t - 1)), (t, N), (tH, N)]
+
+
+def ladder_radix_steps(dims: Dims, bits: int) -> set[int]:
+    """The extra rotation keys the radix ladders need (every step of every multi-rung group), mod N."""
+    steps = set()
+    if bits < 2:
+        return steps
+    for start, stop in gpt2_ladders(dims):
+        for g in ladder_chunks(start, stop, bits):
+            if len(g) > 1:
+                steps.update(s % dims.N for s in g)
+    return {s for s in steps if s}
+
+
+def ladder_radix_bits() -> int:
+    """LADDER_RADIX_BITS (default 3; 0/1 = the plain ladder)."""
+    import os
+    try:
+        return int(os.environ.get("LADDER_RADIX_BITS", "3") or 0)
+    except ValueError:
+        return 0
 
 
 def attention_rot_steps(dims: Dims) -> set[int]:
@@ -400,4 +524,39 @@ def cutmax_tile_mask(N: int, k: int, vocab: int, W_tile: int, d: int) -> np.ndar
     m = np.arange(W_tile)
     out = np.zeros(N)
     out[:W_tile] = (cutmax_tile_col_of_slot(m, d, W_tile) < wreal).astype(np.float64)
+    return out
+
+
+_COEFF_TABLES = {}
+
+
+def _coeff_tables(slots: int):
+    """The FFT positions of slot j (zeta^{5^j}) and of its conjugate, and the twist zeta^{-k}, for ring 2 * slots."""
+    if slots not in _COEFF_TABLES:
+        n = 2 * slots
+        t = np.empty(slots, dtype=np.int64)
+        t[0] = 1
+        for j in range(1, slots):
+            t[j] = t[j - 1] * 5 % (2 * n)
+        _COEFF_TABLES[slots] = ((t - 1) // 2, (2 * n - t - 1) // 2, np.exp(-1j * np.pi * np.arange(n) / n))
+    return _COEFF_TABLES[slots]
+
+
+def coeff_rows(values, out=None, block=64):
+    """The CKKS plaintext polynomials of slot-value rows (n, slots), divided by the scaling factor: (n, 2 slots)
+    float32 (or written into `out`). The device encoder's map (FIDESlib DeviceEncode: the values at the FFT
+    positions of zeta^{5^j}, their conjugates at those of zeta^{-5^j}, a forward FFT, the twist zeta^{-k}, 1/N),
+    so round(row * scale) is the plaintext encode would produce up to the float32 rounding of the row."""
+    values = np.asarray(values)
+    n, slots = values.shape
+    up, un, tw = _coeff_tables(slots)
+    N = 2 * slots
+    if out is None:
+        out = np.empty((n, N), dtype=np.float32)
+    for r0 in range(0, n, block):
+        v = np.asarray(values[r0:r0 + block], dtype=np.complex128)
+        w = np.zeros((len(v), N), dtype=np.complex128)
+        w[:, up] = v
+        w[:, un] = np.conj(v)
+        out[r0:r0 + len(v)] = (np.fft.fft(w, axis=1) * tw).real / N
     return out

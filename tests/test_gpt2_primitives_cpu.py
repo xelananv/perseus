@@ -128,6 +128,51 @@ def test_iterative_inverses_converge():
     np.testing.assert_allclose(r, cfg.inv_out_scale / np.sqrt(z), rtol=2e-2)
 
 
+class _CountingOps(poly.NumpyOps):
+    """NumpyOps counting ciphertext x ciphertext products (mult of two arrays, square)."""
+    def __init__(self, bsgs):
+        self.cheb_bsgs = bsgs; self.ct_products = 0
+    def mult(self, a, b):
+        if isinstance(a, np.ndarray) and isinstance(b, np.ndarray):
+            self.ct_products += 1
+        return a * b
+    def square(self, a):
+        self.ct_products += 1
+        return a * a
+
+
+@pytest.mark.parametrize("deg", [4, 5, 7, 8, 12, 15, 16, 18, 23, 27, 31, 32, 40])
+def test_chebyshev_bsgs_matches_direct(deg):
+    rng = np.random.default_rng(deg)
+    c = rng.standard_normal(deg + 1) * (0.8 ** np.arange(deg + 1))   # above the 1e-6 coefficient trim
+    x = rng.uniform(-3.0, 5.0, 64)
+    a, b = -3.0, 5.0
+    from numpy.polynomial import chebyshev as C
+    direct, bsgs = _CountingOps(False), _CountingOps(True)
+    ref = poly.eval_chebyshev(direct, x, c, a, b)
+    got = poly.eval_chebyshev(bsgs, x, c, a, b)
+    np.testing.assert_allclose(got, ref, rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(got, C.chebval((2 * x - (a + b)) / (b - a), c), rtol=1e-11, atol=1e-11)
+    if deg >= 8:
+        assert bsgs.ct_products < direct.ct_products, (deg, bsgs.ct_products, direct.ct_products)
+    if deg == 31:
+        assert bsgs.ct_products == 11 and direct.ct_products == 30
+
+
+def test_chebyshev_bsgs_depth_matches_direct():
+    """Same multiplicative depth on the fake's level accounting (the plan windows do not move)."""
+    rt, fhe, inf = _rt()
+    g = next(v for v in _cfgs().gelu.values() if v.thor_p1_cheb)
+    for coeffs, a, b in ((g.thor_p1_cheb, g.thor_p1_a, g.thor_p1_b), (g.thor_p2_cheb, g.thor_p2_a, g.thor_p2_b)):
+        levels = []
+        for flag in (False, True):
+            rt.ops.cheb_bsgs = flag
+            ct = fake.FakeCt(np.linspace(-1, 1, inf.slots), 34)
+            levels.append(poly.eval_chebyshev(rt.ops, ct, coeffs, a, b).level)
+        rt.ops.cheb_bsgs = False
+        assert levels[0] == levels[1], levels
+
+
 def test_bts2_is_a_refresh_on_the_fake():
     rt, fhe, inf = _rt()
     ct = fake.FakeCt(np.arange(inf.slots, dtype=float), 44)
@@ -154,11 +199,13 @@ def _cfgs():
     return config.load_configs(str(CFG))
 
 
-def test_norm_fake_matches_ref():
+@pytest.mark.parametrize("ln_cheb", ["0", "1"])
+def test_norm_fake_matches_ref(monkeypatch, ln_cheb):
+    monkeypatch.setenv("LN_CHEB", ln_cheb)
     rt, fhe, inf = _rt()
     cfg = _cfgs().norm["transformer.h.3.ln_1"]
     rng = np.random.default_rng(3)
-    x = rng.standard_normal(inf.size.dim) * 0.3
+    x = rng.standard_normal(inf.size.dim) * 2.5     # a residual-stream scale: inside both seeds' bands
     ct = fake.core.encode_token_input(inf, x)
     y = norm.norm(rt, ct, cfg, pos=5)
     got = fake.core.decode_token_output(inf, y)
@@ -198,7 +245,7 @@ def test_gelu_fake_matches_ref():
     v = np.zeros(d.N)
     ok = feat < d.E_real
     v[m[ok] * d.tp_E] = x[feat[ok]]
-    ct = fake.FakeCt(v, 34)
+    ct = fake.FakeCt(v / cfg.xmax if rt.ops.gelu_fold else v, 34)   # GELU_FOLD: the up-projection carries 1/xmax
     y = gelu.gelu(rt, ct, cfg)
     got = np.zeros(d.E_real); got[feat[ok]] = y.vec[m[ok] * d.tp_E]
     np.testing.assert_allclose(got, ref.gelu_ref(x, cfg), rtol=1e-9, atol=1e-9)
@@ -265,6 +312,49 @@ def test_cutmax_fake_matches_ref_and_picks_argmax():
     want = ref.cutmax_ref(logits, cfg)
     np.testing.assert_allclose(zdec, want, rtol=1e-6, atol=1e-9)
     assert int(np.argmax(zdec)) == 123 and zdec[123] > 0.99
+
+
+@pytest.mark.parametrize("pair", ["0", "1"])
+def test_cutmax_pair_complex_matches_ref(monkeypatch, pair):
+    """CUTMAX_PAIR packs two cascade passes as u_a + i u_b on one refresh: on a complex payload the result is the
+    unpaired one (ref); on a real-slot payload the switch is a no-op (test above)."""
+    monkeypatch.setenv("CUTMAX_PAIR", pair)
+    rt, fhe, inf = _rt(complex_payload=True)
+    cfg = _cfgs().cutmax
+    d = rt.dims
+    vocab = 50257
+    rng = np.random.default_rng(7)
+    logits = rng.standard_normal(vocab) * 3.0
+    logits[123] = logits.max() + 5.0
+    tiles = []
+    for k in range((vocab + d.N - 1) // d.N):
+        col0 = k * d.N; wreal = min(d.N, vocab - col0)
+        v = np.zeros(d.N)
+        m = np.arange(d.N); col = layout.cutmax_tile_col_of_slot(m, d.hid, d.N)
+        ok = col < wreal
+        v[m[ok]] = logits[col0 + col[ok]]
+        tiles.append(fake.FakeCt(v, 34))
+    z = head.cutmax_argmax(rt, tiles, vocab, cfg)
+    zdec = head.decode_z(rt, z, vocab, d.N)
+    np.testing.assert_allclose(zdec, ref.cutmax_ref(logits, cfg), rtol=1e-6, atol=1e-9)
+    assert int(np.argmax(zdec)) == 123
+
+
+@pytest.mark.parametrize("complex_payload", [False, True])
+def test_head_reduce_sum_pack_matches_unpacked(monkeypatch, complex_payload):
+    """SM_HRS_PACK: the head sum and seed * the sum from one complex ladder equal the two unpacked sums."""
+    monkeypatch.setenv("FUSED_SM_DEN", "0")
+    rng = np.random.default_rng(3)
+    outs = {}
+    for pack in ("0", "1"):
+        monkeypatch.setenv("SM_HRS_PACK", pack)
+        rt, fhe, inf = _rt(complex_payload=complex_payload)
+        x = fake.FakeCt(rng.standard_normal(rt.dims.N) if pack == "0" else outs["x"], 30)
+        outs["x"] = x.vec.copy()
+        s, h = attention.head_reduce_sum(rt, x, s0_expected=2.0, periodic=1, seed=0.37)
+        outs[pack] = (np.real(s.vec).copy(), np.real(h.vec).copy())
+    np.testing.assert_allclose(outs["1"][0], outs["0"][0], rtol=1e-9, atol=1e-9)
+    np.testing.assert_allclose(outs["1"][1], outs["0"][1], rtol=1e-9, atol=1e-9)
 
 
 def test_block_fake_runs_and_matches_ref_shape(tmp_path):
@@ -470,6 +560,223 @@ def test_fused_softmax_den_matches_dense():
     np.testing.assert_allclose(out_f.vec, out_d.vec, rtol=1e-7, atol=1e-9)
 
 
+@pytest.mark.parametrize("complex_payload", [False, True])
+def test_softmax_den_recip_matches_goldschmidt(complex_payload):
+    """SM_DEN_RECIP: the reciprocal of the head sum built on its own ciphertext (packed as
+    D/2 + iR/2 on a complex payload) and the scores multiplied once per round compute the
+    same thing as the per-iteration Goldschmidt products of the default path."""
+    cfg = _cfgs().softmax["transformer.h.0.attn"]
+
+    def run(recip):
+        rt, fhe, inf = _rt(complex_payload=complex_payload)
+        rt.ops.sm_den_recip = recip
+        d = rt.dims
+        rng = np.random.default_rng(11)
+        kv = attention.KVCache(d.d_head)
+        for tok in range(5):
+            k, v, q = (rng.standard_normal(d.hid) for _ in range(3))
+            for arr in (k, v, q):
+                arr[(np.arange(d.hid) % d.H) >= d.H_real] = 0.0
+            attention.cache_k_push(rt, kv, fake.FakeCt(layout.lane_vec(k, d.N, d.t), 34))
+            attention.cache_v_push(rt, kv, fake.FakeCt(layout.lane_vec(v, d.N, d.t), 34))
+        scores = attention.qkt(rt, kv, fake.FakeCt(layout.lane_vec(q, d.N, d.t), 34))
+        return attention.softmax_thor(rt, scores, cfg, kv.k_count).vec
+
+    np.testing.assert_allclose(run(True), run(False), rtol=1e-9, atol=1e-12)
+
+
+@pytest.mark.parametrize("complex_packing", [False, True])
+@pytest.mark.parametrize("recip", [False, True])
+@pytest.mark.parametrize("kc", [1, 5, 32])
+def test_softmax_periodic_matches_block0(complex_packing, recip, kc):
+    """SM_PERIODIC: scores kept tH-periodic (periodic group / score / active masks, no lane-copy ladder in the head
+    sum, P.V as one product with the summed V) give the attention output of the block-0 layout."""
+    cfg = _cfgs().softmax["transformer.h.0.attn"]
+
+    def run(periodic):
+        rt, fhe, inf = _rt(complex_payload=True)
+        rt.ops.sm_den_recip, rt.ops.sm_periodic = recip, periodic
+        d = rt.dims
+        rng = np.random.default_rng(17)
+        kv = attention.ComplexKVCache(d.d_head) if complex_packing else attention.KVCache(d.d_head)
+        for tok in range(kc):
+            k, v = rng.standard_normal(d.hid) * 0.5, rng.standard_normal(d.hid) * 0.5
+            for arr in (k, v):
+                arr[(np.arange(d.hid) % d.H) >= d.H_real] = 0.0
+            kct, vct = layout.lane_vec(k, d.N, d.t), layout.lane_vec(v, d.N, d.t)
+            if complex_packing:
+                attention.cache_kv_push_packed_complex(rt, kv, fake.FakeCt(kct + 1j * vct, 34))
+            else:
+                attention.cache_k_push(rt, kv, fake.FakeCt(kct, 34))
+                attention.cache_v_push(rt, kv, fake.FakeCt(vct, 34))
+        q = rng.standard_normal(d.hid); q[(np.arange(d.hid) % d.H) >= d.H_real] = 0.0
+        qct = fake.FakeCt(layout.lane_vec(q, d.N, d.t), 34)
+        scores = (attention.complex_qkt if complex_packing else attention.qkt)(rt, kv, qct)
+        probs = attention.softmax_thor(rt, scores, cfg, kc)
+        out = (attention.complex_softmax_v if complex_packing else attention.softmax_v)(rt, kv, probs)
+        return scores.vec, probs.vec, out.vec, d.tH
+
+    s0, p0, o0, tH = run(False)
+    s1, p1, o1, _ = run(True)
+    np.testing.assert_allclose(s1, np.tile(s0[:tH], s0.shape[0] // tH), rtol=1e-12, atol=1e-12)   # block 0, tiled
+    np.testing.assert_allclose(p1[:tH], p0[:tH], rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(np.real(o1), np.real(o0), rtol=1e-9, atol=1e-12)
+    assert np.abs(np.imag(o1)).max() < 1e-9
+
+
+@pytest.mark.parametrize("complex_packing", [False, True])
+@pytest.mark.parametrize("recip", [False, True])
+@pytest.mark.parametrize("kc", [33, 70, 140, 256])
+def test_softmax_periodic_general_matches_block0(complex_packing, recip, kc):
+    """SM_PERIODIC=2: past one group the scores keep period Gp tH (group g in every block b with b % Gp == g, Gp the
+    power of two >= the group count): the head sums ladder over one period and P.V takes Gp products, and the
+    attention output is the block layout's."""
+    cfg = _cfgs().softmax["transformer.h.0.attn"]
+
+    def run(mode):
+        rt, fhe, inf = _rt(complex_payload=True)
+        rt.ops.sm_den_recip = recip
+        rt.ops.sm_periodic, rt.ops.sm_periodic_general = mode > 0, mode == 2
+        d = rt.dims
+        rng = np.random.default_rng(23)
+        kv = attention.ComplexKVCache(d.d_head) if complex_packing else attention.KVCache(d.d_head)
+        for tok in range(kc):
+            k, v = rng.standard_normal(d.hid) * 0.5, rng.standard_normal(d.hid) * 0.5
+            for arr in (k, v):
+                arr[(np.arange(d.hid) % d.H) >= d.H_real] = 0.0
+            kct, vct = layout.lane_vec(k, d.N, d.t), layout.lane_vec(v, d.N, d.t)
+            if complex_packing:
+                attention.cache_kv_push_packed_complex(rt, kv, fake.FakeCt(kct + 1j * vct, 34))
+            else:
+                attention.cache_k_push(rt, kv, fake.FakeCt(kct, 34))
+                attention.cache_v_push(rt, kv, fake.FakeCt(vct, 34))
+        q = rng.standard_normal(d.hid); q[(np.arange(d.hid) % d.H) >= d.H_real] = 0.0
+        qct = fake.FakeCt(layout.lane_vec(q, d.N, d.t), 34)
+        a = attention.sm_fold_affine(rt, cfg)[0]
+        scores = (attention.complex_qkt if complex_packing else attention.qkt)(rt, kv, qct, a)
+        probs = attention.softmax_thor(rt, scores, cfg, kc, folded=rt.ops.sm_fold)
+        out = (attention.complex_softmax_v if complex_packing else attention.softmax_v)(rt, kv, probs)
+        return scores.vec, out.vec, attention.sm_periodic(rt, kc), d.tH
+
+    s0, o0, per0, tH = run(0)
+    s2, o2, per, _ = run(2)
+    assert per0 == 0 and per == 1 << ((kc + 31) // 32 - 1).bit_length()
+    np.testing.assert_allclose(np.real(s2), np.real(np.tile(s0[:per * tH], s0.shape[0] // (per * tH))),
+                               rtol=1e-12, atol=1e-12)
+    np.testing.assert_allclose(np.real(o2), np.real(o0), rtol=1e-9, atol=1e-12)
+
+
+@pytest.mark.parametrize("complex_packing", [False, True])
+@pytest.mark.parametrize("periodic", [False, True])
+@pytest.mark.parametrize("kc", [1, 5, 32, 70])
+def test_softmax_fold_matches_unfolded(complex_packing, periodic, kc):
+    """SM_FOLD: the exp's Chebyshev affine carried by the q.K^T group and score masks and each reciprocal round's
+    seed slope by a second head-sum mask give the unfolded softmax (scores x probabilities x P.V)."""
+    cfg = _cfgs().softmax["transformer.h.0.attn"]
+
+    def run(fold):
+        rt, fhe, inf = _rt(complex_payload=True)
+        rt.ops.sm_den_recip, rt.ops.sm_periodic, rt.ops.sm_fold = True, periodic, fold
+        d = rt.dims
+        rng = np.random.default_rng(19)
+        kv = attention.ComplexKVCache(d.d_head) if complex_packing else attention.KVCache(d.d_head)
+        for tok in range(kc):
+            k, v = rng.standard_normal(d.hid) * 0.5, rng.standard_normal(d.hid) * 0.5
+            for arr in (k, v):
+                arr[(np.arange(d.hid) % d.H) >= d.H_real] = 0.0
+            kct, vct = layout.lane_vec(k, d.N, d.t), layout.lane_vec(v, d.N, d.t)
+            if complex_packing:
+                attention.cache_kv_push_packed_complex(rt, kv, fake.FakeCt(kct + 1j * vct, 34))
+            else:
+                attention.cache_k_push(rt, kv, fake.FakeCt(kct, 34))
+                attention.cache_v_push(rt, kv, fake.FakeCt(vct, 34))
+        q = rng.standard_normal(d.hid); q[(np.arange(d.hid) % d.H) >= d.H_real] = 0.0
+        qct = fake.FakeCt(layout.lane_vec(q, d.N, d.t), 34)
+        a = attention.sm_fold_affine(rt, cfg)[0]
+        scores = (attention.complex_qkt if complex_packing else attention.qkt)(rt, kv, qct, a)
+        probs = attention.softmax_thor(rt, scores, cfg, kc, folded=fold)
+        out = (attention.complex_softmax_v if complex_packing else attention.softmax_v)(rt, kv, probs)
+        return probs.vec, out.vec
+
+    p0, o0 = run(False)
+    p1, o1 = run(True)
+    np.testing.assert_allclose(np.real(p1), np.real(p0), rtol=1e-9, atol=1e-12)
+    np.testing.assert_allclose(np.real(o1), np.real(o0), rtol=1e-9, atol=1e-12)
+
+
+@pytest.mark.parametrize("kc", [1, 5, 33, 70])
+def test_kv_lanes_push_matches_complex_refresh(kc):
+    """KV_LANES: K on token lane 0 and V on lane 1 of one real payload fill the same K buckets and V pair buckets as
+    the complex K + iV refresh (any position in the group: the V lane rotation is 1 - rr)."""
+    def run(kvl):
+        rt, fhe, inf = _rt(complex_payload=True)
+        rt.ops.kv_lanes = kvl
+        d = rt.dims
+        rng = np.random.default_rng(23)
+        kv = attention.ComplexKVCache(d.d_head)
+        for tok in range(kc):
+            k, v = rng.standard_normal(d.hid) * 0.5, rng.standard_normal(d.hid) * 0.5
+            for arr in (k, v):
+                arr[(np.arange(d.hid) % d.H) >= d.H_real] = 0.0
+            # the fused linear's output: K + iV on every token lane
+            full = np.repeat(k, d.t) + 1j * np.repeat(v, d.t)
+            attention.cache_kv_push_packed_complex(rt, kv, fake.FakeCt(full, 34))
+        return ([b.vec for b in kv.k_buckets] + [b.vec for b in kv.k_pend]
+                + [b.vec for b in kv.v_buckets if b is not None])
+
+    for a, b in zip(run(True), run(False)):
+        np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12)
+
+
+@pytest.mark.parametrize("kc", [1, 3])
+def test_qkv_lanes_q_rides_push_refresh(kc):
+    """QKV_LANES: the Q linear output on token lane 2 of the K/V push payload leaves the K buckets and V pair buckets
+    untouched and comes back on lane 0, where complex_qkt's tok0 mask reads it."""
+    from perseus.impl.layout import real_head_tok0_mask
+    def run(with_q):
+        rt, fhe, inf = _rt(complex_payload=True)
+        rt.ops.kv_lanes = True
+        d = rt.dims
+        rng = np.random.default_rng(29)
+        kv = attention.ComplexKVCache(d.d_head)
+        qs = []
+        for tok in range(kc):
+            k, v, q = (rng.standard_normal(d.hid) * 0.5 for _ in range(3))
+            for arr in (k, v, q):
+                arr[(np.arange(d.hid) % d.H) >= d.H_real] = 0.0
+            full = np.repeat(k, d.t) + 1j * np.repeat(v, d.t)
+            qfull = np.repeat(q, d.t) + 1j * rng.standard_normal(d.N) * 1e-3   # a real output with im noise
+            out = attention.cache_kv_push_packed_complex(rt, kv, fake.FakeCt(full, 34),
+                                                         fake.FakeCt(qfull, 34) if with_q else None)
+            qs.append((q, out))
+        return ([b.vec for b in kv.k_buckets] + [b.vec for b in kv.k_pend]
+                + [b.vec for b in kv.v_buckets if b is not None]), qs, d
+    bufs_q, qs, d = run(True)
+    bufs_0, qs0, _ = run(False)
+    for a, b in zip(bufs_q, bufs_0):
+        np.testing.assert_allclose(a, b, rtol=1e-12, atol=1e-12)
+    assert all(o is None for _, o in qs0)
+    m = real_head_tok0_mask(d) > 0
+    for q, out in qs:
+        assert out is not None
+        got = (out.vec * (real_head_tok0_mask(d))).real
+        np.testing.assert_allclose(got[m], np.repeat(q, d.t)[m], rtol=1e-12, atol=1e-12)
+
+
+def test_gelu_fold_matches_gelu():
+    """GELU_FOLD: fed x / xmax (the up-projection carries the scaling) and with xmax on the
+    mask, the GELU returns what the unfolded form returns on x."""
+    rt, fhe, inf = _rt(complex_payload=True)
+    d = rt.dims
+    cfg = _cfgs().gelu["transformer.h.3.mlp.act"]
+    x = np.random.default_rng(12).normal(0.0, cfg.xmax / 4, d.N) * (layout.active_expanded_mask(d, 1.0) != 0)
+    rt.ops.gelu_fold = False
+    want = gelu.gelu(rt, fake.FakeCt(x.astype(complex), 34), cfg).vec
+    rt.ops.gelu_fold = True
+    got = gelu.gelu(rt, fake.FakeCt((x / cfg.xmax).astype(complex), 34), cfg).vec
+    np.testing.assert_allclose(got, want, rtol=1e-9, atol=1e-12)
+
+
 # ── the cachemir_complex packing ─────────────────────────────────────────────────────
 
 def test_outputpack_linear_matches_dense():
@@ -575,3 +882,58 @@ def test_unit_seed_newton_matches_ones_ciphertext():
     np.testing.assert_allclose(b.vec, a.vec, rtol=1e-12, atol=1e-12)
     assert b.level == a.level - fhe.unit                     # the folded first iteration: one level fewer
     assert fhe.calls.count("mult_cc") == 3 * 4               # three products per remaining iteration
+
+
+@pytest.mark.parametrize("complex_packing", [False, True])
+def test_replay_kv_pushes(complex_packing):
+    """ImplModel.replay_kv_pushes: the payloads one session logs (attention.kv_push) rebuild the same caches,
+    vectors and counts, when replayed on another."""
+    from perseus.impl.driver import ImplModel
+    rt, fhe, inf = _rt(complex_payload=True)
+    d = rt.dims
+    rng = np.random.default_rng(29)
+    Cache = attention.ComplexKVCache if complex_packing else attention.KVCache
+    src = [Cache(d.d_head) for _ in range(2)]
+    for kv in src:
+        kv.payload_log = []
+    for _ in range(d.t + 3):
+        for kv in src:
+            k, v = (layout.lane_vec(rng.standard_normal(d.hid) * 0.5, d.N, d.t) for _ in range(2))
+            p = fake.FakeCt(k + 1j * v, 34) if complex_packing else (fake.FakeCt(k, 34), fake.FakeCt(v, 34))
+            attention.kv_push(rt, kv, p)
+    _fhe2, inf2 = fake.make_fake(complex_payload=True)
+    m = ImplModel(inf2, core=fake.core, kv_offload=False)
+    m.kv = [Cache(d.d_head) for _ in range(2)]
+    assert m.replay_kv_pushes([kv.payload_log for kv in src], level=36) == d.t + 3
+    for a, b in zip(src, m.kv):
+        assert (a.k_count, a.v_count) == (b.k_count, b.v_count)
+        ca, ka = a.cts("p."); cb, kb = b.cts("p.")
+        assert ka == kb
+        for x, y in zip(ca, cb):
+            np.testing.assert_allclose(y.vec, x.vec, atol=1e-9)
+
+
+def test_ensure_routes_drops_before_it_builds(monkeypatch):
+    """ImplModel.ensure_routes: at a length-class change the routes no longer needed go first, then the missing ones
+    are built (the device holds the larger set, never both); the session's base routes are never dropped."""
+    from perseus.impl.driver import ImplModel
+    monkeypatch.delenv("SM_ROUTE_AHEAD", raising=False)
+    log = []
+
+    class Inf:
+        sparse_routes = [1, 512]
+
+        def add_sparse_route(self, s):
+            log.append(("add", s)); self.sparse_routes = sorted(set(self.sparse_routes) | {s})
+
+        def drop_sparse_route(self, s):
+            log.append(("drop", s)); self.sparse_routes = sorted(set(self.sparse_routes) - {s}); return 1
+
+    m = ImplModel.__new__(ImplModel)
+    m.inf, m._route_class, m._base_routes = Inf(), None, None
+    gp = lambda pos: 1 << ((pos // 32).bit_length())                       # 1, 2, 4 ... by 32-token group
+    m.routes_for = lambda pos: (gp(pos), {gp(pos) * 512} if gp(pos) > 1 else set())
+    for pos in range(0, 130):
+        m.ensure_routes(pos)
+    assert log == [("add", 1024), ("drop", 1024), ("add", 2048), ("drop", 2048), ("add", 4096)]
+    assert m.inf.sparse_routes == [1, 512, 4096]

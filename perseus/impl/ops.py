@@ -54,6 +54,63 @@ class FheOps:
         self.folds = hasattr(inf.fhe, "fold_bootstrap")
         self.fused_sm_den = self.folds and os.environ.get("FUSED_SM_DEN", "0") not in ("", "0")
         self.fused_ln_var = self.folds and os.environ.get("FUSED_LN_VAR", "0") not in ("", "0")
+        # SM_DEN_RECIP=1: the softmax divides by building 1/denominator on the denominator's own
+        # (tH-periodic, sparse-routed) ciphertext and multiplying the scores by it once per round,
+        # instead of multiplying the scores at every Goldschmidt iteration (attention.softmax_thor)
+        self.sm_den_recip = os.environ.get("SM_DEN_RECIP", "1") not in ("", "0")
+        # GELU_FOLD=1: the GELU's 1/xmax rides the up-projection weights and its refreshes are
+        # placed by the planner instead of its own hints (activation.gelu)
+        self.gelu_fold = os.environ.get("GELU_FOLD", "1") not in ("", "0")
+        # LN_CHEB=1: the LayerNorm inverse sqrt from the config's Chebyshev seed (norm.norm);
+        # SM_GS_FIRST=1: the softmax's first division at its gs_iters_first count
+        self.ln_cheb = os.environ.get("LN_CHEB", "1") not in ("", "0")
+        self.sm_gs_first = os.environ.get("SM_GS_FIRST", "1") not in ("", "0")
+        # SM_CHEB_GS=1: the softmax reciprocal rounds run Chebyshev-scaled Goldschmidt on exact per-kc bands (impl smcheb;
+        # the counts and constants differ, so plan-bound; off by default)
+        self.sm_cheb_gs = os.environ.get("SM_CHEB_GS", "0") not in ("", "0")
+        # SM_PERIODIC=1: while every cached token fits one group (kc <= t) the scores, the softmax and its
+        # denominators stay tH-periodic instead of living in block 0, so their refreshes route sparse and P.V is one
+        # product (attention.qkt / softmax_thor / softmax_v)
+        self.sm_periodic = os.environ.get("SM_PERIODIC", "1") not in ("", "0")
+        # SM_PERIODIC=2: past one group too, with period Gp tH (attention.sm_periodic)
+        self.sm_periodic_general = os.environ.get("SM_PERIODIC", "1") == "2"
+        # SM_FOLD=1: the softmax's ciphertext x constant products folded into masks (the exp's Chebyshev affine into
+        # the q.K^T group and score masks; each reciprocal round's seed slope into a second head-sum mask)
+        self.sm_fold = os.environ.get("SM_FOLD", "1") not in ("", "0")
+        # KV_LANES=1: the K + iV linear output refreshed as one REAL payload (K on token lane 0, V on lane 1) by the
+        # real-payload route instead of a complex refresh (attention.cache_kv_push_packed_complex)
+        self.kv_lanes = os.environ.get("KV_LANES", "1") not in ("", "0")
+        # QKV_LANES=1: the Q linear output rides the K/V push refresh on token lane 2 (one real refresh for Q, K and
+        # V), and the qkv / up input hints fire only past the session limit: the linear runs on the LayerNorm output
+        # as is and its OUTPUT is what gets refreshed, at the top of the envelope (attention.mha,
+        # block.transformer_block)
+        self.qkv_lanes = os.environ.get("QKV_LANES", "1") not in ("", "0")
+        # CHEB_BSGS=1: every Chebyshev series (GELU P1/P2, the LayerNorm seed, the softmax exp) evaluated by baby-step
+        # giant-step (poly.eval_chebyshev_bsgs): a third of the ciphertext products at the same depth
+        self.cheb_bsgs = os.environ.get("CHEB_BSGS", "1") not in ("", "0")
+        # IMPL_PT_SUM_FUSED=1: a streamed weight's inner sums encode their plaintexts on the device from the raw rows
+        # and accumulate there (Inference.mult_pt_sum_raw; same values and op stream as the loop)
+        self.pt_sum_fused = os.environ.get("IMPL_PT_SUM_FUSED", "0") not in ("", "0")
+        # LIN_PT_DOT (default 1): a resident-weight linear's baby-step inner sums (sum_b x_rot[b] * pt_b) in one fused
+        # kernel each (Inference.mult_slot_pt_sum) instead of a product and an add per term; same residues, same recorded
+        # op stream (-0.066 s/token, 2026-10-12); 0 = the loop
+        self.pt_dot = (self.slot_pts and hasattr(inf, "mult_slot_pt_sum")
+                       and os.environ.get("LIN_PT_DOT", "1") not in ("", "0"))
+        # IMPL_REALIZE_SHARED=1: a deg-2 value read only by products (the BSGS Chebyshev bases T_2.., the LayerNorm's
+        # centered input) has its pending rescale realized once in place; FIDESlib otherwise rescales a copy inside
+        # every product that reads it. Same rescale on the same values, same output levels and degrees: plans bind
+        self.realize_shared = os.environ.get("IMPL_REALIZE_SHARED", "0") not in ("", "0")
+        # SM_HRS_PACK (default 1): the softmax head sum and its seed-scaled copy (SM_FOLD) ride one complex mask and one replicate
+        # ladder, split by a conjugation (attention.head_reduce_sum): 4 key switches fewer per reciprocal round
+        self.hrs_pack = os.environ.get("SM_HRS_PACK", "1") not in ("", "0")
+        # (SM_HRS_PACK and CUTMAX_PAIR need a complex payload; a real-slot session runs both unpacked)
+        # CUTMAX_PAIR (default 1): two inverse-sigma cascade passes share one 1-slot refresh (examples/.../head.py)
+        self.cutmax_pair = os.environ.get("CUTMAX_PAIR", "1") not in ("", "0")
+        # IMPL_DEAD_OPS (default 1): skip graph ops nothing reads (unused Chebyshev bases such as the odd GELU series' T_6, the
+        # LayerNorm Newton constant when the seed takes no Newton iteration)
+        self.dead_ops = os.environ.get("IMPL_DEAD_OPS", "1") not in ("", "0")
+        # CHEB_ALIGN=1: the Chebyshev leaves read their babies pre-aligned to one level (poly._AlignedBabies)
+        self.cheb_align = os.environ.get("CHEB_ALIGN", "0") not in ("", "0")
 
     # arithmetic
     def add(self, a, b):
@@ -146,6 +203,35 @@ class FheOps:
             if self.slot_pts:
                 return self.inf.add_slot_pt(a, self._slot(key, a, v))
         return self.inf.add_pt(a, self._vec(v))
+
+    def mult_pt_sum(self, cts, vecs):
+        """sum_i cts[i] * vecs[i] for plaintexts encoded at use (streamed weights, no key): one
+        runtime call when it has `mult_pt_sum`, else the loop. Both record mult + inplace_add."""
+        if self.pt_sum_fused and hasattr(self.inf, "mult_pt_sum_raw"):
+            out = self.inf.mult_pt_sum_raw(list(cts), np.ascontiguousarray(vecs))
+            if out is not None:
+                return out
+        if hasattr(self.inf, "mult_pt_sum"):
+            return self.inf.mult_pt_sum(list(cts), np.asarray(vecs))
+        acc = self.mult_pt(cts[0], vecs[0])
+        for c, v in zip(cts[1:], vecs[1:]):
+            self.inplace_add(acc, self.mult_pt(c, v))
+        return acc
+
+    def mult_slot_pt_sum(self, cts, keys, vecs):
+        """sum_i cts[i] * the named plaintext keys[i] (vecs[i] its values, encoded once like mult_pt with a key): the
+        baby-step inner sum of a resident-weight linear in one runtime call; records mult + inplace_add like the loop."""
+        return self.inf.mult_slot_pt_sum(list(cts), [self._slot(k, c, v) for k, c, v in zip(keys, cts, vecs)])
+
+    def mult_coeff_sum(self, cts, rows, tags, vecs):
+        """mult_pt_sum from the plaintexts' coefficient rows (layout.coeff_rows of `vecs`, in pinned memory, with
+        their pt_tag_fields `tags`): encoded and multiplied on the device in batches. Falls back to
+        mult_pt_sum(cts, vecs) where the fused path does not apply (capture, a planned refresh inside)."""
+        if hasattr(self.inf, "mult_coeff_sum"):
+            out = self.inf.mult_coeff_sum(list(cts), rows, tags)
+            if out is not None:
+                return out
+        return self.mult_pt_sum(cts, np.asarray(vecs))
 
     def mult_const(self, a, re, im):
         """a * (re + i im): a plaintext product with a complex constant (the runtime's cached
@@ -290,6 +376,18 @@ class FheOps:
         self.fhe.bootstrap(a); self.n_bootstraps += 1
         return a
 
+    def bootstrap_real(self, a):
+        """A deliberate dense refresh of a payload known to be real: the real-payload route (one EvalMod chain) when
+        the session was built with FIDESLIB_BTS_REAL=1, else the ordinary refresh."""
+        bts = getattr(self.core, "bts", None)
+        if bts is None or os.environ.get("FIDESLIB_BTS_REAL", "0") in ("", "0"):
+            return self.bootstrap(a)
+        bts.set_real_payload(self.fhe, True)
+        try:
+            return self.bootstrap(a)
+        finally:
+            bts.set_real_payload(self.fhe, False)
+
     def fold_slots_for(self, s_wanted):
         return int(self.fhe.fold_slots_for(int(s_wanted))) if self.folds else self.inf.slots
 
@@ -316,6 +414,12 @@ class FheOps:
 
     def realize(self, a):
         self.core.realize_pending_rescale(self.inf, a)
+        return a
+
+    def level_drop(self, a, level):
+        """In place: drop `a` to `level` (a value-preserving modulus reduction) if it is above it."""
+        if hasattr(self.fhe, "drop_to_level"):
+            self.fhe.drop_to_level(a, int(level))
         return a
 
     # data plane
@@ -349,6 +453,7 @@ class NumpyOps:
     def inplace_add(self, a, b): a += b
     def copy(self, a): return np.array(a)
     def mult_pt(self, a, v, key=None, kind="weight", tagged=True): return a * np.asarray(v)
+    def mult_pt_sum(self, cts, vecs): return sum(c * np.asarray(v) for c, v in zip(cts, vecs))
     def add_pt(self, a, v, key=None, kind="weight", tagged=True): return a + np.asarray(v)
     def mult_const(self, a, re, im): return a * complex(re, im)
     def mult_i(self, a): return a * 1j
@@ -361,8 +466,15 @@ class NumpyOps:
     def bts_out(self): return 0
     def headroom(self, k): return 1 << 30
     def bootstrap(self, a): return a
+    def bootstrap_real(self, a): return a
     def bootstrap_hint(self, a, thr, acct=False): return a
-    folds = fused_sm_den = fused_ln_var = False
+    folds = fused_sm_den = fused_ln_var = sm_den_recip = gelu_fold = sm_periodic = sm_fold = kv_lanes = False
+    qkv_lanes = False
+    realize_shared = False
+    hrs_pack = False
+    cutmax_pair = False
+    dead_ops = False
+    cheb_align = False
     def fold_slots_for(self, s_wanted): return int(s_wanted)
     def fold_bootstrap(self, a, s, n_live, prescale=1.0):
         out = self.rotate_and_sum(a, s, a.shape[0]) / n_live   # the fold: the remaining ladder, /n_live
@@ -370,5 +482,6 @@ class NumpyOps:
         return a
     def suppress_auto_bts(self): return contextlib.nullcontext()
     def realize(self, a): return a
+    def level_drop(self, a, level): return a
 
 

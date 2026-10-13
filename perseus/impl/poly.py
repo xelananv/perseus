@@ -85,6 +85,8 @@ CHEB_COEFF_EPS = 1e-6
 
 def eval_chebyshev(ops, x, coeffs, a: float, b: float):
     """sum_k c_k T_k(y), y = (2x - (a+b))/(b-a) (polynomial.cu), c0 unhalved."""
+    if getattr(ops, "cheb_bsgs", False):
+        return eval_chebyshev_bsgs(ops, x, coeffs, a, b)
     coeffs = [float(c) for c in coeffs]
     cmax = max((abs(c) for c in coeffs), default=0.0)
     tol = CHEB_COEFF_EPS * cmax
@@ -130,6 +132,196 @@ def eval_chebyshev(ops, x, coeffs, a: float, b: float):
     return ops.add(r, coeffs[0])
 
 
+def _cheb_trim(coeffs):
+    """The coefficient trim of eval_chebyshev: tiny coefficients dropped, trailing zeros cut."""
+    coeffs = [float(c) for c in coeffs]
+    cmax = max((abs(c) for c in coeffs), default=0.0)
+    tol = CHEB_COEFF_EPS * cmax
+    coeffs = [0.0 if abs(c) <= tol else c for c in coeffs]
+    n = len(coeffs) - 1
+    while n > 0 and coeffs[n] == 0.0:
+        n -= 1
+    return coeffs[: n + 1]
+
+
+def _cheb_split(c, k):
+    """sum_i c_i T_i = q(T) T_k + r(T) with deg q = deg c - k < k, deg r < k (T_k T_j = (T_{k+j} + T_{k-j}) / 2)."""
+    d = len(c) - 1
+    q = [0.0] * (d - k + 1)
+    r = list(c[:k])
+    q[0] = c[k]
+    for j in range(1, d - k + 1):
+        q[j] = 2.0 * c[k + j]
+        r[k - j] -= c[k + j]
+    return q, r
+
+
+def eval_chebyshev_bsgs(ops, x, coeffs, a: float, b: float):
+    """eval_chebyshev with a baby-step giant-step schedule (Bossuat et al.): babies T_1..T_{m-1} and giants
+    T_m, T_2m, ..., the series split recursively as q(T) T_k + r(T) and recombined with k - 1 products per
+    level, so a degree-31 series costs 11 ciphertext products instead of 30. Same value, same depth
+    (ceil(log2 n) + 1), same coefficient trim; CHEB_BSGS=1 routes every eval_chebyshev here."""
+    coeffs = _cheb_trim(coeffs)
+    n = len(coeffs) - 1
+    if n <= 3:
+        return eval_chebyshev(_NoBsgs(ops), x, coeffs, a, b)
+    alpha = 2.0 / (b - a)
+    beta = (a + b) / (b - a)
+    y = x if alpha == 1.0 else ops.mult(x, alpha)
+    if beta != 0.0:
+        y = ops.add(y, -beta)
+    L = n.bit_length()                   # 2^(L-1) <= n < 2^L
+    l = (L + 1) // 2                     # baby bits: m = 2^l babies, giants T_m .. T_2^(L-1)
+    m = 1 << l
+    T = {1: y}
+    shared = getattr(ops, "realize_shared", False)   # T_2.. are read only by products (y also by a sub)
+    need = _cheb_needed(coeffs, m, n) if getattr(ops, "dead_ops", False) else None
+    for i in range(2, m):                # babies T_2 .. T_{m-1}
+        if need is not None and i not in need:
+            continue                     # IMPL_DEAD_OPS: no leaf and no other T reads it
+        if i % 2 == 0:
+            sq = ops.square(T[i // 2])
+            T[i] = ops.add(ops.add(sq, sq), -1.0)
+        else:
+            j = i // 2
+            prod = ops.mult(T[j + 1], T[j])
+            T[i] = ops.sub(ops.add(prod, prod), y)
+        if shared:
+            ops.realize(T[i])
+    k = m
+    while k <= n:                        # giants T_m, T_2m, ... (T_{m/2} is a baby)
+        if need is not None and k not in need:
+            k *= 2
+            continue
+        sq = ops.square(T[k // 2])
+        T[k] = ops.add(ops.add(sq, sq), -1.0)
+        if shared:
+            ops.realize(T[k])
+        k *= 2
+
+    leaves = _AlignedBabies(ops, T, m, shared) if getattr(ops, "cheb_align", False) else None
+    return _cheb_rec(ops, T, y, m, coeffs, leaves)
+
+
+class _AlignedBabies:
+    """CHEB_ALIGN=1: the leaves' view of the babies. A leaf sums c_i T_i over babies of 3-4 different depths, and the
+    runtime's add re-aligns (scalar product + rescale) the running sum at every depth step, in every leaf. Here each
+    leaf's shallower babies are brought ONCE to the level and scale of the deepest baby THAT LEAF uses (so the leaf
+    lands where it did before), by adding them to an exact zero living there (T_t - T_t); the aligned copies are
+    cached per (baby, target), so the leaves of one series share them."""
+
+    def __init__(self, ops, T, m, shared):
+        self.ops, self.T, self.shared, self.cache, self.zeros = ops, T, shared, {}, {}
+        depth = {1: 0}
+        for i in range(2, m):
+            depth[i] = depth[i // 2] + 1 if i % 2 == 0 else max(depth[i // 2 + 1], depth[i // 2]) + 1
+        self.depth = depth
+
+    def terms(self, idx):
+        """{i: the copy of T_i the leaf with nonzero terms `idx` reads}."""
+        if not idx:
+            return {}
+        tgt = max(idx, key=lambda i: (self.depth.get(i, 0), i))
+        dt = self.depth.get(tgt, 0)
+        out = {}
+        for i in idx:
+            if self.depth.get(i, 0) >= dt or i == tgt:
+                out[i] = self.T[i]
+                continue
+            v = self.cache.get((i, tgt))
+            if v is None:
+                z = self.zeros.get(tgt)
+                if z is None:
+                    z = self.zeros[tgt] = self.ops.sub(self.T[tgt], self.T[tgt])
+                v = self.ops.add(z, self.T[i])
+                if self.shared:
+                    self.ops.realize(v)
+                self.cache[(i, tgt)] = v
+            out[i] = v
+        return out
+
+
+def _cheb_needed(coeffs, m: int, n: int) -> set:
+    """The T_i that eval_chebyshev_bsgs's recursion reads (leaf terms with a nonzero coefficient, the giants it splits
+    on), closed under their construction (T_2i from T_i, T_2j+1 from T_j+1 and T_j, giant T_2k from T_k)."""
+    used = set()
+
+    def rec(c):
+        d = len(c) - 1
+        while d > 0 and c[d] == 0.0:
+            d -= 1
+        c = c[: d + 1]
+        if d < m:
+            used.update(i for i in range(1, len(c)) if c[i] != 0.0)
+            return
+        k = 1 << (d.bit_length() - 1)
+        used.add(k)
+        q, r = _cheb_split(c, k)
+        rec(q)
+        rec(r)
+
+    rec(list(coeffs))
+    need, todo = set(), sorted(used, reverse=True)
+    while todo:
+        i = todo.pop()
+        if i in need or i <= 1:
+            continue
+        need.add(i)
+        if i >= m or i % 2 == 0:         # a giant (a power of two) or an even baby: a square of T_i/2
+            todo.append(i // 2)
+        else:
+            todo += [i // 2 + 1, i // 2]
+    return need
+
+
+def _cheb_leaf(ops, T, y, c):
+    """sum_i c_i T_i over the baby steps (module-level: no closure, so no reference cycle pins the T_i). `T` may be
+    an _AlignedBabies view (CHEB_ALIGN): it hands out the leaf's terms pre-aligned to one level."""
+    if isinstance(T, _AlignedBabies):
+        T = T.terms([i for i in range(1, len(c)) if c[i] != 0.0])
+    r = None
+    for i in range(1, len(c)):
+        if c[i] == 0.0:
+            continue
+        term = ops.mult(T[i], c[i])
+        if r is None:
+            r = term
+        else:
+            ops.inplace_add(r, term)
+    if r is None:
+        z = ops.sub(y, y)
+        return ops.add(z, c[0])
+    return ops.add(r, c[0]) if c[0] != 0.0 else r
+
+
+def _cheb_rec(ops, T, y, m, c, leaves=None):
+    """q(T) T_k + r(T) recursively down to the baby steps (k = the largest giant <= deg c); `leaves`: the babies'
+    leaf view (CHEB_ALIGN), else T itself."""
+    d = len(c) - 1
+    while d > 0 and c[d] == 0.0:
+        d -= 1
+    c = c[: d + 1]
+    if d < m:
+        return _cheb_leaf(ops, T if leaves is None else leaves, y, c)
+    k = 1 << (d.bit_length() - 1)     # largest power of two <= d (a giant since d >= m)
+    q, r = _cheb_split(c, k)
+    qv = _cheb_rec(ops, T, y, m, q, leaves)
+    prod = ops.mult(qv, T[k])
+    rv = _cheb_rec(ops, T, y, m, r, leaves)
+    return ops.add(prod, rv)
+
+
+class _NoBsgs:
+    """ops view with the BSGS switch off (tiny series take the direct recursion)."""
+    cheb_bsgs = False
+
+    def __init__(self, ops):
+        self._ops = ops
+
+    def __getattr__(self, name):
+        return getattr(self._ops, name)
+
+
 def taylor_inv_sqrt_coeffs(z0: float):
     """polynomial.cu."""
     s = math.sqrt(z0)
@@ -156,6 +348,57 @@ def goldschmidt_inv_ndf(ops, N_init, D_init, F_init, iters: int):
             D_neg = ops.mult(D_neg, F)
             F = ops.add(D_neg, 2.0)
     return N
+
+
+def goldschmidt_recip(ops, D, alpha: float, beta: float, iters: int, scale: float = 1.0, Dh=None, cheb=None):
+    """1/D by the goldschmidt_inv_ndf recurrence with its numerator left out, the seed
+    F_init = alpha - beta x calibrated for x = scale D (F_k = 2 - D_k, D_{k+1} = D_k F_k on
+    scale D; the product of the F's, times scale, is 1/D). A caller dividing a wide payload by a
+    narrow D then multiplies the payload once instead of at every iteration. On a complex payload
+    the running D and the reciprocal share one ciphertext, P = D_neg/2 + i R/2, so one product
+    (P <- P F, F = 2 + P + conj P) and one refresh serve both; R = i (conj P - P). A real payload
+    carries them as two ciphertexts. `Dh` = (b/2) D supplied by the caller (a second mask on D's reduction,
+    SM_FOLD) takes the seed's ciphertext x constant products off the chain: one level less per call.
+    `cheb` = (kappas, mu) (SM_CHEB_GS, impl smcheb): the Chebyshev-scaled steps, F = 2 kappa_j + P + conj P, on a
+    seed already scaled by kappa_0 (alpha, beta); the reciprocal's seed is scaled by mu = 1/lambda_K, which on a
+    complex payload rides the seed product itself: P = G (D - i mu) = -i (G (i D + mu)) (no extra level or product)."""
+    a, b = alpha * scale, beta * scale * scale        # scale F_init(scale D) = a - b D
+    if cheb is not None:
+        kap, mu = cheb
+        if ops.complex_payload:
+            G = ops.add(ops.mult(D, 0.5 * b), -0.5 * a) if Dh is None else ops.add(Dh, -0.5 * a)
+            P = ops.negate(ops.mult_i(ops.mult(G, ops.add(ops.mult_i(D), mu))))   # -kappa_0 D F / 2 + i mu kappa_0 F / 2
+            for j in range(iters - 1):
+                P = ops.mult(P, ops.add(ops.add(P, ops.conjugate(P)), 2.0 * kap[j]))
+            return ops.mult_i(ops.sub(ops.conjugate(P), P))
+        bD = ops.mult(D, b) if Dh is None else ops.add(Dh, Dh)
+        R = ops.add(ops.mult(bD, -mu), mu * a)                                  # mu kappa_0 F
+        D_neg = ops.mult(D, ops.add(bD, -a))                                   # -kappa_0 D F
+        for j in range(iters - 1):
+            F = ops.add(D_neg, 2.0 * kap[j])
+            R = ops.mult(R, F)
+            if j + 2 < iters:
+                D_neg = ops.mult(D_neg, F)
+        return R
+    if ops.complex_payload:
+        if Dh is None:
+            G = ops.add(ops.mult(D, 0.5 * b), -0.5 * a)                   # -scale F_init / 2
+            P = ops.add(ops.mult(D, G), ops.mult_i(ops.add(ops.mult(D, -0.5 * b), 0.5 * a)))
+        else:
+            G = ops.add(Dh, -0.5 * a)
+            P = ops.add(ops.mult(D, G), ops.mult_i(ops.add(ops.negate(Dh), 0.5 * a)))
+        for _ in range(1, iters):
+            P = ops.mult(P, ops.add(ops.add(P, ops.conjugate(P)), 2.0))
+        return ops.mult_i(ops.sub(ops.conjugate(P), P))
+    bD = ops.mult(D, b) if Dh is None else ops.add(Dh, Dh)
+    R = ops.add(ops.negate(bD), a) if Dh is not None else ops.add(ops.mult(D, -b), a)   # scale F_init
+    D_neg = ops.mult(D, ops.add(bD, -a))                                  # -scale D F_init
+    for i in range(1, iters):
+        F = ops.add(D_neg, 2.0)
+        R = ops.mult(R, F)
+        if i + 1 < iters:
+            D_neg = ops.mult(D_neg, F)
+    return R
 
 
 def goldschmidt_inv_x0(ops, a, x0_init, iters: int):
@@ -201,6 +444,18 @@ def inv_sqrt_newton(ops, x, ans_init, iters: int, x_scale: float = 1.0):
         a = ops.mult(ct, 1.5)
         ct = ops.add(a, b)
     return ct
+
+
+def inv_sqrt_newton_d2(ops, x, y, iters: int, x_scale: float = 1.0):
+    """inv_sqrt_newton with the product order (c*y)*y^2: two levels per iteration, not three."""
+    if iters <= 0 and getattr(ops, "dead_ops", False):
+        return y                         # IMPL_DEAD_OPS: no iteration reads c
+    c = ops.mult(x, -0.5 * x_scale)
+    for _ in range(iters):
+        a = ops.square(y)
+        b = ops.mult(ops.mult(c, y), a)
+        y = ops.add(ops.mult(y, 1.5), b)
+    return y
 
 
 def inv_sqrt_newton_safe(ops, x, y0, iters: int):

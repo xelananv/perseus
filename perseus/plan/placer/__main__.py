@@ -117,6 +117,19 @@ def main() -> None:
                    dest="dissolve_hints",
                    help="explicitly bind each hint's threshold decision into the plan "
                         "(the default; kept so scripts can state it)")
+    p.add_argument("--raise-drop-max", dest="raise_drop_max", type=int, default=None,
+                   help="level-aware ModRaise: max composite levels a placed site may raise short of the chain top (0 = off)")
+    p.add_argument("--raise-drop-landing-max", dest="raise_drop_landing_max", type=int, default=None,
+                   help="deepest absolute landing for a raise-dropped site (default 44 = AUTO_BTS_LEVEL - unit)")
+    p.add_argument("--raise-drop-routes", dest="raise_drop_routes", type=lambda s: tuple(int(x) for x in s.split(",") if x), default=None,
+                   help="routes (slot counts, 0 = dense) that may take a raise drop; default 0,512")
+    p.add_argument("--real-route", dest="real_route", action="store_true", default=None,
+                   help="refresh dense sites whose slots the capture tagged real with one EvalMod chain "
+                        "(plan 'real_route'; run with FIDESLIB_BTS_REAL=1)")
+    p.add_argument("--raise-drop-set", dest="raise_drop_set", type=lambda s: tuple(int(x) for x in s.split(",") if x), default=None,
+                   help="the drops the runtime builds variants for (FIDESLIB_BTS_RAISE_DROPS), e.g. 1,3,5: a site's drop is rounded down to one of them")
+    p.add_argument("--raise-drop-env-rule", dest="raise_drop_env_rule", type=str, default=None,
+                   choices=["effective", "nominal"], help="envelope rule for the raise-drop slack")
     p.add_argument("--site-bts-out-file", dest="site_bts_out_file", type=str,
                    help="JSON {block_dir: {var: absolute_out_level}} of measured "
                         "per-site refresh landings (landing feedback)")
@@ -124,6 +137,12 @@ def main() -> None:
                    dest="rescale_opt",
                    help="phase 2: search planted-realize anchors at deg-raising joins, "
                         "keep them when the re-cut plan needs no more bootstraps")
+    p.add_argument("--shared-realize", action="store_true", default=None, dest="shared_realize",
+                   help="realize anchors on deg-2 values read by two or more products / key switches, kept when the "
+                        "re-cut plan needs no more bootstraps")
+    p.add_argument("--ks-realize", action="store_true", default=None, dest="ks_realize",
+                   help="realize anchors on the deg-2 inputs of rotations/conjugations, kept when the re-cut plan "
+                        "needs no more bootstraps (cheaper key switches)")
     p.add_argument("--boundary-realize", action="store_true", default=None,
                    dest="boundary_realize",
                    help="realize a deg-2 terminal exit so the next block enters deg-1 "

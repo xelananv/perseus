@@ -17,13 +17,36 @@ QUALITY_LAMBDA = 1.0 / 4096.0
 #: composite chain and 24+1=25 on the 64-bit one (fideslib_wrapper.h, BTS_MAX_INPUT_LEVEL).
 #: The planner cannot see that ceiling: no plan recipe sources scripts/local_env.sh, so
 #: AUTO_BTS_LEVEL is not in its environment. Hence a knob with the 32-bit value as the
-#: default, which is what every shipped recipe was planned under.
+#: default, which is what every shipped recipe was planned under. Measured 2026-10-10 with
+#: the re-levelled CtS plaintexts (FIDESLIB_BTS_SHIFT): the dense real route keeps its bits
+#: up to an EFFECTIVE level of 50 (nominal 48 with a rescale pending, what the guard reads as
+#: 48) and collapses at 52, so the n32 recipe pins PLAN_REFRESH_ENV_CAP=50 for the decode
+#: blocks and keeps 48 on the tail and CutMax steps (PLAN_REFRESH_ENV_CAP_STEPS).
 REFRESH_ENV_CAP_ABS = 48.0
 
 
-def refresh_env_cap() -> float:
-    """REFRESH_ENV_CAP_ABS, or PLAN_REFRESH_ENV_CAP when the recipe pins the chain's own."""
+def refresh_env_cap(step: str | None = None, route: int | None = None) -> float:
+    """REFRESH_ENV_CAP_ABS, or PLAN_REFRESH_ENV_CAP when the recipe pins the chain's own. A route listed in
+    PLAN_REFRESH_ENV_CAP_ROUTES (route:cap pairs, 0 = dense) has its own: the StC-first dense route pays its StC
+    levels on the input side (FIDESLIB_BTS_STC_FIRST), so its input must stop higher. PLAN_REFRESH_ENV_CAP_STEPS
+    (`name:cap,...`) pins it per step for the nodes whose step name contains `name` after its `blkN.` prefix: the
+    decode blocks can take the measured envelope while the tail and CutMax keep a stricter one. The tighter of a
+    route cap and a step cap applies."""
     import os as _os
+    caps = []
+    if route is not None:
+        for kv in (_os.environ.get("PLAN_REFRESH_ENV_CAP_ROUTES") or "").split(","):
+            r, _, c = kv.partition(":")
+            if c.strip() and int(r) == route:
+                caps.append(float(c))
+    if step:
+        bare = step.split(".", 1)[1] if step.startswith("blk") and "." in step else step
+        for kv in (_os.environ.get("PLAN_REFRESH_ENV_CAP_STEPS") or "").split(","):
+            name, _, c = kv.partition(":")
+            if name.strip() and c.strip() and name.strip() in bare:
+                caps.append(float(c))
+    if caps:
+        return min(caps)
     e = _os.environ.get("PLAN_REFRESH_ENV_CAP")
     if e and e.strip():
         try:
@@ -148,6 +171,10 @@ class Placer:
     #: through `_capacity`, so the envelope policy cannot price it; forcing it off hands the
     #: branch to the cut, which can.
     vetoed_hints: set[str] = field(default_factory=set)
+    #: Cut-chosen sites whose refresh input drifted past the envelope after they were priced (a later cut
+    #: disarmed a hint upstream) and that PLAN_DRIFT_RECUT could not re-cover: kept, reported by P3c as forced.
+    drift_forced: set[str] = field(default_factory=set)
+    _drift_rounds: int = 0
 
     placed: set[str] = field(default_factory=set)
     #: effective (pre-refresh) consumed depth of each placed site, as _capacity saw it
@@ -217,7 +244,18 @@ class Placer:
             placed=set(self.placed), sparse_refreshed=sparse_refreshed,
             realized=set(self.realized) if self.realized else None,
             hint_force=self.hint_force,
-            deliberate_clamp0=self.deliberate_clamp0)
+            deliberate_clamp0=self.deliberate_clamp0,
+            dense_fallback=self._dense_fallback())
+
+    def _dense_fallback(self):
+        """PLAN_STC_FIRST_ENTRY (the StC-first dense route's highest effective input level) and PLAN_STC_FIRST_FALLBACK
+        (`level:deg`, where the shipped order lands): a dense refresh past the entry lands there instead."""
+        import os as _os
+        e, f = _os.environ.get("PLAN_STC_FIRST_ENTRY"), _os.environ.get("PLAN_STC_FIRST_FALLBACK")
+        if not (e and f):
+            return None
+        lv, _, dg = f.partition(":")
+        return (float(e), float(lv) - self.bootstrap_level, int(dg or 1))
 
     def _min_runway(self, M: float) -> float:
         """min over routes of (M - R): the runway the worst landing leaves."""
@@ -239,7 +277,7 @@ class Placer:
         if spec.hopeless:
             return float("inf")
         eff_v = (self._last_sim.consumed.get(v, 0.0) + (self.g.level_unit if self._last_sim.deg.get(v, 1) == 2 else 0)) if self._last_sim is not None else 0.0
-        if self.bootstrap_level + eff_v > refresh_env_cap():
+        if self.bootstrap_level + eff_v > refresh_env_cap(self._step_of(v), route=spec.route or 0):
             # Past the refresh envelope. Payable (1e4, large but finite) by default: an
             # inf here can starve the cut entirely when whole paths sit past the envelope,
             # and with hints live they absorb the deep values so the penalty is never
@@ -287,6 +325,9 @@ class Placer:
         PLAN_HARD_ENV_CAP pins one pass: 1 = envelope absolute (no fallback), 0 = payable
         throughout (what the shipped 32-bit recipe asked for before this was two-pass).
         """
+        # replans below start from the caller's pre-seeded placements (force_place)
+        if not hasattr(self, "_forced"):
+            self._forced = set(self.placed)
         import os as _os
         _ov = _os.environ.get("PLAN_HARD_ENV_CAP")
         if _ov in ("0", "1"):
@@ -330,9 +371,13 @@ class Placer:
             if not ins:
                 continue
             eff = sim.consumed.get(ins[0], 0.0) + (unit if sim.deg.get(ins[0], 1) == 2 else 0)
-            if self.bootstrap_level + eff > refresh_env_cap():
+            if self.bootstrap_level + eff > refresh_env_cap(n.step, route=self.refresh.route_for(n.output) or 0):
                 out.append(n.output)
         return out
+
+    def _step_of(self, v: str) -> str | None:
+        p = self.g.producer_of.get(v)
+        return getattr(p, "step", None) if p is not None else None
 
     def _run_with_hint_veto(self, passes: int = 4) -> SimResult:
         """`_run_once`, then force off any hint predicted to fire past the envelope and replan.
@@ -360,7 +405,9 @@ class Placer:
             for v in deep:
                 self.hint_force[v] = False
             self.vetoed_hints.update(deep)
-            self.placed, self.realized = set(), set()
+            # the realize anchors are the planner's (constructor input), not a cut decision: they stay through the
+            # veto re-run, else the sim drops them while the plan still lists them (runtime plan_deg_error)
+            self.placed = set(getattr(self, "_forced", ()))
             try:
                 res = self._run_once()
             except PlanInfeasible:
@@ -385,9 +432,39 @@ class Placer:
         self.refresh.step_bts_offset = self._step_offsets
 
         max_iters = 2 * len(self.g.nodes)
+        import os as _os
+        recut = _os.environ.get("PLAN_DRIFT_RECUT") == "1" and self._env_cap_hard
         for it in range(max_iters):
             sim = self._sim()
             if not sim.over_budget:
+                # A site is priced by `_capacity` at the level the sim showed when it was cut. A later cut can
+                # disarm a hint upstream of it (the hint's input drops below its trigger), and the depth the
+                # hint absorbed then lands on the site: legal when chosen, past the envelope now. With
+                # PLAN_DRIFT_RECUT=1, un-place such sites and let the cut cover the branch again under
+                # `_capacity`; if no envelope-respecting cover exists, keep them and report them as forced.
+                # Off by default: the shipped recipes carry such sites (the runtime guard reads the nominal
+                # level, which is what their refreshes meet) and a re-cut would rewrite their plans.
+                deep = [v for v in (self._deep_placed(sim) if recut and self._drift_rounds < 32 else [])
+                        if v not in self.drift_forced]
+                if deep:
+                    self._drift_rounds += 1
+                    saved = (set(self.placed), dict(self.placed_in_eff))
+                    for v in deep:
+                        self.placed.discard(v)
+                        self.placed_in_eff.pop(v, None)
+                    if self.verbose:
+                        log.info(f"[plan] {len(deep)} placed refresh(es) drifted past the envelope after a hint "
+                                 f"upstream stopped firing; un-placed, the cut re-covers them: "
+                                 + ", ".join(deep[:6]))
+                    try:
+                        return self._run_once()
+                    except PlanInfeasible:
+                        self.placed, self.placed_in_eff = saved
+                        self.drift_forced.update(deep)
+                        if self.verbose:
+                            log.info(f"[plan] no envelope-respecting cover for {len(deep)} drifted site(s); "
+                                     "kept as forced: " + ", ".join(deep[:6]))
+                        continue
                 if self.verbose:
                     log.info(f"[plan] feasible after {it} cut pass(es); "
                           f"{len(self.placed)} refresh(es) placed")
@@ -421,6 +498,22 @@ class Placer:
         raise PlanInfeasible(
             f"still {len(sim.over_budget)} op(s) over budget after {max_iters} passes — "
             "every remaining cut point is unrefreshable", refusals)
+
+    def _deep_placed(self, sim: SimResult) -> list[str]:
+        """Placed (cut-chosen) DENSE sites whose refresh now starts past the envelope.
+
+        The measured envelope is the dense route's. A sparse route raises less and tolerates a deeper input
+        (the shipped n32 plan runs 512-slot sites at 48 with a rescale pending), and its ceiling is not
+        measured, so those stay with the runtime guard.
+        """
+        out = []
+        for v in self.placed:
+            p = self.g.producer_of.get(v)
+            if p is None or p.is_deliberate_bts or p.hint_level is not None or self.refresh.spec(v).route:
+                continue
+            if self.bootstrap_level + sim.input_eff(self.g, v, self.g.level_unit) > refresh_env_cap(self._step_of(v), route=0) + 1e-9:
+                out.append(v)
+        return sorted(out)
 
     def _one_cut(self, sim: SimResult) -> list[str]:
         """Deep-operand wiring first, binding-operand-only as the fallback.

@@ -23,6 +23,31 @@ LOAD_BEARING_ENV = (
     # routing and fold decisions: they change which bootstraps exist and at which degree
     "SPARSE_BTS_SLOTS", "SPARSE_AUTO", "FUSED_SM_DEN", "FUSED_LN_VAR", "CORRECTION_FACTOR",
     "FHE_PT_COEFF_ENCODE",
+    # the softmax division form (impl attention.softmax_thor): a different op sequence
+    "SM_DEN_RECIP",
+    # the GELU form (impl activation.gelu, examples weights up_scale): a different op sequence
+    "GELU_FOLD",
+    # the LayerNorm inverse sqrt seed (impl norm.norm) and the softmax's first division count
+    "LN_CHEB", "SM_GS_FIRST",
+    # the score layout (impl attention.sm_periodic): a different op sequence
+    "SM_PERIODIC",
+    # the softmax constants folded into masks (impl attention.sm_fold_affine): a different op sequence
+    "SM_FOLD",
+    # the K/V push form (impl attention.cache_kv_push_packed_complex): a different op sequence
+    "KV_LANES",
+    # step-scoped ciphertext names (impl rt.Rt): different variable names, the plan's keys
+    "IMPL_SCOPED_NAMES",
+    # the softmax head sums on one complex ladder (impl attention.head_reduce_sum) and the CutMax cascade's paired
+    # 1-slot refreshes (examples head.inv_sigma_cascade): different op sequences
+    "SM_HRS_PACK", "CUTMAX_PAIR",
+    # graph ops nobody reads skipped (impl poly.eval_chebyshev_bsgs / inv_sqrt_newton_d2): a different op sequence
+    "IMPL_DEAD_OPS",
+    # rotate-and-sum ladders in hoisted radix groups (src/bindings/ops.cu rotate_and_sum): a different op sequence
+    "LADDER_RADIX_BITS",
+    # Chebyshev leaves on pre-aligned babies (impl poly._AlignedBabies): a different op sequence
+    "CHEB_ALIGN",
+    # Chebyshev-scaled Goldschmidt softmax rounds (impl smcheb): different counts and constants
+    "SM_CHEB_GS",
 )
 
 

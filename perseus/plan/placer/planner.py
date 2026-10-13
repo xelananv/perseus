@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import json
 import logging
 import math
@@ -8,7 +9,7 @@ from pathlib import Path
 
 from .. import btserr
 from ..contract import CONTRACT_KEY
-from .ir import ADD_FAMILY, Graph, parse_lvl_suffix
+from .ir import ADD_FAMILY, MULT_FAMILY, Graph, parse_lvl_suffix
 from .place import Placer, PlanInfeasible, erase_reactive_bootstraps
 from .refresh import CfClampReport, RefreshPlanner
 from .sim import Budget, SimResult, step_bts_offsets
@@ -54,6 +55,48 @@ def _raise_candidates(g: Graph, sim: SimResult, forbid_steps, hint_outs, placed)
     return out
 
 
+KS_OPS = frozenset({"rotate", "conjugate", "rotate_sum"})
+
+
+def _ks_candidates(g: Graph, sim: SimResult, hint_outs, placed) -> set:
+    """Deg-2 values a key switch reads (rotations, conjugations; a rotate-and-sum ladder is recorded as its rotates).
+    Realizing the pending rescale first runs every key switch on one composite level (2 limbs) fewer, sometimes one
+    gadget digit fewer; the rescale itself happens anyway at the next product, so effective levels are unchanged."""
+    out = set()
+    for n in g.nodes:
+        if n.op not in KS_OPS or n.is_deliberate_bts or n.hint_level is not None:
+            continue
+        for v in n.cipher_inputs:
+            if sim.deg.get(v, 1) != 2 or v in placed or v in hint_outs or v in g.inputs:
+                continue
+            if g.producer_of.get(v) is None:
+                continue
+            out.add(v)
+    return out
+
+
+def _shared_candidates(g: Graph, sim: SimResult, hint_outs, placed) -> set:
+    """Deg-2 values read only by products and key switches, at least two of them: every product rescales its own
+    copy of a deg-2 operand (FIDESlib mult / multPt / multScalar / square) and a key switch carries its 2 extra limbs,
+    so realizing the pending rescale once serves them all (the generic form of IMPL_REALIZE_SHARED). Effective levels
+    are unchanged; the planner's own simulation tracks the degrees, so the plan's degree pins stay exact."""
+    consumers = {}
+    for n in g.nodes:
+        if n.is_deliberate_bts or n.hint_level is not None:
+            continue
+        for v in set(n.cipher_inputs):
+            consumers.setdefault(v, []).append(n)
+    out = set()
+    for v, cs in consumers.items():
+        if sim.deg.get(v, 1) != 2 or v in placed or v in hint_outs or v in g.inputs:
+            continue
+        if g.producer_of.get(v) is None or len(cs) < 2:
+            continue
+        if all(n.op in MULT_FAMILY or n.op in KS_OPS for n in cs):
+            out.add(v)
+    return out
+
+
 @dataclass(frozen=True)
 class PlanConfig:
     bootstrap_level: int = 16
@@ -93,6 +136,12 @@ class PlanConfig:
     forbid_steps: tuple[str, ...] = (".var", ".mean", ".qkv")
     boundary_realize: bool = False
     rescale_opt: bool = False
+    # Realize anchors on the deg-2 inputs of key switches (_ks_candidates), kept when the re-cut plan needs no more
+    # bootstraps (PLAN_KS_REALIZE): cheaper rotations and conjugations, same effective levels.
+    ks_realize: bool = False
+    # Realize anchors on deg-2 values read by two or more products / key switches (_shared_candidates), kept when the
+    # re-cut plan needs no more bootstraps (PLAN_SHARED_REALIZE): one rescale instead of one per consumer.
+    shared_realize: bool = False
     # Landing feedback: {block_dir_name: {var: absolute_out_level}} of measured per-site
     # refresh landings from a prior run's [planted_bts] ledger. Overrides the route table
     # at exactly the named sites.
@@ -115,6 +164,32 @@ class PlanConfig:
     # Seed deliberate landings clamped at the bts level (never richer) instead of the
     # signed captured landing.
     deliberate_clamp0: bool = False
+    # Level-aware ModRaise (opt-in, --raise-drop-max K). After the cut, every placed site whose
+    # lineage reaches its next refresh with slack hands that slack back: its raise stops
+    # `drop` composite levels below the chain top (the bootstrap runs on fewer limbs, ~6%
+    # per level on the n32 chain) and its landing is deeper by the same amount. Assigned on
+    # the FIXED placement from the sim's own levels, then re-simulated so the plan's expected
+    # levels and the P3/P3c checks see the deeper landings. Sites whose lineage reaches a
+    # block output, a KV-cache write, or a hint (runtime-decided) are left at the full raise.
+    raise_drop_max: int = 0
+    # Envelope rule for the slack: "effective" (planner's P3c convention, refresh input + pending
+    # rescale <= cap) or "nominal" (the runtime [bts_depth_error] guard: refresh input <= cap, the
+    # level the shipped plans already run their deepest refreshes at).
+    raise_drop_env_rule: str = "effective"
+    # Deepest landing a raise-dropped site may take (absolute level). The runtime's reactive
+    # safety net fires at AUTO_BTS_LEVEL (46 on the n32 recipe) for any value it did not expect
+    # there, so landings must stay strictly below it: default AUTO_BTS_LEVEL - level_unit = 44.
+    raise_drop_landing_max: int = 44
+    # Routes (sparse slot counts, 0 = dense) a raise drop may be assigned to. The 1-slot route runs SPRU on the
+    # shipped n32 runtime, which has no raise variant, so it is excluded by default.
+    raise_drop_routes: tuple[int, ...] = (0, 512)
+    # The drops the runtime builds plaintext variants for (FIDESLIB_BTS_RAISE_DROPS); a site's
+    # drop is rounded down to the largest of them (None: any drop up to raise_drop_max). Each
+    # variant is a full CtS/StC plaintext set per route, so the runtime cannot afford them all.
+    raise_drop_set: tuple[int, ...] | None = None
+    # Dense refreshes whose slots the capture tagged real run one EvalMod chain (plan 'real_route'; the runtime
+    # builds the real StC stage under FIDESLIB_BTS_REAL).
+    real_route: bool = False
     first_entry_level: int | None = None
     first_entry_deg: int | None = None
     verbose: bool = True
@@ -158,7 +233,6 @@ def _prune_redundant(placer, sim: SimResult, keep=()) -> tuple[SimResult, int]:
     """Drop redundant refreshes from `placer.placed` in name order (see PlanConfig.prune)."""
     from .place import refresh_env_cap
     g = placer.g
-    env = refresh_env_cap() - placer.bootstrap_level
 
     def count(s):
         return len(placer.placed) + sum(1 for f in s.hint_fired.values() if f)
@@ -176,11 +250,12 @@ def _prune_redundant(placer, sim: SimResult, keep=()) -> tuple[SimResult, int]:
                 lvl = s.effective(p.cipher_inputs[0], g.level_unit)
             else:
                 lvl = s.node_out.get(p.idx, 0.0)
-            if lvl > env + 1e-9:
+            if lvl > refresh_env_cap(route=placer.refresh.spec(v).route or 0) - placer.bootstrap_level + 1e-9:
                 k += 1
         for n in g.nodes:
             if n.hint_level is not None and s.hint_fired.get(n.idx) and n.cipher_inputs:
-                if s.consumed.get(n.cipher_inputs[0], 0.0) > env + 1e-9:
+                env_n = refresh_env_cap(n.step, route=placer.refresh.route_for(n.output) or 0) - placer.bootstrap_level
+                if s.consumed.get(n.cipher_inputs[0], 0.0) > env_n + 1e-9:
                     k += 1
         return k
 
@@ -288,6 +363,96 @@ def plan_fed_back_block0(plan_fn, graph_dir: Path | str, out_dir: Path | str) ->
     return p
 
 
+def _assign_raise_drops(g: Graph, sim: SimResult, placed: set, cfg: PlanConfig,
+                        refresh=None) -> tuple[dict[str, int], dict[str, int]]:
+    """Per placed site, the composite levels its raise can stop short of the chain top.
+
+    Walks the refreshed value forward to the next refresh on every path. slack = the room
+    the deepest reached refresh input leaves under max_level (nominal) and under the refresh
+    envelope (effective, pending rescale included). Paths ending at a block output / cache
+    write (nothing refreshes them inside the block), or at a hint (its firing level is
+    decided at runtime), disqualify the site. Deliberate (fold) bootstraps count as refreshes.
+    Returns ({var: drop}, {reason: count}).
+    """
+    import collections
+    from .place import refresh_env_cap as _refresh_env_cap
+    unit = float(cfg.level_unit) or 1.0
+    L = float(cfg.max_level - cfg.bootstrap_level)
+    env_rel = _refresh_env_cap() - cfg.bootstrap_level
+    consumers: dict[str, list] = collections.defaultdict(list)
+    for n in g.nodes:
+        for i in n.inputs:
+            consumers[i].append(n)
+    drops: dict[str, int] = {}
+    skipped: dict[str, int] = collections.Counter()
+    for p in sorted(placed):
+        stack, seen, ends, sink, hint = [p], {p}, [], False, False
+        while stack:
+            x = stack.pop()
+            cs = consumers.get(x, [])
+            if not cs:
+                sink = True
+                continue
+            for n in cs:
+                if n.hint_level is not None:
+                    hint = True
+                    continue
+                if getattr(n, "is_deliberate_bts", False):
+                    ends.append(x)          # the fold's INPUT is what meets the envelope
+                    continue
+                y = n.output
+                if not y:
+                    sink = True             # cache write / store: leaves the block at this level
+                    continue
+                if y in seen:
+                    continue
+                seen.add(y)
+                if y in placed:
+                    ends.append(y)
+                    continue
+                stack.append(y)
+        if sink:
+            skipped["sink"] += 1
+            continue
+        if hint:
+            skipped["hint_downstream"] += 1
+            continue
+        if not ends:
+            skipped["no_consumer"] += 1
+            continue
+        # A placed site's `consumed` is its LANDING (the sim overwrites the output with the
+        # refreshed level); the level its refresh STARTS at is node_out of the producing node.
+        # The pending-rescale degree at that point is not kept, so assume deg 2 (one unit).
+        def in_level(c: str) -> float:
+            if c in placed and c in g.producer_of:
+                return sim.node_out.get(g.producer_of[c].idx, sim.consumed.get(c, 0.0))
+            return sim.consumed.get(c, 0.0)
+        # each downstream refresh meets its own route's envelope (PLAN_REFRESH_ENV_CAP_ROUTES); a deliberate one is
+        # dense
+        def env_of(c: str) -> float:
+            if refresh is None:
+                return env_rel
+            return _refresh_env_cap(route=int(refresh.spec(c).route or 0) if c in placed else 0) - cfg.bootstrap_level
+        rule = float(cfg.level_unit) if cfg.raise_drop_env_rule != "nominal" else 0.0
+        slack = min(min(L - in_level(c), env_of(c) - in_level(c) - rule) for c in ends)
+        k = min(cfg.raise_drop_max, int(math.floor(slack / unit + 1e-9)))
+        if refresh is not None and int(refresh.spec(p).route or 0) not in cfg.raise_drop_routes:
+            skipped["route"] += 1
+            continue
+        if refresh is not None and cfg.raise_drop_landing_max is not None:
+            s = refresh.spec(p)
+            restore = float(g.level_unit) if s.prescale is not None else 0.0
+            landing = cfg.bootstrap_level + s.out_consumed - restore
+            k = min(k, int(math.floor((cfg.raise_drop_landing_max - landing) / unit + 1e-9)))
+        if cfg.raise_drop_set:
+            k = max((a for a in cfg.raise_drop_set if a <= k), default=0)
+        if k <= 0:
+            skipped["no_slack"] += 1
+            continue
+        drops[p] = k
+    return drops, dict(skipped)
+
+
 def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
                entry_level: int | None = None,
                entry_deg: int | None = None,
@@ -322,11 +487,21 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
             if v not in first_consumer_seed and n.output_level is not None:
                 first_consumer_seed[v] = float(n.output_level) - n.cost
 
+    # With an `entry_level`, the unnamed graph inputs other than the block input are K/V cache reads: they keep the
+    # captured level, at degree 2
+    entry_var = next((v for n in g.nodes for v in n.inputs if v in g.inputs), None)
+
+    def is_cache_side_input(v: str) -> bool:
+        return (entry_level is not None and v != entry_var and v.startswith("anon_")
+                and v in input_level_of)
+
     def seed_consumed(v: str) -> float:
         exp = parse_lvl_suffix(v)
         if "cache." in v:
             lv = exp if exp is not None else cfg.cache_read_level
             return lv - cfg.bootstrap_level
+        if is_cache_side_input(v):
+            return input_level_of[v] - cfg.bootstrap_level
         if entry_level is not None:
             return entry_level - cfg.bootstrap_level
         if v in first_consumer_seed:
@@ -338,7 +513,7 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
         return cfg.source_level - cfg.bootstrap_level
 
     def seed_deg(v: str) -> int:
-        if "cache." in v:
+        if "cache." in v or is_cache_side_input(v):
             return 2
         if entry_deg is not None:
             return entry_deg
@@ -502,12 +677,60 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
             log.info(f"[plan] rescale_opt: {len(rescale_anchors)} realize anchor(s), "
                   f"bootstraps {base} -> {best}")
 
+    if cfg.shared_realize and exact:
+        hint_outs = {n.output for n in g.nodes if n.hint_level is not None and n.output}
+        best_sr = len(placer.placed) + sum(1 for f in sim.hint_fired.values() if f)
+        base_sr, n_sr = best_sr, 0
+        for _ in range(6):
+            cands = _shared_candidates(g, sim, hint_outs, placer.placed) - rescale_anchors
+            if not cands:
+                break
+            trial = rescale_anchors | cands
+            p2 = PlacerCls(**{**placer_kwargs, "verbose": False}, realized=set(trial), hint_force=hint_force)
+            try:
+                s2 = p2.run()
+            except PlanInfeasible:
+                break
+            c2 = len(p2.placed) + sum(1 for f in s2.hint_fired.values() if f)
+            if c2 <= best_sr:
+                rescale_anchors, sim, placer, best_sr = trial, s2, p2, c2
+                n_sr += len(cands)
+            else:
+                break
+        if cfg.verbose:
+            log.info(f"[plan] shared_realize: {n_sr} shared-operand realize anchor(s), bootstraps {base_sr} -> {best_sr}")
+
+    if cfg.ks_realize and exact:
+        hint_outs = {n.output for n in g.nodes if n.hint_level is not None and n.output}
+
+        def _count_ks(s: SimResult, p: Placer) -> int:
+            return len(p.placed) + sum(1 for f in s.hint_fired.values() if f)
+
+        best_ks = _count_ks(sim, placer)
+        base_ks, n_ks = best_ks, 0
+        for _ in range(6):               # a ladder realized at its root makes its later steps deg-1: re-derive
+            cands = _ks_candidates(g, sim, hint_outs, placer.placed) - rescale_anchors
+            if not cands:
+                break
+            trial = rescale_anchors | cands
+            p2 = PlacerCls(**{**placer_kwargs, "verbose": False}, realized=set(trial),
+                           hint_force=hint_force)
+            try:
+                s2 = p2.run()
+            except PlanInfeasible:
+                break
+            c2 = _count_ks(s2, p2)
+            if c2 <= best_ks:
+                rescale_anchors, sim, placer, best_ks = trial, s2, p2, c2
+                n_ks += len(cands)
+            else:
+                break
+        if cfg.verbose:
+            log.info(f"[plan] ks_realize: {n_ks} key-switch realize anchor(s), bootstraps {base_ks} -> {best_ks}")
+
     if cfg.prune:
-        # A forced site (the terminal-exit refresh of plan_graph_dir's retry) has no consumer
-        # inside its own block that needs it, so the prune would always take it back out and
-        # the retry could never move the next block's entry.
-        keep = set(cfg.prune_keep) | set(force_place or ())
-        sim, n_pruned = _prune_redundant(placer, sim, keep)
+        # forced sites stay (the exit refresh of the terminal-exit retry is needed by the next block)
+        sim, n_pruned = _prune_redundant(placer, sim, tuple(cfg.prune_keep) + tuple(force_place or ()))
         if hasattr(placer, "meta"):
             placer.meta["pruned"] = n_pruned
         if cfg.verbose:
@@ -546,6 +769,39 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
     # (btserr.ceiling_binds). Counted over the sites that carry a CF in the plan (placed +
     # fired hints = emit's quality_sites, so num_sites == sum(cf_histogram)). Written into
     # summary.bts_quality after assemble (additive summary keys; see plan_equiv.py).
+    # ---- level-aware ModRaise post-pass (see PlanConfig.raise_drop_max) ----
+    raise_hist: dict[int, int] = {}
+    raise_skipped: dict[str, int] = {}
+    if cfg.raise_drop_max > 0 and exact:
+        drops, raise_skipped = _assign_raise_drops(g, sim, set(placer.placed), cfg, refresh)
+        if drops:
+            saved_cache = dict(refresh._cache)
+            saved_overrides = dict(refresh.site_out_levels)
+            for v, k in drops.items():
+                s = refresh.spec(v)
+                restore = float(g.level_unit) if s.prescale is not None else 0.0
+                base_abs = cfg.bootstrap_level + s.out_consumed - restore
+                refresh.site_out_levels[v] = int(round(base_abs + k * cfg.level_unit))
+                refresh._cache.pop(v, None)
+            sim2 = placer._sim()
+            bad = [v for v, c in sim2.consumed.items()
+                   if cfg.bootstrap_level + math.ceil(c) > cfg.max_level]
+            if bad:
+                log.warning(f"[plan] raise_drop: re-simulation pushed {len(bad)} var(s) past "
+                            f"max_level ({', '.join(bad[:4])}) — keeping the full raise everywhere")
+                refresh._cache = saved_cache
+                refresh.site_out_levels = saved_overrides
+                drops = {}
+            else:
+                sim = sim2
+        for k in drops.values():
+            raise_hist[k] = raise_hist.get(k, 0) + 1
+        if cfg.verbose:
+            log.info(f"[plan] raise_drop: {len(drops)} of {len(placer.placed)} placed sites raise "
+                     f"below the chain top; levels->sites "
+                     + " ".join(f"{k}:{c}" for k, c in sorted(raise_hist.items()))
+                     + (f"; skipped {raise_skipped}" if raise_skipped else ""))
+
     clamp = refresh.cf_clamp_report(sorted(set(placer.placed) | fired_hints))
     if diagnostics is not None:
         diagnostics.cf_clamp = clamp
@@ -580,6 +836,10 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
     # pass through it, hence this check covers both.
     from .place import refresh_env_cap as _refresh_env_cap
     _ENV_CAP = _refresh_env_cap()
+
+    def _cap_of(v: str) -> float:          # the envelope of the step that produces `v` (PLAN_REFRESH_ENV_CAP_STEPS)
+        _pn = g.producer_of.get(v)
+        return _refresh_env_cap(getattr(_pn, "step", None) if _pn is not None else None)
     _bad_cut, _bad_hint = [], []
     # A var past the envelope that nothing refreshes is NOT harmless: the runtime meets it
     # there and fires a REACTIVE bootstrap, which is the one class neither the cut nor the
@@ -587,13 +847,28 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
     _hint_covered = {n.output for n in g.nodes
                      if n.hint_level is not None and sim.hint_fired.get(n.idx) and n.output}
     _bad_reactive = []
+    _bad_nom: dict[str, float] = {}      # nominal input level of each entry in _bad_cut (eff = nominal + pending unit)
+    _refresh_obj = getattr(placer, "refresh", None)
     for _v, _c in sim.consumed.items():
-        _eff = cfg.bootstrap_level + _c + (cfg.level_unit if sim.deg.get(_v, 1) == 2 else 0)
-        if _eff <= _ENV_CAP:
-            continue
         if _v in placer.placed:
-            _bad_cut.append((_v, _eff))
-        elif _v not in _hint_covered:
+            # a placed site's `consumed` is its LANDING; the envelope applies to the level its refresh STARTS
+            # at. Cut-chosen dense sites only: a deliberate fixed point is the capture's, a hint has its own
+            # check below, and the envelope was measured on the dense route (a sparse route tolerates a
+            # deeper input; its ceiling stays the runtime guard's, as before).
+            _p = g.producer_of.get(_v)
+            _sparse = _refresh_obj is not None and bool(_refresh_obj.spec(_v).route)
+            if _p is None or _p.is_deliberate_bts or _p.hint_level is not None or _sparse:
+                continue
+            _nom, _deg = sim.input_state(g, _v)
+            _eff = cfg.bootstrap_level + _nom + (cfg.level_unit if _deg == 2 else 0)
+            if _eff > _cap_of(_v) + 1e-9:
+                _bad_cut.append((_v, _eff))
+                _bad_nom[_v] = cfg.bootstrap_level + _nom
+            continue
+        _eff = cfg.bootstrap_level + _c + (cfg.level_unit if sim.deg.get(_v, 1) == 2 else 0)
+        if _eff <= _cap_of(_v):
+            continue
+        if _v not in _hint_covered:
             _bad_reactive.append((_v, _eff))
     # Hint-fired refreshes: `hint_fired` is keyed by node index, and the depth that
     # matters is the level of the ct entering the hint (its input var) — the hint's own
@@ -608,7 +883,7 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
             continue
         _eff = (cfg.bootstrap_level + sim.consumed.get(_in, 0.0)
                 + (cfg.level_unit if sim.deg.get(_in, 1) == 2 else 0))
-        if _eff > _ENV_CAP:
+        if _eff > _refresh_env_cap(_n.step):
             _bad_hint.append((_n.output or _in, _eff))
     if _bad_hint and cfg.verbose:
         log.info(f"[plan] P3c(hint): {len(_bad_hint)} hint-fired refresh(es) PREDICTED past the "
@@ -626,14 +901,27 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
             f"stands between this plan and a wrong answer:\n  "
             + ", ".join(f"{v}@{l:g}" for v, l in _bad_cut[:6]))
     elif _bad_cut:
-        _msg = (f"P3c violated: {len(_bad_cut)} CUT-CHOSEN refresh(es) start past the "
-                f"measured envelope (abs level > {_ENV_CAP:g}) — a bootstrap there returns "
-                f"GARBAGE SILENTLY (rel_err 1.96e4 at level 50 vs 3.7e-1 at 48).\n  "
-                + ", ".join(f"{v}@{l:g}" for v, l in _bad_cut[:6])
-                + "  -> lower --max-level (ceiling is REFRESH_ENV_CAP_ABS + level_unit"
-                  f" = {_ENV_CAP + cfg.level_unit:g}), or PLAN_HARD_ENV_CAP=0 to allow"
-                  " (the 32-bit recipe does; the envelope is then the runtime guard's).")
-        raise PlanInfeasible(_msg)
+        # Cut-chosen sites priced inside the envelope that the FINAL sim puts past it: a later cut disarmed
+        # a hint upstream, or the raise-drop pass moved a landing below them. The cut never saw them
+        # there. The runtime guard reads the nominal level, so a site past the envelope only by its
+        # pending rescale runs (the shipped recipes carry such sites: report), while a nominal level past
+        # the cap stops the run with [bts_depth_error] (warn). PLAN_DRIFT_RECUT=1 re-cuts both.
+        _forced = getattr(placer, "drift_forced", set())
+        _stop = [(v, l) for v, l in _bad_cut if _bad_nom.get(v, l) > _cap_of(v) + 1e-9]
+        _pend = [(v, l) for v, l in _bad_cut if _bad_nom.get(v, l) <= _cap_of(v) + 1e-9]
+        _tail = (f" ({sum(1 for v, _ in _bad_cut if v in _forced)} with no envelope-respecting cover)"
+                 if _forced else "") + "; PLAN_DRIFT_RECUT=1 re-cuts them."
+        if _stop:
+            log.warning(
+                f"[plan] P3c(drift): {len(_stop)} cut-chosen refresh(es) priced inside the envelope now "
+                f"start past it NOMINALLY (level > {_ENV_CAP:g}) in the final sim -- the runtime "
+                "[bts_depth_error] guard stops the run there: "
+                + ", ".join(f"{v}@{l:g}" for v, l in _stop[:6]) + _tail)
+        if _pend and cfg.verbose:
+            log.info(
+                f"[plan] P3c(drift): {len(_pend)} cut-chosen refresh(es) priced inside the envelope now "
+                f"start past it by their pending rescale (nominal <= {_ENV_CAP:g}, within the runtime "
+                "guard) in the final sim: " + ", ".join(f"{v}@{l:g}" for v, l in _pend[:6]) + _tail)
 
     # P4 — LINEAGE COVERAGE.
     # A branch that fed an over-budget op but was NEVER eligible for a cut is a branch the
@@ -667,34 +955,37 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
         placer_meta=getattr(placer, "meta", None),
         boundary_realize=cfg.boundary_realize,
         realize_anchors=rescale_anchors,
+        real_route=cfg.real_route,
     )
     # Refresh-input absolute levels of the placed sites: what the pricing knobs move.
     # eff = nominal + pending rescale, as _capacity sees it.
     _hist: dict[str, int] = {}
     for _v in placer.placed:
-        _c = placer.placed_in_eff.get(_v)          # forced/pinned sites never went through the cut
-        if _c is None:
-            _c = sim.consumed.get(_v, 0.0) + (cfg.level_unit if sim.deg.get(_v, 1) == 2 else 0)
+        _c = sim.input_eff(g, _v, cfg.level_unit)   # the final sim, not the level the cut priced
         _key = str(int(cfg.bootstrap_level + _c))
         _hist[_key] = _hist.get(_key, 0) + 1
     _hist = dict(sorted(_hist.items(), key=lambda kv: int(kv[0])))
     result["summary"]["bts_quality"]["placed_input_level_hist"] = _hist
+    result["summary"]["bts_quality"]["raise_drop_hist"] = {str(k): c for k, c in sorted(raise_hist.items())}
+    result["summary"]["bts_quality"]["raise_drop_skipped"] = raise_skipped
     if cfg.verbose:
         log.info("[plan] placed_input_level_hist " + " ".join(f"{k}:{c}" for k, c in _hist.items()))
     result["summary"]["bts_quality"]["blind_branches"] = {
         "count": len(result_blind),
         "vars": result_blind[:32],
     }
-    # The absolute level the sim PREDICTS each placed refresh starts at, so a run can be
-    # audited against it (scripts/utils/bts_level_audit.py). The runtime prints the level it
-    # actually met as `[planted_bts] ... in=`; the two disagreeing is how a refresh ends up
-    # past the envelope on a plan that looked clean, which no placement policy can catch.
-    # (placed_input_level_hist holds the histogram of the same levels.)
-    result["summary"]["bts_quality"]["placed_input_levels"] = {
-        v: cfg.bootstrap_level + sim.consumed.get(v, 0.0)
-           + (cfg.level_unit if sim.deg.get(v, 1) == 2 else 0)
-        for v in sorted(placer.placed)
-    }
+    # The absolute level and pending-rescale degree the sim PREDICTS each placed refresh starts
+    # at, so a run can be audited against it (scripts/utils/bts_level_audit.py). The runtime
+    # prints what it actually met as `[planted_bts] ... in=<level> ... in_deg=<deg>`; the two
+    # disagreeing is how a refresh ends up past the envelope on a plan that looked clean, which
+    # no placement policy can catch. (placed_input_level_hist holds the effective levels, level
+    # plus one unit when a rescale is pending, which is what the envelope is measured in.)
+    result["summary"]["bts_quality"]["placed_input_levels"] = {}
+    result["summary"]["bts_quality"]["placed_input_degs"] = {}
+    for v in sorted(placer.placed):
+        _lvl, _deg = sim.input_state(g, v)
+        result["summary"]["bts_quality"]["placed_input_levels"][v] = float(cfg.bootstrap_level + _lvl)
+        result["summary"]["bts_quality"]["placed_input_degs"][v] = int(_deg)
     if _bad_reactive:
         log.warning(
             f"[plan] P3c(reactive): {len(_bad_reactive)} var(s) are predicted past the envelope "
@@ -704,6 +995,10 @@ def plan_block(graph_file: Path | str, cfg: PlanConfig, *,
             + "  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it "
             "bounds a PLACED refresh's input depth, and these are precisely the vars nothing "
             "places.)")
+        # PLAN_REACTIVE_STRICT=1: refuse the block, so the chain retries the previous one with an exit refresh
+        if os.environ.get("PLAN_REACTIVE_STRICT", "0") not in ("", "0"):
+            raise PlanInfeasible(f"P3c(reactive): {len(_bad_reactive)} var(s) past the envelope with no refresh: "
+                                 + ", ".join(f"{v}@{l:g}" for v, l in _bad_reactive[:6]))
     result["summary"]["bts_quality"]["env_cap"] = {
         "limit": _ENV_CAP,
         "relaxed": bool(getattr(placer, "env_cap_relaxed", False)),
