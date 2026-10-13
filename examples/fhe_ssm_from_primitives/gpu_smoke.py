@@ -30,7 +30,7 @@ import traceback
 
 import numpy as np
 
-from . import filling
+from . import filling, port_env
 from . import scales as scales_mod
 from .model import PAYLOADS, FheSsmModel
 from .ref import ExactModel, MirrorModel, rel_err_rms
@@ -137,6 +137,7 @@ def open_session(params, *, logn=16, auto_bts_level=46):
     complex slots, the diagonal packing (its ``pack_tokens`` is the filled layout's encode,
     filling.py) and the filled layout's rotation steps as extra keys. Needs the CUDA
     extension (perseus._core); a context manager (``with open_session(...) as s:``)."""
+    port_env()
     for k, v in SMOKE_ENV.items():
         os.environ.setdefault(k, v)
     from perseus import _backend, session

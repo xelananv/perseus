@@ -8,3 +8,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+
+from examples.fhe_ssm_from_primitives import port_env  # noqa: E402
+
+port_env()  # the plain ladder, as the runners export it

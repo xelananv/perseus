@@ -34,6 +34,7 @@ import numpy as np
 import perseus
 from perseus.impl import fake
 
+from . import port_env
 from . import scales as scales_mod
 from .geometry import ROUTES
 from .model import LAYOUTS, PAYLOADS, FheSsmModel
@@ -58,6 +59,7 @@ def make_session(
 ):
     if rules not in RULES:
         raise ValueError(f"rules must be one of {RULES}, got {rules!r}")
+    port_env()
     make = make_runtime_fake if rules == "runtime" else fake.make_fake
     return make(
         N=1 << (logn - 1),

@@ -33,3 +33,16 @@ approximation are separable, the convention of examples/gpt2_from_primitives.
     ref         float64 references
     run_fake    the CPU driver: ticks on the numpy fake against the references
 """
+
+import os
+
+#: The rotate-and-sum ladders run plain on both routes. ``perseus.impl.layout`` hoists radix groups by
+#: default on the fake (``LADDER_RADIX_BITS`` 3, where it has the groups' rotation keys) while the C++
+#: ``rotate_and_sum`` does not unless the variable is exported, and this example's rotation counts, plans
+#: and measurements are the plain ladder's on both; its layout carries no keys for the groups.
+LADDER_RADIX_BITS = "0"
+
+
+def port_env() -> None:
+    """Export the switches this example pins on both routes, before a session or a fake is made."""
+    os.environ["LADDER_RADIX_BITS"] = LADDER_RADIX_BITS

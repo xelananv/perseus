@@ -23,6 +23,8 @@ from __future__ import annotations
 
 from perseus.impl import fake
 
+from . import port_env
+
 
 class RuntimeFakeFhe(fake.FakeFhe):
     def eff(self, a):
@@ -129,6 +131,7 @@ def make_runtime_fake(
     plaintext-add rule of a one-prime level depends on the plaintext's level, not modelled)."""
     if unit < 2:
         raise ValueError("the runtime rules here are those of a composite chain (unit >= 2)")
+    port_env()
     fhe = RuntimeFakeFhe(
         rot_steps,
         limit=limit,

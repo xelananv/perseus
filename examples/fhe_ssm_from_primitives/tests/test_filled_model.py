@@ -115,17 +115,6 @@ def test_split_gives_twice_each_axis_without_a_level(kind):
     assert not [c for c in fhe.calls if c in PRODUCTS]
 
 
-def ladder_rotations(fhe, start, stop):
-    """Rotation calls one rotate-and-sum ladder costs on this fake: a hoisted radix group where it
-    has the keys, plain rungs elsewhere (perseus.impl.layout.ladder_chunks). Measured on a
-    throwaway ciphertext, not derived, so the tests follow the fake's own ladder."""
-    n0 = len(fhe.calls)
-    fhe.rotate_and_sum(fake.FakeCt(np.zeros(fhe.slots), 34), start, stop)
-    n = sum(c.startswith("rotate") for c in fhe.calls[n0:])
-    del fhe.calls[n0:]
-    return n
-
-
 def test_lane_route_adds_a_plaintext_to_both_axes():
     _fhe, _inf, ops = session()
     rng = np.random.default_rng(2)
@@ -447,7 +436,5 @@ def test_full_shape_block_on_pairs():
         calls.count("mult_pt") >= 14 * d
     )  # 14 tiles of 1,024 diagonals, plus the gates' constants
     linear_rotations = 2 * ((s - 1) + (g_ - 1)) + (s - 1) + 8 * (g_ - 1) + 4 * (s - 1) + (g_ - 1)
-    norm_rotations = (
-        3 * 2 * ladder_rotations(fhe, n_slots // d, n_slots)
-    )  # 3 norms (2 + the tail), 2 halves
+    norm_rotations = 3 * 2 * 10  # 3 norms (2 + the tail), 2 halves, log2(1024)
     assert sum(c.startswith("rotate") for c in calls) == linear_rotations + norm_rotations
