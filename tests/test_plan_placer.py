@@ -23,7 +23,7 @@ from pathlib import Path
 
 from perseus.plan.placer.ir import Graph
 from perseus.plan.placer.place import PlanInfeasible, erase_reactive_bootstraps
-from perseus.plan.placer.planner import PlanConfig, PlanDiagnostics, plan_block
+from perseus.plan.placer.planner import PlanConfig, PlanDiagnostics, plan_block, plan_graph_dir
 
 REAL_GRAPH = Path(os.environ.get(
     "PERSEUS_REAL_GRAPH",
@@ -114,6 +114,77 @@ class PlanBlockTest(unittest.TestCase):
         # the quality block must SHOW the non-dense landing
         hist = result["summary"]["bts_quality"]["out_level_histogram"]
         self.assertIn("12", hist)
+
+
+class RetryKeepsForcedSiteTest(unittest.TestCase):
+    """plan_graph_dir's terminal-exit retry: a block refused at its entry re-plans the previous block
+    with a forced refresh on its exit. The re-cut passes that follow (rescale_opt, shared_realize,
+    ks_realize) must start from that forced site: a trial placer built without it finds a plan one
+    refresh cheaper, is accepted, and the next block is refused again at the very entry that was
+    just repaired (the retry runs once per block, so the chain ends in PlanInfeasible)."""
+
+    CFG = PlanBlockTest.CFG   # unit 1: refreshes land at 16, the ceiling is 24, products keep one level of margin
+
+    def _dir(self, variant) -> Path:
+        d = Path(tempfile.mkdtemp(prefix="perseus_plan_retry_"))
+        self.addCleanup(shutil.rmtree, d, ignore_errors=True)
+        # block 0: x0 -> v_0 (a product: degree 2, its rescale pending) read in the shape the pass under
+        # test realizes once, then a product chain whose one cut refresh leaves the exit deep: the chain
+        # is sized so that the exit sits one level under the ceiling at degree 2 (effective: the ceiling)
+        nodes = [_node("mult", ["x0", "pt_w"], "v_0", 17, ilv=[16, 16], step="b0.m0", period=1)]
+        if variant == "shared_realize":      # v_0 read by two products
+            nodes += [_node("mult", ["v_0", "pt_w"], "v_1a", 18, ilv=[17, 17], step="b0.m1a", period=1),
+                      _node("mult", ["v_0", "pt_w"], "v_1b", 18, ilv=[17, 17], step="b0.m1b", period=1),
+                      _node("mult", ["v_1a", "v_1b"], "v_2", 19, ilv=[18, 18], step="b0.m2", period=1)]
+            prev, lv, first = "v_2", 19, 3
+        elif variant == "rescale_opt":       # v_0 (degree 2) summed with x0 (degree 1)
+            nodes += [_node("add", ["v_0", "x0"], "v_1", 17, ilv=[17, 16], step="b0.a1", period=1),
+                      _node("mult", ["v_1", "pt_w"], "v_2", 18, ilv=[17, 17], step="b0.m2", period=1)]
+            prev, lv, first = "v_2", 18, 3
+        else:                                # ks_realize: a rotation reads v_0 (degree 2)
+            assert variant == "ks_realize"
+            nodes += [_node("rotate", ["v_0"], "v_1", 17, ilv=[17], step="b0.r1", period=1),
+                      _node("mult", ["v_1", "pt_w"], "v_2", 18, ilv=[17, 17], step="b0.m2", period=1)]
+            prev, lv, first = "v_2", 18, 3
+        last = 16 if variant == "shared_realize" else 17
+        for i in range(first, last + 1):
+            nodes.append(_node("mult", [prev, "pt_w"], f"v_{i}", lv + 1, ilv=[lv, lv],
+                               step=f"b0.m{i}", period=1))
+            prev, lv = f"v_{i}", lv + 1
+        (d / "block_0").mkdir()
+        (d / "block_0" / "graph.json").write_text(json.dumps({"version": 1, "nodes": nodes}))
+        # block 1: one product on the block input, in a step the configuration forbids a refresh in
+        # (the first consumers of the real case sit past the hard envelope: equally unrepairable in
+        # place); the block input itself is never a site, so at the entry block 0 leaves without the
+        # retry the block is over budget at once
+        (d / "block_1").mkdir()
+        (d / "block_1" / "graph.json").write_text(json.dumps({"version": 1, "nodes": [
+            _node("mult", ["x0", "pt_w"], "y_0", 17, ilv=[16, 16], step="b1.m0", period=1)]}))
+        return d
+
+    def _plan(self, variant):
+        d = self._dir(variant)
+        cfg = dataclasses.replace(self.CFG, forbid_steps=("b1.",), **{variant: True})
+        out = d / "plans"
+        with self.assertLogs("perseus.plan.placer.planner", level="WARNING") as cm:
+            summaries = plan_graph_dir(d, out, cfg)
+        self.assertTrue(any("terminal-exit refresh" in m for m in cm.output),
+                        "the fixture must exercise the retry")
+        self.assertEqual(len(summaries), 2)
+        b0 = json.loads((out / "block_0_placement.json").read_text())
+        refreshed = {p["target_var"] for p in b0["placements"]}
+        self.assertIn(summaries[0]["exit_var"], refreshed, "the forced exit refresh must survive the re-cut")
+        self.assertEqual(summaries[0]["exit_level"], self.CFG.bootstrap_level)
+        self.assertTrue((out / "block_1_placement.json").is_file())
+
+    def test_shared_realize_keeps_the_forced_exit_refresh(self):
+        self._plan("shared_realize")
+
+    def test_rescale_opt_keeps_the_forced_exit_refresh(self):
+        self._plan("rescale_opt")
+
+    def test_ks_realize_keeps_the_forced_exit_refresh(self):
+        self._plan("ks_realize")
 
 
 class CfClampTest(unittest.TestCase):
