@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-import os
 import json
 import logging
 import math
+import os
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -375,6 +375,7 @@ def _assign_raise_drops(g: Graph, sim: SimResult, placed: set, cfg: PlanConfig,
     Returns ({var: drop}, {reason: count}).
     """
     import collections
+
     from .place import refresh_env_cap as _refresh_env_cap
     unit = float(cfg.level_unit) or 1.0
     L = float(cfg.max_level - cfg.bootstrap_level)
