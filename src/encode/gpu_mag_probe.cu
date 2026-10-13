@@ -215,6 +215,11 @@ void zero_limb(FIDESlib::CKKS::Limb<T>& lb) noexcept {
 
 }  // namespace
 
+std::string take_pending_cuda_error() {
+    const cudaError_t e = cudaGetLastError();
+    return e == cudaSuccess || benign_pending(e) ? std::string() : std::string(cudaGetErrorString(e));
+}
+
 void zero_plaintext_limbs(FIDESlib::CKKS::Plaintext& p) noexcept {
     using FIDESlib::CKKS::Limb;
     for (auto& part : p.c0.GPU) {

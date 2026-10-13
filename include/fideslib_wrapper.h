@@ -1888,7 +1888,8 @@ struct CKKSContext {
     // reconstruction of the coefficients and one inverse cuFFT (include/gpu_mag_probe.h).
     // Replaces the D2H snapshot + host decrypt per node (~35 ms each at ring 2^16, 93 % of a
     // capture block); borrows and copy-inheritance resolve at drain exactly as before. A failure
-    // while issuing a probe switches the probe off and the node takes the host path; a failure at
+    // while issuing a probe switches the probe off and the node takes the host path (a CUDA error
+    // left pending by earlier work stops the capture instead: it is not the probe's); a failure at
     // fetch (the device work itself) aborts the capture, since a graph with nodes that carry no
     // magnitude would plan silently worse. The [mag_lanes] live/dead report of a lane-masked
     // capture is a host-path diagnostic (lane_split reads decoded host values): nodes measured
@@ -1942,6 +1943,13 @@ struct CKKSContext {
     }
     bool mag_gpu_probe(const Ctx& ct, std::size_t node_idx, long ordinal) {
         if (!mag_gpu_enabled() || mag_gpu_failed || !ct || !ct->loaded) return false;
+        // A CUDA error that the work before this node left pending (the library polls its own launches
+        // only under FIDESLIB_ERRCHECK=1) is no failure of the probe's: the ciphertexts it would measure
+        // are suspect, and the host path would measure them all the same, so the capture stops.
+        if (const std::string pending = gpu_encode::take_pending_cuda_error(); !pending.empty())
+            throw std::runtime_error("[mag_gpu] a CUDA error pending from earlier work, before node " +
+                                     std::to_string(node_idx) + ": " + pending +
+                                     " (FIDESLIB_ERRCHECK=1 names the launch); the capture stops");
         try {
             if (!mag_gpu) mag_gpu_init();
             auto gct = std::static_pointer_cast<FIDESlib::CKKS::Ciphertext>(cc->GetDeviceCiphertext(ct->gpu));

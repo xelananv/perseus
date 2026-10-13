@@ -27,6 +27,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 namespace FIDESlib::CKKS {
@@ -42,6 +43,11 @@ namespace gpu_encode {
 // allocation); never throws, a failing memset is reported on stderr. The key's owner calls it
 // before the memory returns to the pool, whether the probe was built or its construction failed.
 void zero_plaintext_limbs(FIDESlib::CKKS::Plaintext& p) noexcept;
+
+// Consume the thread's pending CUDA error and return its text; "" when there is none, or when it is a
+// code the library itself lets through (gpu_cuda_raii.h, benign_pending). The capture asks before each
+// probe: an error that earlier work left pending is not the probe's (fideslib_wrapper.h, mag_gpu_probe).
+std::string take_pending_cuda_error();
 
 class GpuMagProbe {
   public:
