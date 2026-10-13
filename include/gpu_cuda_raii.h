@@ -39,6 +39,15 @@ inline void cufft_check(cufftResult r, const char* who, const char* what) {
 inline void note_teardown(cudaError_t e, const char* who, const char* what) noexcept {
     if (e != cudaSuccess) std::fprintf(stderr, "[%s] teardown: %s: %s\n", who, what, cudaGetErrorString(e));
 }
+// The library polls its own launches for errors only under FIDESLIB_ERRCHECK=1, so a failed library
+// launch stays pending in the thread's error slot until someone reads it. Drained before each of this
+// code's launches and named as earlier work, so that the launch check that follows reports only its
+// own launch.
+inline void drain_pending(const char* who, const char* before) {
+    if (cudaError_t e = cudaGetLastError(); e != cudaSuccess)
+        throw std::runtime_error(std::string(who) + ": a CUDA error pending from earlier work, found before " +
+                                 before + ": " + cudaGetErrorString(e));
+}
 
 // A device allocation: unique_ptr<T, DeviceFree>; T is the element type the pointer is used as.
 struct DeviceFree {

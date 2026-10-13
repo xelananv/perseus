@@ -184,7 +184,7 @@ GpuEncoder::~GpuEncoder() {
     // nothing in flight reads the buffers freed below; a drain that fails is reported, not thrown
     for (int i = 0; i < 2; ++i)
         if (s_enc_[i]) note_teardown(cudaStreamSynchronize(s_enc_[i].get()), kWho, "drain encode stream");
-    cudaGetLastError();
+    note_teardown(cudaGetLastError(), kWho, "error left pending at teardown");
 }
 
 TileId GpuEncoder::register_tile(const std::vector<double>& W, int d) {
@@ -211,7 +211,7 @@ void GpuEncoder::release_tiles() noexcept {
     // reported on stderr and the flag cleared, so the next real call reports it afresh.
     for (int i = 0; i < 2; ++i)
         if (s_enc_[i]) note_teardown(cudaStreamSynchronize(s_enc_[i].get()), kWho, "drain encode stream");
-    cudaGetLastError();
+    note_teardown(cudaGetLastError(), kWho, "error left pending at teardown");
     tiles_.clear();
     ++generation_;
 }
@@ -267,6 +267,7 @@ std::vector<std::shared_ptr<FIDESlib::CKKS::Plaintext>> GpuEncoder::encode_group
 
     // 1. K1 on the encode stream: in_[i] was last read by K2 of the batch two back, on this same stream.
     if (timing_) cudaEventRecord(tm_[i][0].get(), se);
+    drain_pending(kWho, "K1 launch");
     k_gather_expand_permute<<<grid, kThreads, 0, se>>>(k1, job.g, job.s, d_, log2t_, n_, invperm_.get(), in_[i].get());
     check(cudaGetLastError(), "K1 launch");
     if (debug_sync_) check(cudaStreamSynchronize(se), "K1");
@@ -337,6 +338,7 @@ std::vector<std::shared_ptr<FIDESlib::CKKS::Plaintext>> GpuEncoder::encode_group
         }
     } drain{se};
     if (timing_) cudaEventRecord(tm_[i][3].get(), se);
+    drain_pending(kWho, "K2 launch");
     k_twist_scale_round_reduce<<<grid, kThreads, 0, se>>>(k2, in_[i].get(), twist_.get(), job.sf, n_, nlimbs);
     check(cudaGetLastError(), "K2 launch");
     if (timing_) cudaEventRecord(tm_[i][4].get(), se);

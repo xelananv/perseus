@@ -225,7 +225,7 @@ void zero_plaintext_limbs(FIDESlib::CKKS::Plaintext& p) noexcept {
                 zero_limb(*lb64);
         }
     }
-    cudaGetLastError();
+    note_teardown(cudaGetLastError(), kWho, "error left pending after zeroing");
 }
 
 // A poly whose limbs are zeroed when the owner goes away: the key and the scratch poly (which holds
@@ -370,7 +370,7 @@ GpuMagProbe::GpuMagProbe(FIDESlib::CKKS::Context& ctx, int n_slots, std::shared_
 GpuMagProbe::~GpuMagProbe() {
     // the key, the scratch poly and the decoded buffers are wiped by Impl's teardown
     note_teardown(cudaDeviceSynchronize(), kWho, "drain");
-    cudaGetLastError();
+    note_teardown(cudaGetLastError(), kWho, "error left pending at teardown");
 }
 
 std::size_t GpuMagProbe::probe(const FIDESlib::CKKS::Ciphertext& ct) {
@@ -409,17 +409,21 @@ std::size_t GpuMagProbe::probe(const FIDESlib::CKKS::Ciphertext& ct) {
         dp.mu[l] = gp.mu[l] = I.mu[l];
     }
     const int nblocks = (I.N + kThreads - 1) / kThreads;
+    drain_pending(kWho, "k_decrypt launch");
     k_decrypt<<<dim3(nblocks, nlimbs), kThreads, 0, I.s0>>>(dp, I.N);
     check(cudaGetLastError(), "k_decrypt launch");
     I.scratch->c0.setLevel(nlimbs - 1);
     I.scratch->c0.INTT(I.cc.param.batch, true);
+    drain_pending(kWho, "k_garner launch");   // the library's INTT ran in between
     k_garner<<<nblocks, kThreads, 0, I.s0>>>(gp, nlimbs, I.N, gap, 1.0 / scale, I.coef.get(), I.pmax.get(),
                                              I.pmax_ac.get());
     check(cudaGetLastError(), "k_garner launch");
+    drain_pending(kWho, "k_twist_sub launch");
     k_twist_sub<<<(slots + kThreads - 1) / kThreads, kThreads, 0, I.s0>>>(I.coef.get(), I.tw.get(), I.n, gap, slots,
                                                                           I.X.get());
     check(cudaGetLastError(), "k_twist_sub launch");
     if (slots > 1) check_fft(cufftExecZ2Z(I.plan_for(slots), I.X.get(), I.X.get(), CUFFT_INVERSE), "cufftExecZ2Z");
+    drain_pending(kWho, "k_stats launch");   // cuFFT ran in between
     k_stats<<<1, kStatsThreads, 0, I.s0>>>(I.X.get(), slots, I.pmax.get(), I.pmax_ac.get(), nblocks,
                                            I.results.get() + I.count);
     check(cudaGetLastError(), "k_stats launch");
@@ -443,6 +447,7 @@ std::vector<std::vector<uint64_t>> GpuMagProbe::debug_decrypt(const FIDESlib::CK
         dp.mu[l] = I.mu[l];
     }
     const int nblocks = (I.N + kThreads - 1) / kThreads;
+    drain_pending(kWho, "k_decrypt launch");
     k_decrypt<<<dim3(nblocks, nlimbs), kThreads, 0, I.s0>>>(dp, I.N);
     check(cudaGetLastError(), "k_decrypt launch");
     I.scratch->c0.setLevel(nlimbs - 1);
