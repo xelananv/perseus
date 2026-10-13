@@ -36,13 +36,17 @@ approximation are separable, the convention of examples/gpt2_from_primitives.
 
 import os
 
-#: The rotate-and-sum ladders run plain on both routes. ``perseus.impl.layout`` hoists radix groups by
-#: default on the fake (``LADDER_RADIX_BITS`` 3, where it has the groups' rotation keys) while the C++
-#: ``rotate_and_sum`` does not unless the variable is exported, and this example's rotation counts, plans
-#: and measurements are the plain ladder's on both; its layout carries no keys for the groups.
+#: The rotate-and-sum ladders run plain on both routes. The two routes read ``LADDER_RADIX_BITS`` with
+#: different defaults (3 in ``perseus.impl.layout``, so the fake hoists radix groups; 0 in the C++
+#: ``rotate_and_sum``), and either hoists a group wherever the session holds its rotation keys, which
+#: this layout's own steps do for two of the norm ladder's three multi-rung groups at d = 1,024. One
+#: value on both routes keeps the fake's counts a GPU session's; the plain ladder is what was measured.
 LADDER_RADIX_BITS = "0"
 
 
 def port_env() -> None:
-    """Export the switches this example pins on both routes, before a session or a fake is made."""
+    """Export the switches this example pins on both routes, before a session or a fake is made.
+
+    The write is process-wide, and the C++ reads the variable once, at its first ladder: run this
+    example in a process of its own (its runners are), or set the variable before any model runs."""
     os.environ["LADDER_RADIX_BITS"] = LADDER_RADIX_BITS

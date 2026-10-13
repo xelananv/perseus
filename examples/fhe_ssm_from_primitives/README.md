@@ -176,8 +176,11 @@ code, checked at the full shape in `tests/test_filled_model.py`): 336 tiles x 1,
 plaintext products for the linears; 598 rotations per block (558 for the linears, 40 for two norms
 on two halves) plus 20 for the final norm; 11 conjugations per block plus 1. The norms' ladders are
 the plain ten rungs on both routes: the example exports `LADDER_RADIX_BITS=0` before a session or a
-fake is made (`port_env`), since Perseus's fake hoists radix groups by default where it has the
-keys and the C++ `rotate_and_sum` does not, and the layout carries no keys for the groups.
+fake is made (`port_env`). The two routes read that variable with different defaults (Perseus's fake
+hoists radix groups, the C++ `rotate_and_sum` does not), and either hoists a group wherever the
+session holds its rotation keys, which this layout's own steps do for two of the norm ladder's three
+groups; one value on both keeps the fake's counts a GPU session's, and the plain ladder is what was
+measured. The C++ reads the variable once per process, so the example runs in a process of its own.
 
 **Parking**: fewer conversations than the capacity are filled with copies of conversation 0
 (`geometry.park`). A lane left at zero enters every norm below the Newton seed's window and its
