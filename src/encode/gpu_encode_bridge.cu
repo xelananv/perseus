@@ -164,7 +164,9 @@ std::vector<Ptx> Bridge::encode_group(const std::vector<TileId>& tile_ids, const
                 inf_.fhe->tag_plaintext_top(pt);
                 inf_.fhe->name_pt_if_absent(pt, names[b]);
             }
-            issued_.emplace(static_cast<const void*>(pt.get()), std::weak_ptr<PtxImpl>(pt));
+            // insert_or_assign: a handle dropped on another thread between prune_dropped() and this allocation
+            // can hand the address back, and its expired entry must not outlive the new facade
+            issued_.insert_or_assign(static_cast<const void*>(pt.get()), std::weak_ptr<PtxImpl>(pt));
             out.push_back(std::move(pt));
         }
     } catch (...) {

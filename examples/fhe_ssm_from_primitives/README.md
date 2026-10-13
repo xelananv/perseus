@@ -126,14 +126,10 @@ tests build directory, no further environment); the repository's CI has no GPU r
 run by hand. `python examples/fhe_ssm_from_primitives/lint.py --check` runs ruff and mypy over
 this directory with its own, stricter configuration.
 
-Two known limits of the device route's bookkeeping, noted rather than changed for now. The
-bridge records a new device plaintext with `emplace` (`src/encode/gpu_encode_bridge.cu`,
-`encode_group`): if another Python thread drops a handle after the bridge's prune and before the
-new facade is allocated, and the allocator reuses that address, the stale entry stays and a later
-`evict_ptx` of the new plaintext is refused; `insert_or_assign` is the fix. This example drives
-its session from one thread and never meets it. And a tile fetched back off the device
-(`EncodedTile.with_rows`) is fetched on every `apply_tiles` call that cannot take the device
-route, not once per tile; on the composite chain this example ships on, no call takes that path.
+One known limit of the device route's bookkeeping, noted rather than changed for now: a tile
+fetched back off the device (`EncodedTile.with_rows`) is fetched on every `apply_tiles` call that
+cannot take the device route, not once per tile; on the composite chain this example ships on, no
+call takes that path.
 
 ## Colab
 

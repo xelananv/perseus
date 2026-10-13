@@ -179,9 +179,10 @@ int main(int argc, char** argv) {
     const bool tags_equal = t_ref.slots == t_dev.slots && t_ref.period == t_dev.period
         && t_ref.support.kind == t_dev.support.kind && t_ref.support.offset == t_dev.support.offset
         && t_ref.support.stride == t_dev.support.stride && t_ref.support.count == t_dev.support.count
-        && t_ref.support.width == t_dev.support.width;
-    std::printf("{\"probe\":\"tag\",\"equal\":%d,\"slots\":%d,\"period\":%d,\"dense\":%d}\n", (int)tags_equal,
-                t_dev.slots, t_dev.period, (int)t_dev.support.is_dense());
+        && t_ref.support.width == t_dev.support.width
+        && t_ref.field == t_dev.field;   // the payload field: the planner's real-payload route reads it
+    std::printf("{\"probe\":\"tag\",\"equal\":%d,\"slots\":%d,\"period\":%d,\"dense\":%d,\"field\":%d}\n",
+                (int)tags_equal, t_dev.slots, t_dev.period, (int)t_dev.support.is_dense(), (int)t_dev.field);
     fhe->forget_pt(mypt);
     cc->EvictDevicePlaintext(handle);
     return (mm_nat == 0 || mm_rev == 0) && max_dd < 1e-9 && tags_equal ? 0 : 1;
