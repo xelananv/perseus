@@ -302,5 +302,38 @@ def test_collecting_this_example_sets_no_environment():
     assert r.stdout.strip() == "None"
 
 
+def test_a_test_here_marked_gpu_stops_collection(tmp_path):
+    """The conftest's guard, run as pytest runs it: an item of this directory that carries the gpu
+    marker (which tests/gpu/conftest.py gives to any path containing "gpu") stops collection rather
+    than being deselected in silence by the default ``-m 'not gpu'``."""
+    tests = tmp_path / "tests"
+    tests.mkdir()
+    (tests / "conftest.py").write_text(Path(__file__).with_name("conftest.py").read_text())
+    (tests / "test_swept.py").write_text(
+        "import pytest\n\n\n@pytest.mark.gpu\ndef test_x():\n    pass\n"
+    )
+    (tmp_path / "pytest.ini").write_text("[pytest]\nmarkers =\n    gpu: a GPU test\n")
+    r = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            "-q",
+            "-p",
+            "no:cacheprovider",
+            "-m",
+            "not gpu",
+            str(tests),
+        ],
+        cwd=tmp_path,
+        env={**os.environ, "PYTHONPATH": str(ROOT)},
+        capture_output=True,
+        text=True,
+        check=False,  # the exit status is the assertion
+    )
+    assert r.returncode == 4, r.stdout + r.stderr  # a usage error, not "1 deselected"
+    assert "test_swept.py::test_x" in r.stdout + r.stderr
+
+
 def test_the_capture_environment_does_not_leak_between_tests():
     assert os.environ.get("FHE_GRAPH_DIR") in (None, "before")
