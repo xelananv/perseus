@@ -7,6 +7,7 @@ module."""
 import json
 import os
 import re
+import shlex
 from pathlib import Path
 
 import numpy as np
@@ -176,6 +177,45 @@ def test_planning_without_a_capture_is_refused(tmp_path):
         plan.main(["--graph-dir", str(tmp_path), "--name", "x"])
     with pytest.raises(SystemExit, match=r"capture_env\.json"):
         plan.stamp(tmp_path, [])
+
+
+def test_plan_cmd_records_the_recipe_and_the_plans_switches(tmp_path):
+    env = plan.plan_env("graphs/x", "n", {"PLAN_SPARSE_SLOTS": ""})
+    a = tmp_path / "block_0_placement.json"
+    b = tmp_path / "block_1_placement.json"
+    a.write_text(
+        json.dumps({"placements": [], "real_route": ["v_1"], "raise_drop": {"v_2": 3, "v_3": 1}})
+    )
+    b.write_text(json.dumps({"placements": []}))
+    plan.write_plan_cmd(tmp_path, "graphs/x", {**env, "PLAN_HARD_ENV_CAP": "1"}, [a, b])
+    lines = (tmp_path / "PLAN_CMD.txt").read_text().splitlines()
+    assert lines[0] == "graph=graphs/x"
+    recipe = dict(kv.split("=", 1) for kv in shlex.split(lines[1][len("recipe=") :]))
+    assert recipe["PLAN_SPARSE_SLOTS"] == ""
+    assert recipe["PLAN_HARD_ENV_CAP"] == "1"
+    assert "GRAPH_DIR" not in recipe
+    assert "OUT_NAME" not in recipe
+    assert {k: v for k, v in recipe.items() if k in plan.RECIPE} == {
+        k: v for k, v in env.items() if k in plan.RECIPE
+    }
+    assert plan.plan_runtime(tmp_path) == {
+        "FIDESLIB_BTS_REAL": "1",
+        "FIDESLIB_BTS_RAISE_DROPS": "1,3",
+    }
+    # plans without those routes declare nothing, and a directory without the file declares nothing
+    plan.write_plan_cmd(tmp_path, "graphs/x", env, [b])
+    assert plan.plan_runtime(tmp_path) == {}
+    assert plan.plan_runtime(tmp_path / "missing") == {}
+
+
+def test_planned_runs_export_the_plans_switches_unless_already_set(tmp_path):
+    (tmp_path / "PLAN_CMD.txt").write_text(
+        "graph=g\nrecipe=\nruntime=FIDESLIB_BTS_REAL=1 FIDESLIB_BTS_RAISE_DROPS=1,3\n"
+    )
+    environ = {"FIDESLIB_BTS_RAISE_DROPS": "1,3,5"}
+    got = plan.export_plan_runtime(tmp_path, environ)
+    assert got == {"FIDESLIB_BTS_REAL": "1", "FIDESLIB_BTS_RAISE_DROPS": "1,3"}
+    assert environ == {"FIDESLIB_BTS_RAISE_DROPS": "1,3,5", "FIDESLIB_BTS_REAL": "1"}
 
 
 def test_the_capture_environment_does_not_leak_between_tests():

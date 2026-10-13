@@ -32,6 +32,7 @@ from pathlib import Path
 import numpy as np
 
 from . import filling
+from . import plan as plan_mod
 from . import scales as scales_mod
 from .calibrate import streams_from_record
 from .gpu_smoke import open_session
@@ -121,9 +122,16 @@ def run(a) -> dict:
         # the capture's magnitudes come from the device probe unless FHE_MAG_GPU=0 asks for the
         # host decrypt (the same five statistics; the probe is ~40x faster on the capture tick)
         os.environ.setdefault("FHE_MAG_GPU", "1")
+    runtime: dict[str, str] = {}
+    if a.mode == "planned":
+        # before the session opens: the switches the plan declares in its PLAN_CMD.txt (plan.py), such
+        # as the real-payload StC variant for real-route refreshes; an exported value wins
+        runtime = plan_mod.export_plan_runtime(a.plan_dir)
     session, core = fake_session(params, a.payload) if a.fake else gpu_session(params)
     out = Path(a.out)
     report: dict = {"mode": a.mode, "fake": a.fake, "blocks": params.n_layers, "ticks": []}
+    if a.mode == "planned":
+        report["plan_runtime"] = runtime
     with session as s:
         inf = s if a.fake else s.inf
         model = FheSsmModel(

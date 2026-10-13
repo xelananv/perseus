@@ -14,7 +14,9 @@ refuses it.
         --name fhe_ssm [--set PLAN_NO_PRESCALE=] [--dry-run]
 
 Plans land in ``bootstrap_placements/<name>/block_<b>_placement.json`` (b = 0..24), where
-``gpu_run.py --mode planned --plan-dir bootstrap_placements/<name>`` reads them.
+``gpu_run.py --mode planned --plan-dir bootstrap_placements/<name>`` reads them, beside a
+``PLAN_CMD.txt`` in the repository's form: the graph, the recipe the runner was given, and the
+switches the plan needs at run time (``runtime_switches``), which the planned run exports.
 """
 
 from __future__ import annotations
@@ -22,8 +24,10 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
+from collections.abc import MutableMapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -87,6 +91,62 @@ def stamp(graph_dir: Path, plans: list[Path], is_dense: bool = False) -> int:
     return len(plans)
 
 
+def runtime_switches(plans: list[Path]) -> dict[str, str]:
+    """The FIDESlib switches a planned run needs beyond the capture's contract, read from the plans
+    themselves: the real-payload StC variant where a refresh takes the real route
+    (``FIDESLIB_BTS_REAL=1``) and the raise variants the refreshes use (``FIDESLIB_BTS_RAISE_DROPS``),
+    both built when the context loads and refused by the runtime when missing."""
+    real = False
+    drops: set[int] = set()
+    for p in plans:
+        with open(p, encoding="utf-8") as f:
+            d = json.load(f)
+        real = real or bool(d.get("real_route"))
+        drops.update(int(v) for v in (d.get("raise_drop") or {}).values())
+    out: dict[str, str] = {}
+    if real:
+        out["FIDESLIB_BTS_REAL"] = "1"
+    if drops:
+        out["FIDESLIB_BTS_RAISE_DROPS"] = ",".join(str(k) for k in sorted(drops))
+    return out
+
+
+def write_plan_cmd(out_dir: Path, graph_dir: str, env: dict[str, str], plans: list[Path]) -> Path:
+    """``PLAN_CMD.txt`` in the repository's form: ``graph=``, ``recipe=`` (the runner's variables,
+    so ``tests/test_paper_plans.py`` regenerates the plan with the plain runner) and ``runtime=``
+    (``runtime_switches``, exported by ``gpu_run.py --mode planned`` before the session opens)."""
+    recipe = " ".join(
+        f"{k}={shlex.quote(v)}" for k, v in env.items() if k not in ("GRAPH_DIR", "OUT_NAME")
+    )
+    runtime = " ".join(f"{k}={v}" for k, v in runtime_switches(plans).items())
+    p = out_dir / "PLAN_CMD.txt"
+    p.write_text(f"graph={graph_dir}\nrecipe={recipe}\nruntime={runtime}\n", encoding="utf-8")
+    return p
+
+
+def plan_runtime(plan_dir: str | Path) -> dict[str, str]:
+    """The ``runtime=`` switches of a plan directory's ``PLAN_CMD.txt``; empty without the file."""
+    cmd = Path(plan_dir) / "PLAN_CMD.txt"
+    if not cmd.exists():
+        return {}
+    for line in cmd.read_text(encoding="utf-8").splitlines():
+        if line.startswith("runtime="):
+            return dict(kv.split("=", 1) for kv in shlex.split(line[len("runtime=") :]))
+    return {}
+
+
+def export_plan_runtime(
+    plan_dir: str | Path, environ: MutableMapping[str, str] | None = None
+) -> dict[str, str]:
+    """Export the plan's runtime switches where they are not already set (an exported value wins,
+    as everywhere in the repository); returns what the plan asks for."""
+    env = os.environ if environ is None else environ
+    runtime = plan_runtime(plan_dir)
+    for k, v in runtime.items():
+        env.setdefault(k, v)
+    return runtime
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument("--graph-dir", required=True, help="block_<b>/graph.json captures")
@@ -114,7 +174,15 @@ def main(argv=None) -> int:
     subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=full, check=True)
     plans = sorted((ROOT / "bootstrap_placements" / a.name).glob("block_*_placement.json"))
     n = stamp(graph_dir, plans, dense(env))
-    print(f"planned {len(blocks)} captured stages -> {len(plans)} plans; stamped {n}")
+    # the recipe line carries the planner switches the shell exported beyond the recipe (PLAN_HARD_ENV_CAP,
+    # PLAN_PLACER, ...), so the plan regenerates from the file alone
+    extra = {k: v for k, v in sorted(os.environ.items()) if k.startswith("PLAN_") and k not in env}
+    cmd = write_plan_cmd(
+        ROOT / "bootstrap_placements" / a.name, a.graph_dir, {**env, **extra}, plans
+    )
+    print(
+        f"planned {len(blocks)} captured stages -> {len(plans)} plans; stamped {n}; {cmd.name}: {plan_runtime(cmd.parent) or 'no runtime switches'}"
+    )
     return 0
 
 
