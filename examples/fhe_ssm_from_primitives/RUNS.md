@@ -14,8 +14,8 @@ tracks upstream dev, with its FIDESlib pin and planner recipe, and is measured a
 git clone --recurse-submodules -b fhe-ssm-port-dev https://github.com/xelananv/perseus && cd perseus
 #   or from a bundle of the branch (git bundle create perseus-fhe-ssm-port-dev.bundle fhe-ssm-port-dev):
 #   git clone -b fhe-ssm-port-dev perseus-fhe-ssm-port-dev.bundle perseus && cd perseus && git submodule update --init
-export CUDA_HOME=/usr/local/cuda-13.0 PATH=/usr/local/cuda-13.0/bin:$PATH   # CUDA 13.0 or newer: 12.x cannot compile this FIDESlib
-export CPATH="$CUDA_HOME/include/cccl${CPATH:+:$CPATH}"   # where CUDA 13 keeps <cuda/atomic>, for the host compiler
+export CUDA_HOME=/usr/local/cuda-13.0   # CUDA 13.0 or newer (another 13.x: its directory here); 12.x cannot compile this FIDESlib
+export PATH="$CUDA_HOME/bin:$PATH" CPATH="$CUDA_HOME/include/cccl${CPATH:+:$CPATH}"   # CPATH: where CUDA 13 keeps <cuda/atomic>
 uv sync && NATIVE_SIZE=32 bash scripts/install_deps.sh && CHAIN=n32 bash scripts/local_build_core.sh
 source scripts/local_env.sh                       # the n32 chain's defaults
 python -c "from examples.fhe_ssm_from_primitives import colab; print(colab.fetch_model('.'))"
