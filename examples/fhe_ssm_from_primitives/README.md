@@ -107,9 +107,13 @@ exports before the session opens unless they are already set. `--tokens` teacher
 the published 148-tick run's (fhe-ssm repository,
 `results/dense-demo-s31/pod_longrun_20260919/pod_pull/s37/serve_LONG/tokens.json`).
 
-The timings and plan sizes quoted in this section and in `RUNS.md` were measured on the
-`fhe-ssm-port` branch at commit 5d82074 (FIDESlib 374f6df) on one RTX A6000; this branch tracks
-upstream dev (its FIDESlib pin and planner recipe), whose own measurements replace them when taken.
+The timings and plan sizes quoted in this section and in `RUNS.md` were measured before this branch
+existed, on one RTX A6000 (one figure on an RTX PRO 5000, named where it appears), with FIDESlib at
+the tree of 374f6df built with the arch-guarded patch described below: the eight-tick runs with one
+build of the `fhe-ssm-port` branch at 471a93e, the same binary for every run, and the step-by-step
+chain of `RUNS.md` with a fresh clone of 5d82074. This branch tracks upstream dev, with its FIDESlib
+pin and planner recipe: dev's planner plans that clone's capture at the same 953 refreshes per tick,
+and the timings are to be measured anew.
 
 Two switches matter on this model's graphs, whose residual stream crosses the blocks without a
 refresh. `PLAN_HARD_ENV_CAP=1` keeps the refresh envelope absolute: a block the placer cannot
@@ -123,7 +127,8 @@ binary: eager 1,839.5 s, planned 1,345.0 s at 48, 1,143.8 s at 50, with the repl
 lower under either plan and top-1 1.0 on every planned tick.
 
 The weight diagonals are encoded on the device at their use (`FHE_GPU_ENCODE=0` selects the
-library's host encode in the same binary, 7–13× slower per block; FIDESlib's own device encode,
+library's host encode in the same binary, 7.3× slower per block on the RTX A6000 and 13.4× on an RTX
+PRO 5000, each within one build of 471a93e; FIDESlib's own device encode,
 `FIDESLIB_GPU_ENCODE`, is a separate switch that this example leaves alone): a tile registered on the device keeps no host
 copy, each giant group is one batched encode per input level, and a group the encoder cannot
 serve (a pending rescale on a one-prime chain) takes the CPU route from the tile fetched back. On

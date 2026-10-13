@@ -3,13 +3,17 @@
 The five commands of the README's GPU section, with the tick counts of the three runs that extend
 what was measured on one RTX A6000 (48 GB). Everything they need is public: the checkpoint comes
 from Hugging Face (hash-pinned), the token record from the fhe-ssm repository. The durations and
-plan sizes below were measured on the `fhe-ssm-port` branch at commit 5d82074 (FIDESlib 374f6df);
-this branch tracks upstream dev, with its FIDESlib pin and planner recipe, and is measured anew.
+plan sizes below were measured before this branch existed, on that card with FIDESlib at the tree of
+374f6df (built with the README's arch-guarded patch): the steps with a fresh clone of the
+`fhe-ssm-port` branch at 5d82074, the eight-tick pair with one build of it at 471a93e. This branch
+tracks upstream dev, with its FIDESlib pin and planner recipe, and is measured anew.
 
 ## Setup
 
 ```bash
 git clone --recurse-submodules -b fhe-ssm-port-dev https://github.com/xelananv/perseus && cd perseus
+#   or from a bundle of the branch (git bundle create perseus-fhe-ssm-port-dev.bundle fhe-ssm-port-dev):
+#   git clone -b fhe-ssm-port-dev perseus-fhe-ssm-port-dev.bundle perseus && cd perseus && git submodule update --init
 uv sync && NATIVE_SIZE=32 bash scripts/install_deps.sh && CHAIN=n32 bash scripts/local_build_core.sh
 source scripts/local_env.sh                       # the n32 chain's defaults
 python -c "from examples.fhe_ssm_from_primitives import colab; print(colab.fetch_model('.'))"
@@ -30,12 +34,14 @@ python -m examples.fhe_ssm_from_primitives.gpu_run $M --mode capture --graph-dir
 PLAN_HARD_ENV_CAP=1 python -m examples.fhe_ssm_from_primitives.plan --graph-dir graphs/fhe_ssm --name fhe_ssm
 ```
 
-On the A6000: the smoke takes about a minute (an encryption round trip, one linear tile, two block
-ticks); the capture about 15 minutes (tick 0 at 237 s, then the recorded tick at 620 s with the
-device magnitude probe, which is on by default); the plan a few minutes on the CPU. The plan at the
-recipe's ceiling (MAX_LEVEL 50) lands at 953 to 959 refreshes per tick on this capture, with 36
-planner warnings about values predicted at level 50 and no refresh; the planned runtime accepts a
-predicted ceiling level and every planned tick ran with top-1 agreement 1.0.
+On the A6000, with the fresh clone of 5d82074: the smoke took 88 s, a 58 s session open included (an
+encryption round trip, one linear tile, two block ticks); the capture about 15 minutes (tick 0 at
+236 s, then the recorded tick at 621 s with the device magnitude probe, which is on by default); the
+plan about 6 minutes on the CPU. The plan at the recipe's ceiling (MAX_LEVEL 50) has 953 refreshes
+per tick on that capture (959 on an earlier capture of the same model), with 36 planner warnings
+about values predicted at level 50 and no refresh; the planned runtime accepts a predicted ceiling
+level and every planned tick ran with top-1 agreement 1.0. Dev's planner on this branch plans the
+same capture at 953 refreshes per tick.
 
 ## Run 1: 148 ticks under the plan
 
@@ -44,10 +50,10 @@ python -m examples.fhe_ssm_from_primitives.gpu_run $M --mode planned --plan-dir 
     --tokens tokens.json --ticks 148 --out planned148.json
 ```
 
-A planned tick is 142 s on the A6000 (5.8 h for the run); the report is rewritten after every tick,
-so a stopped run keeps what it did. What it answers: the published 148-tick run (eager OpenFHE, two
-cards, ring 2^17) had its logit error grow like tick^0.24; the planned ticks measured here are 4 to
-8 times more accurate per tick, and the open question is whether the growth exponent moves or only
+A planned tick took 141 s on the A6000 after a first one of 149 s (the fresh clone), about 5.8 h for
+the run; the report is rewritten after every tick, so a stopped run keeps what it did. What it
+answers: the published 148-tick run (eager OpenFHE, two cards, ring 2^17) had its logit error grow
+like tick^0.24; the planned ticks of the eight-tick runs were 4 to 8 times more accurate per tick, and the open question is whether the growth exponent moves or only
 the constant. Compare `relErrRms_vs_mirror`, `logits_relErrRms_vs_exact` and `top1_agree_vs_exact`
 per tick with the fhe-ssm repository's `FIDELITY_TREND.md`.
 
@@ -59,11 +65,12 @@ python -m examples.fhe_ssm_from_primitives.gpu_run $M --mode planned --plan-dir 
     --tokens tokens.json --ticks 8 --out planned8.json
 ```
 
-Eager 229 s and planned 142 s per steady tick on the A6000, from one build; a timing is a property
-of the build and the card as much as of the configuration, so the pair is only meaningful from one
-build on one card. Beside each run, `nvidia-smi --query-gpu=timestamp,memory.used,utilization.gpu
---format=csv -l 5 > nvsmi.csv &` gives the memory column: the peak was 35.1 GB with a flat pool, so
-48 GB cards are the floor.
+Eager 229 s and planned 142 s per steady tick on the A6000, from one build (471a93e); a timing is a
+property of the build and the card as much as of the configuration, so the pair is only meaningful
+from one build on one card. Beside each run, `nvidia-smi --query-gpu=timestamp,memory.used,utilization.gpu
+--format=csv -l 5 > nvsmi.csv &` gives the memory column: the device peak was 35,118 MiB with a flat
+pool (34,094 MiB over the fresh clone's two planned ticks), so a 48 GB card has room; smaller cards
+are untested.
 
 ## Run 3: the ILP placer on the same capture
 
@@ -73,7 +80,8 @@ PLAN_HARD_ENV_CAP=1 python -m examples.fhe_ssm_from_primitives.plan --graph-dir 
 ```
 
 CPU only, needs scipy. The min-cut placer gave 1,297 refreshes per tick at ceiling 48 and 953 to 959
-at 50 on these graphs; the ILP was not run on them. A 24-block graph whose residual stream crosses
+at 50 on captures of this model with the fork's planner, and dev's planner gives 953 at 50 on the
+fresh clone's capture (48 not run); the ILP was not run on them. A 24-block graph whose residual stream crosses
 blocks without a refresh is new ground for the placer comparison, and whether the ILP needs the hard
 envelope at all is part of the answer. A planned run with `--plan-dir bootstrap_placements/fhe_ssm_ilp`
 then measures what the plan predicts.
