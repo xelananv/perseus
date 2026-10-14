@@ -1,0 +1,82 @@
+=== v7 start 2026-10-12T17:00:49Z branch fhe-ssm-port clone /root/perseus_v7
+HEAD 5d82074 gpu_encode, gpu_mag_probe, port: dropped handles clean up after themselves, full wipes, one device encode per input level, no host copy of a device tile; FIDESlib re-pinned to a reachable commit
+=== submodule at the pinned commit, fetched fresh from GitHub 17:00:53
+v7_SUBMODULE_RC=0
+FIDESlib 374f6df tree 4472c59414b7
+=== core build 17:00:55
+V2_CORE_RC=0
+module /root/perseus_v7/perseus/__init__.py n32
+['drop_gpu_encoder', 'encode_group_gpu', 'evict_ptx', 'gpu_encode_available', 'gpu_encode_fits', 'gpu_encode_stats', 'lm_head_tile_width', 'mult_ptx', 'register_tile', 'release_tiles', 'tile_values']
+=== dev probes build 17:03:34
+V2_PROBES_RC=0
+PROBE gpu_encode_layout_probe 34 rc=0
+{"probe":"verdict","pass":true}
+PROBE gpu_encode_probe 34 3 7 rc=0
+{"probe":"verdict","pass":true}
+PROBE gpu_encode_probe 44 17 11 rc=0
+{"probe":"verdict","worst_rel":4.642e-16,"pass":true}
+PROBE gpu_mag_probe_check 34 44 5 rc=0
+=== ctest -L gpu, as registered, no further environment
+v7_CTEST_RC=0
+100% tests passed out of 3
+
+Label Time Summary:
+gpu    =  12.45 sec*proc (3 tests)
+
+Total Test time (real) =  12.45 sec
+=== python suites 17:06:22
+V2_PYTEST_RC=1
+4 failed, 405 passed, 7 skipped, 55 deselected, 341 subtests passed in 44.32s
+FAILED tests/test_env_helpers.py::test_profile_agrees_with_the_run_script_environment[n32-gpt2_decode_n32]
+FAILED tests/test_env_helpers.py::test_profile_agrees_with_the_run_script_environment[n64-gpt2_decode_n64]
+FAILED tests/test_import_without_core.py::test_pure_python_layers_import_without_the_extension
+FAILED tests/test_serialization.py::test_save_load_round_trip - ModuleNotFoun...
+Found 9 errors.
+[*] 7 fixable with `--fix` (2 unsafe fixes available with `--fix --unsafe-fixes`).
+V2_RUFF_RC=1
+narrative lint: clean
+v7_LINT_RC=0
+All checks passed!
+34 files already formatted
+Success: no issues found in 32 source files
+environment variables read by the code but not described in this script:   BERT_WEIGHT_GRANULARITY   BTS_DIM1   BTS_MAX_INPUT_LEVEL   BTS_TRACE_DIR   FHE_PT_STAGE_HOOK   FHE_TAIL_PREFETCH   FIDESLIB_ABLATE_KB   FIDESLIB_ACCUM_BSTEP   FIDESLIB_AKS   FIDESLIB_AKS_SEED   FIDESLIB_AKS_SELFTEST   FIDESLIB_BTS_EXACT_ONLY   FIDESLIB_BTS_RAISE_DROP   FIDESLIB_BTS_SHIFT   FIDESLIB_BTS_SHIFT_FUSED   FIDESLIB_BTS_SHIFT_GHS   FIDESLIB_BTS_SHIFT_STC   FIDESLIB_BTS_SHIFT_T   FIDESLIB_BTS_SPARSE_B   FIDESLIB_BTS_SPARSE_B_BSTEP   FIDESLIB_BTS_SPARSE_B_RUN   FIDESLIB_BTS_STC_FIRST   FIDESLIB_BTS_STC_FIRST_AB   FIDESLIB_BTS_STC_FIRST_DIAG   FIDESLIB_BTS_STC_FIRST_ROUTES   FIDESLIB_DIAG_SK   FIDESLIB_DISCARD_D2   FIDESLIB_DISCARD_SCRATCH   FIDESLIB_EVALMOD_LOCKSTEP   FIDESLIB_FUSED_RESCALE   FIDESLIB_LT_CHUNK   FIDESLIB_LT_COMPACT   FIDESLIB_LT_COMPACT_BYPASS   FIDESLIB_LT_FUSED_CTS_MASK   FIDESLIB_LT_FUSED_DEBUG   FIDESLIB_LT_FUSED_RESCALE   FIDESLIB_LT_TH_B1   FIDESLIB_MODUP_MERGE   FIDESLIB_NTT_CLUSTER   FIDESLIB_NVTX   FIDESLIB_PW_FUSE   FIDESLIB_RELEVEL_SELFTEST   FIDESLIB_SPRU   FIDESLIB_SPRU_HOST_ENCODE   FIDESLIB_TC_NTT   FIDESLIB_TC_NTT_DUMP   FIDESLIB_TC_NTT_MIX   FIDESLIB_TC_NTT_SELFTEST   IMPL_KV_OFFLOAD   PERSEUS_BTS_PROFILE   PLAN_DELIB_LANDING_REMAP   PLAN_HINT_ENV_VETO   PLAN_PREFER_SPARSE   PLAN_REFRESH_ENV_CAP   TP_PROBE   VIT_WEIGHT_GRANULARITY  <- scan_env_vars (the upstream names are expected)
+=== every regenerable shipped plan (PERSEUS_ALL_PLANS=1) 17:07:09
+v7_ALL_PLANS_RC=0
+22 passed, 4 skipped in 558.54s (0:09:18)
+=== route check (device vs CPU encode, bench with the eviction guard) 17:16:28
+V2_ROUTE_RC=0
+{"B": 256, "g": 17, "encode_wall_s": 0.0043, "pt_level": 34, "ct_level": 34, "worst": {"rel_dev": 3.426734565259601e-11, "rel_cpu": 3.426728126821528e-11, "max_dev_minus_cpu": 2.3314683517128287e-15, "level_mismatch": 0}, "pass": true}
+{"mixed": true, "g": 2, "encodes": [[34, 1], [34, 2]], "max_abs_dev_minus_cpu": 1.787459069646502e-14, "max_abs": 2.3268574430756486, "level_dev": 36, "level_cpu": 36, "tiles_fetched_exact": true, "pass": true}
+{"stats": {"plaintexts": 544, "batches": 7, "k1_ms": 0.0, "fft_ms": 0.0, "k2_ms": 0.0, "ntt_ms": 0.0}, "pass": true, "total_seconds": 9.8}
+V2_BENCH_RC=0
+{"B": 32, "g": 3, "groups": 3, "plaintexts": 96, "wall_s": 0.0414, "wall_ms_per_plaintext": 0.4309, "device_ms_per_plaintext": {"k1_ms": 0.0, "fft_ms": 0.0, "k2_ms": 0.0, "ntt_ms": 0.0}, "timing_env": ""}
+{"B": 128, "g": 5, "groups": 3, "plaintexts": 384, "wall_s": 0.0703, "wall_ms_per_plaintext": 0.183, "device_ms_per_plaintext": {"k1_ms": 0.0, "fft_ms": 0.0, "k2_ms": 0.0, "ntt_ms": 0.0}, "timing_env": ""}
+{"B": 256, "g": 17, "groups": 3, "plaintexts": 768, "wall_s": 0.1076, "wall_ms_per_plaintext": 0.1401, "device_ms_per_plaintext": {"k1_ms": 0.0, "fft_ms": 0.0, "k2_ms": 0.0, "ntt_ms": 0.0}, "timing_env": ""}
+=== smoke (1 block) 17:16:42
+V2_SMOKE_RC=0
+{"roundtrip": {"ok": true, "relErrRms": 4.362937943896382e-10, "level": 34, "seconds": 0.54, "free_gb_before": 35.5, "free_gb_after": 32.73}}
+{"linear": {"ok": true, "relErrRms": 3.433515280308443e-10, "seconds": 0.49, "free_gb_before": 32.73, "free_gb_after": 31.06}}
+{"ticks": {"ok": true, "ticks": [{"pos": 0, "seconds": 13.66, "projected_full_tick_s": 327.8, "relErrRms_vs_mirror": 0.012544086954463001, "relErrRms_vs_exact": 0.01254408698041897, "logits_relErrRms_vs_exact": 0.039221677705256974, "top1_agree_vs_exact": 1.0, "out_level": 36, "bootstraps_total": 4, "runtime_bootstraps_total": 141}, {"pos": 1, "seconds": 13.65, "projected_full_tick_s": 327.5, "relErrRms_vs_mirror": 0.01270263414957594, "relErrRms_vs_exact": 0.0127026321664201, "logits_relErrRms_vs_exact": 0.027649952293397295, "top1_agree_vs_exact": 1.0, "out_level": 36, "bootstraps_total": 6, "runtime_bootstraps_total": 279}], "seconds": 28.01, "free_gb_before": 31.06, "free_gb_after": 20.22}}
+=== capture, 2 ticks, the device probe by default 17:18:11
+V2_CAPTURE_RC=0
+[mag] items=29226 copies=608 store_ms=0 backpressure_ms=0
+[mag_gpu] items=29226 enqueue_ms=357067 fetch_ms=5721 (cumulative)
+[mag] items=29226 copies=608 store_ms=0 backpressure_ms=0
+[mag_gpu] items=187 enqueue_ms=357277 fetch_ms=5955 (cumulative)
+[mag] items=187 copies=20 store_ms=0 backpressure_ms=0
+{"pos": 1, "seconds": 620.7, "relErrRms_vs_mirror": 0.010057901765841511, "relErrRms_vs_exact": 0.010057901765841521, "logits_relErrRms_vs_exact": 0.004169964857730374, "logits_relErrRms_worst_conversation": 0.020513028379721503, "top1_agree_vs_exact": 1.0, "bootstraps": 136, "runtime_bootstraps": 1968, "out_level": 38, "free_gb": 13.1}
+26
+=== plan (hard envelope, MAX_LEVEL 50) 17:33:44
+V2_PLAN_RC=0
+[plan] [block_19] infeasible at entry 46/d2 — retrying block_18 with a terminal-exit refresh on v_29758
+[plan] [block_21] infeasible at entry 46/d2 — retrying block_20 with a terminal-exit refresh on v_29758
+[plan] [block_23] infeasible at entry 46/d2 — retrying block_22 with a terminal-exit refresh on v_29758
+planned 25 captured stages -> 25 plans; stamped 25
+36
+plan bootstraps per tick: 953 files: 25
+=== planned, 2 ticks 17:39:30
+V2_PLANNED_RC=0
+{"pos": 0, "seconds": 148.52, "relErrRms_vs_mirror": 0.001216843236936996, "relErrRms_vs_exact": 0.0012168432369369826, "logits_relErrRms_vs_exact": 0.0003076108627025314, "logits_relErrRms_worst_conversation": 0.0017241026320693193, "top1_agree_vs_exact": 1.0, "bootstraps": 94, "runtime_bootstraps": 953, "out_level": 46, "free_gb": 14.1}
+{"pos": 1, "seconds": 141.13, "relErrRms_vs_mirror": 0.0014192511381263071, "relErrRms_vs_exact": 0.0014192511381262952, "logits_relErrRms_vs_exact": 0.0005122374014412431, "logits_relErrRms_worst_conversation": 0.005919214732079884, "top1_agree_vs_exact": 1.0, "bootstraps": 94, "runtime_bootstraps": 953, "out_level": 46, "free_gb": 14.1}
+=== v7 done 2026-10-12T17:45:37Z (started 2026-10-12T17:00:49Z)
+V2_DONE

@@ -1,7 +1,8 @@
 # The capture: host decrypt vs device magnitude probe (one RTX A6000)
 
-Branch `fhe-ssm-port` (the main-based port; exact commits in the `.meta` files), FIDESlib at the tree of 374f6df with
-the arch-guarded patch of the example README, ring 2^16, the n32 chain, 64 conversations, the published run's tokens.
+Branch `fhe-ssm-port` (the main-based port; the `.meta` files record each run's environment, not its commit),
+FIDESlib at the tree of 374f6df with the arch-guarded patch of the example README, ring 2^16, the n32 chain, 64
+conversations, the published run's tokens.
 
 **The capture tick.** Host decrypt (Perseus's capture path): tick 1, the captured one, **26,974.62 s**
 (`capture.log`:280). Device probe (`FHE_MAG_GPU=1`): **619.89 s** (`capture_gpumag.log`:305) — **43.5×**. The probe's own
@@ -36,3 +37,12 @@ their decrypted magnitudes differ by the FHE error of each; the script reports t
 **Eight planned ticks** with the device capture's ceiling-50 plan (`planned8.log`, `planned8.json`, `planned8.meta`):
 959 runtime refreshes every tick, logits relative error vs the closed form 0.000265–0.000958, top-1 agreement 1.0 on
 all 8 ticks.
+
+**The fresh-clone capture** (`v7_chain.log`): the pushed head of `fhe-ssm-port`, 5d82074 (line 2), cloned and built
+from scratch with FIDESlib 374f6df fetched fresh (line 5), then run end to end on the RTX A6000 (`capture_v7.log`:31).
+Its capture, with the device probe by default (line 60): tick 1 **620.7 s** (`capture_v7.log`:305; `capture_v7.json`),
+top-1 agreement 1.0. Its 25 block graphs are the capture `../dev_planner/` plans from (and so the A6000 side of
+`../rtx_pro_6000/plan/`):
+[`graphs_fhe_ssm_v7_head5d82074_20261012.tar.gz`](https://huggingface.co/datasets/xelananv/Perseus-graphs/resolve/main/graphs_fhe_ssm_v7_head5d82074_20261012.tar.gz),
+46,851,607 bytes, sha256 `49a8f0d3e462d4457b9153a568ad189cc38753163107676c964ba3c1b701313a` (on Hugging Face, not in
+git; it unpacks to `graphs/fhe_ssm/`). The graphs of the three captures above are not published.

@@ -31,8 +31,9 @@ relative difference 8.904e-16 stock and 7.420e-16 under the error check (`p_prob
 ## The plan, and the same plan from another card (`plan/`)
 
 `chain/d3_plan.log`:423: 25 blocks, 953 bootstraps; 11 terminal-exit retries, every second block (lines 40–390); the
-runtime switch the plan declares is in `PLAN_CMD.txt`. Compared block by block with the plan made from the A6000 capture
-(`plan_compare.py`, `plan_compare.out`; both plans as archives beside it): placements, correction factors, rescales,
+runtime switch the plan declares is in `PLAN_CMD.txt`. Compared block by block with the plan made from the A6000
+fresh-clone capture (`../dev_planner/plan_dev2.log`; `plan_compare.py`, `plan_compare.out`; both plans as archives
+beside it): placements, correction factors, rescales,
 sparse routes, weight and mask levels, hint decisions and rules are equal in all 25 blocks; they differ only in
 `capture_env` (the newer capture records more names) and in `real_route`, present in the Blackwell plan only (4 sites in
 each even block: the newer capture's tags carry the payload field).
@@ -92,5 +93,7 @@ which is why only the same-card pair is a comparison.
 
 ## The capture
 
-The 25 block graphs of the Blackwell capture: `graphs_fhe_ssm_d3_7892b47.tar.gz`, 46,924,875 bytes, sha256
-`d2a36cb81cf306cf030bf47e29fd19a33adccafbda86188529ede902980beab1` (published with the issue, not in git).
+The 25 block graphs of the Blackwell capture (`chain/d3_capture.json`; the commit, 7892b47, is `chain/d3_run.log`:8):
+[`graphs_fhe_ssm_d3_7892b47_20261013.tar.gz`](https://huggingface.co/datasets/xelananv/Perseus-graphs/resolve/main/graphs_fhe_ssm_d3_7892b47_20261013.tar.gz),
+46,924,875 bytes, sha256 `d2a36cb81cf306cf030bf47e29fd19a33adccafbda86188529ede902980beab1` (on Hugging Face, not in
+git; it unpacks to `graphs/fhe_ssm/`).

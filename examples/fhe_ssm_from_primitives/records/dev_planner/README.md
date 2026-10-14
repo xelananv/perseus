@@ -1,8 +1,9 @@
 # Upstream dev's planner on this model's capture, before and after the re-cut fix (CPU)
 
-The capture: the 25 block graphs of the A6000 capture (`../a6000_capture/`), archive
-`graphs_fhe_ssm_v7_head5d82074.tar.gz`, 46,851,607 bytes, sha256
-`49a8f0d3e462d4457b9153a568ad189cc38753163107676c964ba3c1b701313a` (published with the issue, not in git). Every run:
+The capture: the 25 block graphs of the A6000 fresh-clone capture (`../a6000_capture/capture_v7.log`), archive
+[`graphs_fhe_ssm_v7_head5d82074_20261012.tar.gz`](https://huggingface.co/datasets/xelananv/Perseus-graphs/resolve/main/graphs_fhe_ssm_v7_head5d82074_20261012.tar.gz),
+46,851,607 bytes, sha256 `49a8f0d3e462d4457b9153a568ad189cc38753163107676c964ba3c1b701313a` (on Hugging Face, not in
+git; it unpacks to `graphs/fhe_ssm/`). Every run:
 `PLAN_HARD_ENV_CAP=1 CUDA_VISIBLE_DEVICES= python -m examples.fhe_ssm_from_primitives.plan --graph-dir <capture>/graphs/fhe_ssm --name <name>`
 with the example's recipe (dev's `PLAN_REAL_ROUTE=1 PLAN_RAISE_DROP_SET=1,3,5 PLAN_SHARED_REALIZE=1` included unless
 stated).

@@ -1,0 +1,37 @@
+{
+ "mode": "capture",
+ "fake": false,
+ "blocks": 24,
+ "ticks": [
+  {
+   "pos": 0,
+   "seconds": 235.64,
+   "relErrRms_vs_mirror": 0.009627171951491301,
+   "relErrRms_vs_exact": 0.009627171951491357,
+   "logits_relErrRms_vs_exact": 0.0039798312964631774,
+   "logits_relErrRms_worst_conversation": 0.028944271758892876,
+   "top1_agree_vs_exact": 1.0,
+   "bootstraps": 136,
+   "runtime_bootstraps": 1968,
+   "out_level": 38,
+   "free_gb": 14.2
+  },
+  {
+   "pos": 1,
+   "seconds": 620.7,
+   "relErrRms_vs_mirror": 0.010057901765841511,
+   "relErrRms_vs_exact": 0.010057901765841521,
+   "logits_relErrRms_vs_exact": 0.004169964857730374,
+   "logits_relErrRms_worst_conversation": 0.020513028379721503,
+   "top1_agree_vs_exact": 1.0,
+   "bootstraps": 136,
+   "runtime_bootstraps": 1968,
+   "out_level": 38,
+   "free_gb": 13.1
+  }
+ ],
+ "rotation_audit_missing": [],
+ "conversations": 64,
+ "scales": "shipped",
+ "tokens": "/root/tokens.json"
+}
