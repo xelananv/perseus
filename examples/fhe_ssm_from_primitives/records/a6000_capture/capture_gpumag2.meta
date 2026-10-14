@@ -1,0 +1,17 @@
+START capture_gpumag2 2026-10-12T10:32:37Z
+ 10:32:37 up 5 days,  3:15,  0 user,  load average: 1.86, 1.97, 2.22
+CHAIN=n32
+CUDA_HOME=/usr/local/cuda-12.6
+FHE_MAG_GPU=1
+FHE_STAGE_ARENA_GB=2
+FIDESLIB_KSK_PACK=1
+FIDESLIB_KSK_REGEN=2
+FIDESLIB_ROT_KEY_BAND=22
+KV_ARENA_GB=1
+LOGN=16
+OMP_NUM_THREADS=16
+REPO=/root/perseus_head
+SPARSE_AUTO=2
+SPARSE_BTS_SLOTS=512,1
+END capture_gpumag2 rc=0 2026-10-12T10:48:10Z
+ 10:48:10 up 5 days,  3:31,  0 user,  load average: 1.03, 1.16, 1.64

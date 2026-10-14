@@ -1,0 +1,4 @@
+published run's generating pick flips: 18; departures from the closed form: 18; same (tick, lane): 18
+record token = its encPick: 18 of 18
+closed-form pick = its refPick: 18 of 18
+published pick flips on prompt rows (nothing fed back): 2

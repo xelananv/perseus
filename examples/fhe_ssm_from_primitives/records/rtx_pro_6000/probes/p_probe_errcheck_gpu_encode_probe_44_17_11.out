@@ -1,0 +1,39 @@
+[ckks_env] recognized environment knobs (effective values):
+  LOGN                  = 16  [env]
+  CKKS_DEPTH            = 10  [env]
+  BTP_DEPTH_OVERHEAD    = 16  [env]
+  FIRST_MOD_BITS        = 56  [env]
+  BTP_SCALE_BITS        = 54  [env]
+  SCALE_BITS            = 54  [env]
+  CORRECTION_FACTOR     = 6  [env]
+  COMPOSITE_DEGREE      = 2  [env]
+  NUM_LARGE_DIGITS      = 6  [env]
+  AUTO_BTS_LEVEL        = 46  [env]
+  H_WEIGHT              = 192  [def]
+  BTS_ITERATIONS        = 1  [env]
+  BTS_PRECISION         = 12  [def]
+  CKKS_COMPLEX          = 1  [env]
+  SPARSE_BTS_SLOTS      = 512,1  [env]
+  LEVEL_BUDGET          = 4:3  [env]
+[ckks_params] ===== CKKS crypto context =====
+  logN=16  ringDim=65536  slots=32768
+  depth=26  btp_overhead=16  mult_depth=26  limbs=27
+  first_mod=56  scale(active)=54  (btp_scale=54 scale_bits=54)  logQ~=1460
+  bootstrap=off  correction_factor=6  bts_iters=1  bts_prec=12  auto_bts_level=46
+  secret=UNIFORM_TERNARY h=0 (OpenFHE accounts UNIFORM_TERNARY)  dnum=6  complex_payload=1
+  security: HEStd_128_classic enforced & OK (logQ 1460 <= uniform-ternary budget 1761)
+[ckks_params] ===============================
+[ckks_params] keygen: h_weight=0  bts mode=UNIFORM
+GPU 0: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+ SMs: 188, SharedMem: 100 KB, Blocks/SM: 24, Threads/SM: 1536, L2 size: 128 MB, Bus: 512-bit
+[rot_band] band=22 full_keep=0 (precom entries=0)
+[rot_band] model keys: banded=0 full=0
+[sparse_bts] precomps={1,512} routing_default=512 vram_free_gb=92.7076
+{"probe":"setup","level":44,"g":17,"B":32,"sf":1.261638e+16,"q0":268042241,"q1":265420801}
+{"probe":"coeff","limbs_cpu":10,"limbs_dev":10,"coefficients":2097152,"exact":2075598,"diff1":21554,"diff2_9":0,"diff10plus":0,"max_abs_diff_units":1,"max_abs_int":159692894709237,"rel_inf":6.262e-15,"max_rel_per_coeff":1.726e-09,"residues_equal":20755980,"of":20971520}
+{"probe":"eval","words_equal_self":20971520,"words_equal_cpu_ref":0,"of":20971520}
+[sparse_lane] sparse_routed_bts=0 of total_bts=0  scope_default_s=512
+[clonecensus] module : 0 clones, 0 limb-copies x2 polys, 0 stacks
+{"probe":"product","max_abs_dev_minus_ref":1.513e-15,"rel_dev_minus_ref":1.684e-14,"max_abs_dev_minus_plain":2.151e-11,"max_abs_plain":8.985e-02}
+{"probe":"stats","plaintexts":64,"batches":2,"k1_ms":0.000,"fft_ms":0.000,"k2_ms":0.000,"ntt_ms":0.000}
+{"probe":"verdict","pass":true}

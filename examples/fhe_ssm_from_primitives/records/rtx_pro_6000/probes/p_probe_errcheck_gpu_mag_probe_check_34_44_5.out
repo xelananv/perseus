@@ -1,0 +1,41 @@
+[ckks_env] recognized environment knobs (effective values):
+  LOGN                  = 16  [env]
+  CKKS_DEPTH            = 10  [env]
+  BTP_DEPTH_OVERHEAD    = 16  [env]
+  FIRST_MOD_BITS        = 56  [env]
+  BTP_SCALE_BITS        = 54  [env]
+  SCALE_BITS            = 54  [env]
+  CORRECTION_FACTOR     = 6  [env]
+  COMPOSITE_DEGREE      = 2  [env]
+  NUM_LARGE_DIGITS      = 6  [env]
+  AUTO_BTS_LEVEL        = 46  [env]
+  H_WEIGHT              = 192  [def]
+  BTS_ITERATIONS        = 1  [env]
+  BTS_PRECISION         = 12  [def]
+  CKKS_COMPLEX          = 1  [env]
+  SPARSE_BTS_SLOTS      = 512,1  [env]
+  LEVEL_BUDGET          = 4:3  [env]
+[ckks_params] ===== CKKS crypto context =====
+  logN=16  ringDim=65536  slots=32768
+  depth=26  btp_overhead=16  mult_depth=26  limbs=27
+  first_mod=56  scale(active)=54  (btp_scale=54 scale_bits=54)  logQ~=1460
+  bootstrap=off  correction_factor=6  bts_iters=1  bts_prec=12  auto_bts_level=46
+  secret=UNIFORM_TERNARY h=0 (OpenFHE accounts UNIFORM_TERNARY)  dnum=6  complex_payload=1
+  security: HEStd_128_classic enforced & OK (logQ 1460 <= uniform-ternary budget 1761)
+[ckks_params] ===============================
+[ckks_params] keygen: h_weight=0  bts mode=UNIFORM
+GPU 0: NVIDIA RTX PRO 6000 Blackwell Workstation Edition
+ SMs: 188, SharedMem: 100 KB, Blocks/SM: 24, Threads/SM: 1536, L2 size: 128 MB, Bus: 512-bit
+[rot_band] band=22 full_keep=0 (precom entries=0)
+[rot_band] model keys: banded=0 full=0
+[sparse_bts] precomps={1,512} routing_default=512 vram_free_gb=92.7076
+[ksk_regen] active: fusedDotKSK regenerating kska from seed (stage B, register)
+{"case":"dense_LA","slots":32768,"noise_deg":1,"gpu_slots":32768,"gpu_noise_level":1,"host":{"max_abs":2.999786083087e-01,"mean":3.354777189926e-04,"max_dev":3.003056485836e-01,"max_coeff":2.922522475566e-03,"max_coeff_ac":2.922522475566e-03},"gpu":{"max_abs":2.999786083087e-01,"mean":3.354777189926e-04,"max_dev":3.003056485836e-01,"max_coeff":2.922522475566e-03,"max_coeff_ac":2.922522475566e-03},"rel":{"max_abs":1.85e-16,"mean":7.23e-19,"max_dev":0.00e+00,"max_coeff":7.42e-16,"max_coeff_ac":7.42e-16},"worst":7.42e-16}
+{"case":"dense_LB","slots":32768,"noise_deg":1,"gpu_slots":32768,"gpu_noise_level":1,"host":{"max_abs":2.999786083297e-01,"mean":3.354777188214e-04,"max_dev":3.003056485819e-01,"max_coeff":2.922522475599e-03,"max_coeff_ac":2.922522475599e-03},"gpu":{"max_abs":2.999786083297e-01,"mean":3.354777188214e-04,"max_dev":3.003056485819e-01,"max_coeff":2.922522475599e-03,"max_coeff_ac":2.922522475599e-03},"rel":{"max_abs":0.00e+00,"mean":3.61e-19,"max_dev":3.70e-16,"max_coeff":7.42e-16,"max_coeff_ac":7.42e-16},"worst":7.42e-16}
+{"case":"big_LA","slots":32768,"noise_deg":1,"gpu_slots":32768,"gpu_noise_level":1,"host":{"max_abs":2.999786082993e+02,"mean":3.354777190011e-01,"max_dev":3.003056485835e+02,"max_coeff":2.922522475607e+00,"max_coeff_ac":2.922522475607e+00},"gpu":{"max_abs":2.999786082993e+02,"mean":3.354777190011e-01,"max_dev":3.003056485835e+02,"max_coeff":2.922522475607e+00,"max_coeff_ac":2.922522475607e+00},"rel":{"max_abs":0.00e+00,"mean":1.85e-18,"max_dev":1.89e-16,"max_coeff":4.56e-16,"max_coeff_ac":4.56e-16},"worst":4.56e-16}
+{"case":"deg2_LA","slots":32768,"noise_deg":2,"gpu_slots":32768,"gpu_noise_level":2,"host":{"max_abs":8.971283939244e-02,"mean":-3.203827121733e-05,"max_dev":8.968080112122e-02,"max_coeff":4.933769029699e-04,"max_coeff_ac":4.933769029699e-04},"gpu":{"max_abs":8.971283939244e-02,"mean":-3.203827121733e-05,"max_dev":8.968080112122e-02,"max_coeff":4.933769029699e-04,"max_coeff_ac":4.933769029699e-04},"rel":{"max_abs":0.00e+00,"mean":6.04e-19,"max_dev":0.00e+00,"max_coeff":2.20e-16,"max_coeff_ac":2.20e-16},"worst":2.20e-16}
+{"case":"sparse512_LA","slots":512,"noise_deg":1,"gpu_slots":512,"gpu_noise_level":1,"host":{"max_abs":2.992868240345e-01,"mean":-1.036812793250e-02,"max_dev":3.094374506189e-01,"max_coeff":1.589434348355e-02,"max_coeff_ac":1.589434348355e-02},"gpu":{"max_abs":2.992868240345e-01,"mean":-1.036812793250e-02,"max_dev":3.094374506189e-01,"max_coeff":1.589434348355e-02,"max_coeff_ac":1.589434348355e-02},"rel":{"max_abs":1.85e-16,"mean":0.00e+00,"max_dev":1.79e-16,"max_coeff":6.55e-16,"max_coeff_ac":6.55e-16},"worst":6.55e-16}
+[sparse_lane] sparse_routed_bts=0 of total_bts=0  scope_default_s=512
+[clonecensus] module : 0 clones, 0 limb-copies x2 polys, 0 stacks
+{"probe":"stats","items":5,"enqueue_ms":1.864,"fetch_ms":1.240}
+{"probe":"verdict","worst_rel":7.420e-16,"pass":true}

@@ -1,0 +1,85 @@
+{
+ "mode": "planned",
+ "fake": false,
+ "blocks": 24,
+ "ticks": [
+  {
+   "pos": 0,
+   "seconds": 58.34,
+   "relErrRms_vs_mirror": 0.0012810128033436962,
+   "relErrRms_vs_exact": 0.0012810128033436793,
+   "logits_relErrRms_vs_exact": 0.0002963485758517884,
+   "logits_relErrRms_worst_conversation": 0.0014109249063900247,
+   "top1_agree_vs_exact": 1.0,
+   "bootstraps": 94,
+   "runtime_bootstraps": 953,
+   "out_level": 46,
+   "free_gb": 62.9
+  },
+  {
+   "pos": 1,
+   "seconds": 46.23,
+   "relErrRms_vs_mirror": 0.002084141470559144,
+   "relErrRms_vs_exact": 0.0020841414705587012,
+   "logits_relErrRms_vs_exact": 0.0015180636732096788,
+   "logits_relErrRms_worst_conversation": 0.021250251885411374,
+   "top1_agree_vs_exact": 1.0,
+   "bootstraps": 94,
+   "runtime_bootstraps": 953,
+   "out_level": 46,
+   "free_gb": 59.9
+  },
+  {
+   "pos": 2,
+   "seconds": 46.2,
+   "relErrRms_vs_mirror": 0.0014613395382728166,
+   "relErrRms_vs_exact": 0.0014613395382727693,
+   "logits_relErrRms_vs_exact": 0.00037499787491637363,
+   "logits_relErrRms_worst_conversation": 0.004204220645555438,
+   "top1_agree_vs_exact": 1.0,
+   "bootstraps": 94,
+   "runtime_bootstraps": 953,
+   "out_level": 46,
+   "free_gb": 59.9
+  }
+ ],
+ "plan_runtime": {
+  "plan": {
+   "FIDESLIB_BTS_REAL": "1"
+  },
+  "effective": {
+   "FIDESLIB_BTS_REAL": "1"
+  }
+ },
+ "rotation_audit_missing": [],
+ "plans": [
+  0,
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14,
+  15,
+  16,
+  17,
+  18,
+  19,
+  20,
+  21,
+  22,
+  23,
+  24
+ ],
+ "conversations": 64,
+ "scales": "shipped",
+ "tokens": "/root/tokens.json"
+}

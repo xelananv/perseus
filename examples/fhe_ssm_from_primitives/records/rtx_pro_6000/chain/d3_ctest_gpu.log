@@ -1,0 +1,113 @@
+Test project /root/perseus_d3/build_py_n32_tests
+    Start 46: gpu_encode_layout_probe
+Could not find executable /root/perseus_d3/build_py_n32_tests/bin/gpu_encode_layout_probe
+Looked in the following places:
+/root/perseus_d3/build_py_n32_tests/bin/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/Release/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/Release/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/Debug/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/Debug/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/MinSizeRel/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/MinSizeRel/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/RelWithDebInfo/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/RelWithDebInfo/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/Deployment/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/Deployment/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/Development/gpu_encode_layout_probe
+/root/perseus_d3/build_py_n32_tests/bin/Development/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/Release/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/Release/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/Debug/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/Debug/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/MinSizeRel/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/MinSizeRel/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/RelWithDebInfo/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/RelWithDebInfo/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/Deployment/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/Deployment/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/Development/gpu_encode_layout_probe
+root/perseus_d3/build_py_n32_tests/bin/Development/gpu_encode_layout_probe
+Unable to find executable: /root/perseus_d3/build_py_n32_tests/bin/gpu_encode_layout_probe
+1/3 Test #46: gpu_encode_layout_probe ..........***Not Run   0.00 sec
+    Start 47: gpu_encode_probe
+Could not find executable /root/perseus_d3/build_py_n32_tests/bin/gpu_encode_probe
+Looked in the following places:
+/root/perseus_d3/build_py_n32_tests/bin/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/Release/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/Release/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/Debug/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/Debug/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/MinSizeRel/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/MinSizeRel/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/RelWithDebInfo/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/RelWithDebInfo/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/Deployment/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/Deployment/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/Development/gpu_encode_probe
+/root/perseus_d3/build_py_n32_tests/bin/Development/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/Release/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/Release/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/Debug/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/Debug/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/MinSizeRel/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/MinSizeRel/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/RelWithDebInfo/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/RelWithDebInfo/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/Deployment/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/Deployment/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/Development/gpu_encode_probe
+root/perseus_d3/build_py_n32_tests/bin/Development/gpu_encode_probe
+Unable to find executable: /root/perseus_d3/build_py_n32_tests/bin/gpu_encode_probe
+2/3 Test #47: gpu_encode_probe .................***Not Run   0.00 sec
+    Start 48: gpu_mag_probe_check
+Could not find executable /root/perseus_d3/build_py_n32_tests/bin/gpu_mag_probe_check
+Looked in the following places:
+/root/perseus_d3/build_py_n32_tests/bin/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/Release/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/Release/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/Debug/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/Debug/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/MinSizeRel/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/MinSizeRel/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/RelWithDebInfo/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/RelWithDebInfo/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/Deployment/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/Deployment/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/Development/gpu_mag_probe_check
+/root/perseus_d3/build_py_n32_tests/bin/Development/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/Release/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/Release/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/Debug/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/Debug/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/MinSizeRel/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/MinSizeRel/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/RelWithDebInfo/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/RelWithDebInfo/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/Deployment/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/Deployment/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/Development/gpu_mag_probe_check
+root/perseus_d3/build_py_n32_tests/bin/Development/gpu_mag_probe_check
+Unable to find executable: /root/perseus_d3/build_py_n32_tests/bin/gpu_mag_probe_check
+3/3 Test #48: gpu_mag_probe_check ..............***Not Run   0.00 sec
+
+0% tests passed, 3 tests failed out of 3
+
+Label Time Summary:
+gpu    =   0.00 sec*proc (3 tests)
+
+Total Test time (real) =   0.00 sec
+
+The following tests FAILED:
+	 46 - gpu_encode_layout_probe (Not Run)                 gpu
+	 47 - gpu_encode_probe (Not Run)                        gpu
+	 48 - gpu_mag_probe_check (Not Run)                     gpu
+Errors while running CTest

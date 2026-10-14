@@ -1,0 +1,388 @@
+[plan] out=bootstrap_placements/fhe_ssm_dev_nofeat bts_level=36 max_level=50 unit=2 table_measured=True err_target=0.01
+[plan] [block_0] (capture-derived)
+[plan] erased 106 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 7 cut pass(es); 46 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 37 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 31 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_89(20), v_6(18.9), v_4509(13.6), v_4592(11.3), v_4593(11.3), v_21361(7.16)
+[plan] placed_input_level_hist 42:6 44:1 46:11 48:10 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=36 hints=1/7 deliberate=2 total=39
+[plan] CF {'2': 7, '3': 4, '8': 6, '9': 6, '10': 14}  out-levels {'36': 37}  pred rel_err median=7.65e-05 p90=0.000102
+[plan] [block_1] (entry=42/d2)
+[plan] erased 64 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 7 cut pass(es); 46 refresh(es) placed
+[plan] feasible after 8 cut pass(es); 48 refresh(es) placed
+[plan] vetoed 1 hint(s) predicted to fire past absolute level 48; the cut covers them instead
+[plan] prune: 11 redundant refresh(es) removed
+[plan] cf clamp: 0 of 38 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan] P3c(drift): 1 cut-chosen refresh(es) priced inside the envelope now start past it by their pending rescale (nominal <= 48, within the runtime guard) in the final sim: v_172@50; PLAN_DRIFT_RECUT=1 re-cuts them.
+[plan]  P4: 29 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21389(15.1), v_21361(11.1), v_21291(10.9), v_21305(9.99), v_4509(9.74), v_21319(8.78)
+[plan] placed_input_level_hist 42:4 44:2 46:10 48:20 50:1
+[plan] P3c(reactive): 3 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_87@50, v_170@50, v_171@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=37 hints=1/7 deliberate=2 total=40
+[plan] CF {'2': 11, '3': 1, '8': 6, '9': 6, '10': 12, '11': 2}  out-levels {'36': 38}  pred rel_err median=7.16e-05 p90=0.000108
+[plan] [block_2] (entry=44/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 50 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_172(8.68), v_87(8.61), v_21311(7.96), v_4509(7.95), v_21368(7.06), v_21338(6.63)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 14, '3': 2, '8': 6, '9': 7, '10': 13}  out-levels {'36': 42}  pred rel_err median=6.88e-05 p90=0.000105
+[plan] [block_3] (entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] [block_3] infeasible at entry 46/d2 — retrying block_2 with a terminal-exit refresh on v_29758
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 51 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 43 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_172(8.68), v_87(8.61), v_21311(7.96), v_4509(7.95), v_21368(7.06), v_21338(6.63)
+[plan] placed_input_level_hist 42:6 46:2 48:25 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=41 hints=2/7 deliberate=2 total=45
+[plan] CF {'2': 15, '3': 2, '8': 6, '9': 7, '10': 13}  out-levels {'36': 43}  pred rel_err median=6.88e-05 p90=0.000105
+[plan] [block_3] (retry entry=36/d1)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 30 refresh(es) placed
+[plan] prune: 1 redundant refresh(es) removed
+[plan] cf clamp: 0 of 31 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 16 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21333(9.11), v_21375(5.19), v_21305(5.08), v_21389(5), v_21319(4.88), v_21347(4.74)
+[plan] placed_input_level_hist 42:6 44:3 48:18 50:2
+[plan] P3c(reactive): 2 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_4456@50, v_4539@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=29 hints=2/7 deliberate=2 total=33
+[plan] CF {'2': 3, '8': 8, '9': 4, '10': 16}  out-levels {'36': 31}  pred rel_err median=7.44e-05 p90=0.000106
+[plan] [block_4] (entry=44/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 50 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21354(6.84), v_21398(6.78), v_21367(6.78), v_21368(6.61), v_21400(5.88), v_21381(5.88)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 16, '8': 6, '9': 8, '10': 12}  out-levels {'36': 42}  pred rel_err median=7.58e-05 p90=0.000107
+[plan] [block_5] (entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] [block_5] infeasible at entry 46/d2 — retrying block_4 with a terminal-exit refresh on v_29758
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 51 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 43 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21354(6.84), v_21398(6.78), v_21367(6.78), v_21368(6.61), v_21400(5.88), v_21381(5.88)
+[plan] placed_input_level_hist 42:6 46:2 48:25 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=41 hints=2/7 deliberate=2 total=45
+[plan] CF {'2': 17, '8': 6, '9': 8, '10': 12}  out-levels {'36': 43}  pred rel_err median=7.58e-05 p90=0.000107
+[plan] [block_5] (retry entry=36/d1)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 30 refresh(es) placed
+[plan] prune: 1 redundant refresh(es) removed
+[plan] cf clamp: 0 of 31 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 16 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21305(4.63), v_21375(3.74), v_21324(3.39), v_21366(3.25), v_21291(3.19), v_21361(3.04)
+[plan] placed_input_level_hist 42:6 44:3 48:18 50:2
+[plan] P3c(reactive): 2 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_4456@50, v_4539@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=29 hints=2/7 deliberate=2 total=33
+[plan] CF {'2': 3, '8': 8, '9': 8, '10': 12}  out-levels {'36': 31}  pred rel_err median=6.8e-05 p90=0.000108
+[plan] [block_6] (entry=44/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 50 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21360(7.43), v_21388(7.42), v_21389(7.36), v_21361(7.34), v_21304(6.92), v_21305(6.83)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 16, '8': 6, '9': 8, '10': 12}  out-levels {'36': 42}  pred rel_err median=6.97e-05 p90=0.000107
+[plan] [block_7] (entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] [block_7] infeasible at entry 46/d2 — retrying block_6 with a terminal-exit refresh on v_29758
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 51 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 43 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21360(7.43), v_21388(7.42), v_21389(7.36), v_21361(7.34), v_21304(6.92), v_21305(6.83)
+[plan] placed_input_level_hist 42:6 46:2 48:25 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=41 hints=2/7 deliberate=2 total=45
+[plan] CF {'2': 17, '8': 6, '9': 8, '10': 12}  out-levels {'36': 43}  pred rel_err median=6.97e-05 p90=0.000107
+[plan] [block_7] (retry entry=36/d1)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 30 refresh(es) placed
+[plan] prune: 1 redundant refresh(es) removed
+[plan] cf clamp: 0 of 31 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 16 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21333(11.6), v_21389(7.5), v_21347(6.3), v_21375(5.46), v_21361(5.44), v_21305(5.04)
+[plan] placed_input_level_hist 42:6 44:3 48:18 50:2
+[plan] P3c(reactive): 2 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_4456@50, v_4539@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=29 hints=2/7 deliberate=2 total=33
+[plan] CF {'2': 2, '3': 1, '8': 8, '9': 8, '10': 12}  out-levels {'36': 31}  pred rel_err median=7.49e-05 p90=0.000107
+[plan] [block_8] (entry=44/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 50 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21332(18.3), v_21333(18.1), v_21339(8.17), v_21326(8.07), v_21388(7.44), v_21389(7.24)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 15, '3': 1, '8': 6, '9': 8, '10': 12}  out-levels {'36': 42}  pred rel_err median=7.18e-05 p90=0.000107
+[plan] [block_9] (entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] [block_9] infeasible at entry 46/d2 — retrying block_8 with a terminal-exit refresh on v_29758
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 51 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 43 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21332(18.3), v_21333(18.1), v_21339(8.17), v_21326(8.07), v_21388(7.44), v_21389(7.24)
+[plan] placed_input_level_hist 42:6 46:2 48:25 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=41 hints=2/7 deliberate=2 total=45
+[plan] CF {'2': 16, '3': 1, '8': 6, '9': 8, '10': 12}  out-levels {'36': 43}  pred rel_err median=7.18e-05 p90=0.000107
+[plan] [block_9] (retry entry=36/d1)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 30 refresh(es) placed
+[plan] prune: 1 redundant refresh(es) removed
+[plan] cf clamp: 0 of 31 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 16 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21291(8.1), v_21389(7.65), v_21375(6.08), v_21319(5.78), v_21333(5.49), v_21305(4.88)
+[plan] placed_input_level_hist 42:6 44:3 48:18 50:2
+[plan] P3c(reactive): 2 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_4456@50, v_4539@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=29 hints=2/7 deliberate=2 total=33
+[plan] CF {'2': 2, '3': 1, '8': 8, '9': 8, '10': 12}  out-levels {'36': 31}  pred rel_err median=7.49e-05 p90=0.000106
+[plan] [block_10] (entry=44/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 50 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21346(10.3), v_21347(10.2), v_21318(8.88), v_21319(8.84), v_21360(8.08), v_172(8.05)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 15, '3': 1, '8': 6, '9': 8, '10': 12}  out-levels {'36': 42}  pred rel_err median=6.65e-05 p90=0.000108
+[plan] [block_11] (entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] [block_11] infeasible at entry 46/d2 — retrying block_10 with a terminal-exit refresh on v_29758
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 51 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 43 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21346(10.3), v_21347(10.2), v_21318(8.88), v_21319(8.84), v_21360(8.08), v_172(8.05)
+[plan] placed_input_level_hist 42:6 46:2 48:25 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=41 hints=2/7 deliberate=2 total=45
+[plan] CF {'2': 16, '3': 1, '8': 6, '9': 8, '10': 12}  out-levels {'36': 43}  pred rel_err median=6.65e-05 p90=0.000108
+[plan] [block_11] (retry entry=36/d1)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 30 refresh(es) placed
+[plan] prune: 1 redundant refresh(es) removed
+[plan] cf clamp: 0 of 31 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 16 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21375(6.93), v_21291(4.06), v_21389(3.7), v_21347(3.37), v_21333(3.18), v_21319(2.61)
+[plan] placed_input_level_hist 42:6 44:3 48:18 50:2
+[plan] P3c(reactive): 2 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_4456@50, v_4539@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=29 hints=2/7 deliberate=2 total=33
+[plan] CF {'2': 2, '3': 1, '8': 8, '9': 8, '10': 12}  out-levels {'36': 31}  pred rel_err median=6.98e-05 p90=0.000107
+[plan] [block_12] (entry=44/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 50 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21340(11.4), v_172(8.49), v_4509(8.25), v_87(8.24), v_21290(7.56), v_21388(7.56)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 16, '8': 6, '9': 8, '10': 12}  out-levels {'36': 42}  pred rel_err median=6.73e-05 p90=0.000106
+[plan] [block_13] (entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] [block_13] infeasible at entry 46/d2 — retrying block_12 with a terminal-exit refresh on v_29758
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 51 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 43 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21340(11.4), v_172(8.49), v_4509(8.25), v_87(8.24), v_21290(7.56), v_21388(7.56)
+[plan] placed_input_level_hist 42:6 46:2 48:25 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=41 hints=2/7 deliberate=2 total=45
+[plan] CF {'2': 17, '8': 6, '9': 8, '10': 12}  out-levels {'36': 43}  pred rel_err median=6.73e-05 p90=0.000107
+[plan] [block_13] (retry entry=36/d1)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 30 refresh(es) placed
+[plan] prune: 1 redundant refresh(es) removed
+[plan] cf clamp: 0 of 31 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 16 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21291(8.4), v_21361(7.66), v_21347(7.38), v_21305(6.91), v_21375(6.15), v_21389(4.44)
+[plan] placed_input_level_hist 42:6 44:3 48:18 50:2
+[plan] P3c(reactive): 2 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_4456@50, v_4539@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=29 hints=2/7 deliberate=2 total=33
+[plan] CF {'2': 3, '8': 8, '9': 8, '10': 12}  out-levels {'36': 31}  pred rel_err median=6.9e-05 p90=0.000106
+[plan] [block_14] (entry=44/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 50 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_172(9.63), v_21367(9.46), v_21398(9.46), v_4592(9.32), v_4593(9.32), v_171(9.03)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 15, '3': 1, '8': 6, '9': 8, '10': 12}  out-levels {'36': 42}  pred rel_err median=6.88e-05 p90=0.000106
+[plan] [block_15] (entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] [block_15] infeasible at entry 46/d2 — retrying block_14 with a terminal-exit refresh on v_29758
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 51 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 43 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_172(9.63), v_21367(9.46), v_21398(9.46), v_4592(9.32), v_4593(9.32), v_171(9.03)
+[plan] placed_input_level_hist 42:6 46:2 48:25 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=41 hints=2/7 deliberate=2 total=45
+[plan] CF {'2': 16, '3': 1, '8': 6, '9': 8, '10': 12}  out-levels {'36': 43}  pred rel_err median=6.88e-05 p90=0.000107
+[plan] [block_15] (retry entry=36/d1)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 30 refresh(es) placed
+[plan] prune: 1 redundant refresh(es) removed
+[plan] cf clamp: 0 of 31 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 16 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21324(7.55), v_21380(5.82), v_21338(5.08), v_21366(4.63), v_21296(3.91), v_21319(3.79)
+[plan] placed_input_level_hist 42:6 44:3 48:18 50:2
+[plan] P3c(reactive): 2 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_4456@50, v_4539@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=29 hints=2/7 deliberate=2 total=33
+[plan] CF {'2': 3, '8': 8, '9': 8, '10': 12}  out-levels {'36': 31}  pred rel_err median=7.39e-05 p90=0.000105
+[plan] [block_16] (entry=44/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 50 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_172(10.6), v_4592(9.77), v_4593(9.77), v_21377(9.77), v_170(9.45), v_171(9.45)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 15, '3': 1, '8': 6, '9': 8, '10': 12}  out-levels {'36': 42}  pred rel_err median=7.52e-05 p90=0.000106
+[plan] [block_17] (entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] [block_17] infeasible at entry 46/d2 — retrying block_16 with a terminal-exit refresh on v_29758
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 51 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 43 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_172(10.6), v_4592(9.77), v_4593(9.77), v_21377(9.77), v_170(9.45), v_171(9.45)
+[plan] placed_input_level_hist 42:6 46:2 48:25 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=41 hints=2/7 deliberate=2 total=45
+[plan] CF {'2': 16, '3': 1, '8': 6, '9': 8, '10': 12}  out-levels {'36': 43}  pred rel_err median=7.52e-05 p90=0.000106
+[plan] [block_17] (retry entry=36/d1)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 30 refresh(es) placed
+[plan] prune: 1 redundant refresh(es) removed
+[plan] cf clamp: 0 of 31 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 16 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21352(6.49), v_21366(5.46), v_21296(5.21), v_21394(5.1), v_21310(4.52), v_21324(4.18)
+[plan] placed_input_level_hist 42:6 44:3 48:18 50:2
+[plan] P3c(reactive): 2 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_4456@50, v_4539@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=29 hints=2/7 deliberate=2 total=33
+[plan] CF {'2': 2, '3': 1, '8': 8, '9': 8, '10': 12}  out-levels {'36': 31}  pred rel_err median=7.77e-05 p90=0.000106
+[plan] [block_18] (entry=44/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 50 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_172(11.2), v_21298(11.1), v_4592(10.6), v_4593(10.6), v_4509(10.6), v_21391(10.3)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 14, '3': 2, '8': 6, '9': 8, '10': 12}  out-levels {'36': 42}  pred rel_err median=8.02e-05 p90=0.000106
+[plan] [block_19] (entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] [block_19] infeasible at entry 46/d2 — retrying block_18 with a terminal-exit refresh on v_29758
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 51 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 43 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_172(11.2), v_21298(11.1), v_4592(10.6), v_4593(10.6), v_4509(10.6), v_21391(10.3)
+[plan] placed_input_level_hist 42:6 46:2 48:25 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=41 hints=2/7 deliberate=2 total=45
+[plan] CF {'2': 15, '3': 2, '8': 6, '9': 8, '10': 12}  out-levels {'36': 43}  pred rel_err median=8.02e-05 p90=0.000106
+[plan] [block_19] (retry entry=36/d1)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 30 refresh(es) placed
+[plan] prune: 1 redundant refresh(es) removed
+[plan] cf clamp: 0 of 31 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 16 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21347(8.84), v_21333(5.89), v_21319(4.56), v_21389(3.4), v_21352(3.3), v_21338(3.22)
+[plan] placed_input_level_hist 42:6 44:3 48:18 50:2
+[plan] P3c(reactive): 2 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_4456@50, v_4539@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=29 hints=2/7 deliberate=2 total=33
+[plan] CF {'2': 2, '3': 1, '8': 8, '9': 8, '10': 12}  out-levels {'36': 31}  pred rel_err median=8.23e-05 p90=0.000106
+[plan] [block_20] (entry=44/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 50 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21377(20.4), v_21335(13.9), v_4509(12.3), v_172(12), v_87(11.5), v_4592(10.9)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 13, '3': 3, '8': 6, '9': 7, '10': 13}  out-levels {'36': 42}  pred rel_err median=8.77e-05 p90=0.000106
+[plan] [block_21] (entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] [block_21] infeasible at entry 46/d2 — retrying block_20 with a terminal-exit refresh on v_29758
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 51 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 43 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21377(20.4), v_21335(13.9), v_4509(12.3), v_172(12), v_87(11.5), v_4592(10.9)
+[plan] placed_input_level_hist 42:6 46:2 48:25 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=41 hints=2/7 deliberate=2 total=45
+[plan] CF {'2': 14, '3': 3, '8': 6, '9': 7, '10': 13}  out-levels {'36': 43}  pred rel_err median=8.77e-05 p90=0.000106
+[plan] [block_21] (retry entry=36/d1)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 30 refresh(es) placed
+[plan] prune: 1 redundant refresh(es) removed
+[plan] cf clamp: 0 of 31 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 16 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21380(5.9), v_21338(3.92), v_21366(3.41), v_21319(3.08), v_21296(2.88), v_21324(2.6)
+[plan] placed_input_level_hist 42:6 44:3 48:18 50:2
+[plan] P3c(reactive): 2 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_4456@50, v_4539@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=29 hints=2/7 deliberate=2 total=33
+[plan] CF {'2': 3, '8': 8, '9': 4, '10': 16}  out-levels {'36': 31}  pred rel_err median=9.03e-05 p90=0.000109
+[plan] [block_22] (entry=44/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 50 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_4592(14.7), v_4593(14.7), v_172(14.4), v_170(14.3), v_171(14.3), v_21349(12.6)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 16, '8': 6, '9': 8, '10': 12}  out-levels {'36': 42}  pred rel_err median=8.86e-05 p90=0.000107
+[plan] [block_23] (entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] [block_23] infeasible at entry 46/d2 — retrying block_22 with a terminal-exit refresh on v_29758
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 51 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 43 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_4592(14.7), v_4593(14.7), v_172(14.4), v_170(14.3), v_171(14.3), v_21349(12.6)
+[plan] placed_input_level_hist 42:6 46:2 48:25 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=41 hints=2/7 deliberate=2 total=45
+[plan] CF {'2': 17, '8': 6, '9': 8, '10': 12}  out-levels {'36': 43}  pred rel_err median=8.86e-05 p90=0.000107
+[plan] [block_23] (retry entry=36/d1)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 30 refresh(es) placed
+[plan] prune: 1 redundant refresh(es) removed
+[plan] cf clamp: 0 of 31 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 16 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21333(8.09), v_21319(6.34), v_21389(6.15), v_21361(4.11), v_21375(3.85), v_21291(3.82)
+[plan] placed_input_level_hist 42:6 44:3 48:18 50:2
+[plan] P3c(reactive): 2 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_4456@50, v_4539@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=29 hints=2/7 deliberate=2 total=33
+[plan] CF {'2': 3, '8': 8, '9': 8, '10': 12}  out-levels {'36': 31}  pred rel_err median=7.75e-05 p90=0.000107
+[plan] [block_24] (entry=44/d2)
+[plan] erased 34 reactive auto_bootstrap(s); 0 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 26 refresh(es) placed
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 16 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 4 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_172(21.5), v_170(21.1), v_171(21.1), v_87(17.3)
+[plan] placed_input_level_hist 42:2 46:2 48:4 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=16 hints=0/0 deliberate=0 total=16
+[plan] CF {'2': 4, '8': 2, '9': 4, '10': 6}  out-levels {'36': 16}  pred rel_err median=8.97e-05 p90=9.92e-05
+[plan] planned 25 blocks, 953 bootstraps, cf clamp 0/905 -> ./bootstrap_placements/fhe_ssm_dev_nofeat
+planned 25 captured stages -> 25 plans; stamped 25

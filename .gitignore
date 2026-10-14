@@ -40,5 +40,6 @@ docs/*
 !tests/fixtures/**/*.json
 !bootstrap_placements/**/*.json
 !graphs/**/*.json
+!examples/fhe_ssm_from_primitives/records/**/*.json
 # scratch plan directories from an A/B are named with a leading underscore
 bootstrap_placements/_*/

@@ -1,0 +1,72 @@
+{
+ "mode": "planned",
+ "fake": false,
+ "blocks": 24,
+ "ticks": [
+  {
+   "pos": 0,
+   "seconds": 58.39,
+   "relErrRms_vs_mirror": 0.001082658697538178,
+   "relErrRms_vs_exact": 0.0010826586975381776,
+   "logits_relErrRms_vs_exact": 0.00039831166237539405,
+   "logits_relErrRms_worst_conversation": 0.002275869521542796,
+   "top1_agree_vs_exact": 1.0,
+   "bootstraps": 94,
+   "runtime_bootstraps": 953,
+   "out_level": 46,
+   "free_gb": 62.9
+  },
+  {
+   "pos": 1,
+   "seconds": 45.97,
+   "relErrRms_vs_mirror": 0.0014085190474661545,
+   "relErrRms_vs_exact": 0.0014085190474661888,
+   "logits_relErrRms_vs_exact": 0.0005181593299009852,
+   "logits_relErrRms_worst_conversation": 0.00620610721710509,
+   "top1_agree_vs_exact": 1.0,
+   "bootstraps": 94,
+   "runtime_bootstraps": 953,
+   "out_level": 46,
+   "free_gb": 59.9
+  }
+ ],
+ "plan_runtime": {
+  "plan": {
+   "FIDESLIB_BTS_REAL": "1"
+  },
+  "effective": {
+   "FIDESLIB_BTS_REAL": "1"
+  }
+ },
+ "rotation_audit_missing": [],
+ "plans": [
+  0,
+  1,
+  2,
+  3,
+  4,
+  5,
+  6,
+  7,
+  8,
+  9,
+  10,
+  11,
+  12,
+  13,
+  14,
+  15,
+  16,
+  17,
+  18,
+  19,
+  20,
+  21,
+  22,
+  23,
+  24
+ ],
+ "conversations": 64,
+ "scales": "shipped",
+ "tokens": "/root/tokens.json"
+}

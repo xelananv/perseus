@@ -6,7 +6,8 @@ from Hugging Face (hash-pinned), the token record from the fhe-ssm repository. T
 plan sizes below were measured before this branch existed, on that card with FIDESlib at the tree of
 374f6df (built with the README's arch-guarded patch): the steps with a fresh clone of the
 `fhe-ssm-port` branch at 5d82074, the eight-tick pair with one build of it at 471a93e. This branch
-tracks upstream dev, with its FIDESlib pin and planner recipe, and is measured anew.
+tracks upstream dev, with its FIDESlib pin and planner recipe, and is measured anew: the records of
+those runs (and of the A6000 ones above) are in [`records/`](records/).
 
 ## Setup
 

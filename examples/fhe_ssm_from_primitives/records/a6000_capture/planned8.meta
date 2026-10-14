@@ -1,0 +1,18 @@
+START planned 2026-10-12T10:55:20Z
+ 10:55:20 up 5 days,  3:38,  0 user,  load average: 0.82, 1.43, 1.65
+CHAIN=n32
+CUDA_HOME=/usr/local/cuda-12.6
+FHE_STAGE_ARENA_GB=2
+FIDESLIB_KSK_PACK=1
+FIDESLIB_KSK_REGEN=2
+FIDESLIB_ROT_KEY_BAND=22
+KV_ARENA_GB=1
+LOGN=16
+OMP_NUM_THREADS=16
+PLAN_DIR=/root/perseus_head/bootstrap_placements/fhe_ssm_gpumag_ml50
+REPO=/root/perseus
+SPARSE_AUTO=2
+SPARSE_BTS_SLOTS=512,1
+TICKS=8
+END planned rc=0 2026-10-12T11:16:00Z
+ 11:16:00 up 5 days,  3:59,  0 user,  load average: 2.32, 1.69, 1.69

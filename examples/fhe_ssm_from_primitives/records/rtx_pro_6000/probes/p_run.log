@@ -1,0 +1,22 @@
+HEAD 941162c fhe_ssm port: the build requires CUDA 13.0, with the CCCL headers on the host include path
+P_PROBES_BUILD_RC=0
+PROBE stock gpu_encode_layout_probe 34 rc=0
+PROBE stock gpu_encode_probe 34 3 7 rc=0
+{"probe":"verdict","pass":true}
+PROBE stock gpu_encode_probe 44 17 11 rc=0
+{"probe":"verdict","pass":true}
+PROBE stock gpu_mag_probe_check 34 44 5 rc=0
+{"probe":"verdict","worst_rel":8.904e-16,"pass":true}
+PROBE FIDESLIB_ERRCHECK=1 gpu_encode_layout_probe 34 rc=0
+PROBE FIDESLIB_ERRCHECK=1 gpu_encode_probe 34 3 7 rc=0
+{"probe":"verdict","pass":true}
+PROBE FIDESLIB_ERRCHECK=1 gpu_encode_probe 44 17 11 rc=0
+{"probe":"verdict","pass":true}
+PROBE FIDESLIB_ERRCHECK=1 gpu_mag_probe_check 34 44 5 rc=0
+{"probe":"verdict","worst_rel":7.420e-16,"pass":true}
+P_CTEST_RC=0
+Label Time Summary:
+gpu    =  10.18 sec*proc (3 tests)
+
+Total Test time (real) =  10.19 sec
+P_DONE

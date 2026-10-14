@@ -1,0 +1,312 @@
+[ckks_env] recognized environment knobs (effective values):
+  LOGN                  = 16  [env]
+  CKKS_DEPTH            = 10  [env]
+  BTP_DEPTH_OVERHEAD    = 16  [env]
+  FIRST_MOD_BITS        = 56  [env]
+  BTP_SCALE_BITS        = 54  [env]
+  SCALE_BITS            = 54  [env]
+  CORRECTION_FACTOR     = 6  [env]
+  COMPOSITE_DEGREE      = 2  [env]
+  NUM_LARGE_DIGITS      = 6  [env]
+  AUTO_BTS_LEVEL        = 46  [env]
+  H_WEIGHT              = 192  [def]
+  BTS_ITERATIONS        = 1  [env]
+  BTS_PRECISION         = 12  [def]
+  CKKS_COMPLEX          = 1  [env]
+  SPARSE_BTS_SLOTS      = 512,1  [env]
+  LEVEL_BUDGET          = 4:3  [env]
+[ckks_params] ===== CKKS crypto context =====
+  logN=16  ringDim=65536  slots=32768
+  depth=10  btp_overhead=16  mult_depth=26  limbs=27
+  first_mod=56  scale(active)=54  (btp_scale=54 scale_bits=54)  logQ~=1460
+  bootstrap=on  correction_factor=6  bts_iters=1  bts_prec=12  auto_bts_level=46
+  secret=SPARSE_ENCAPSULATED h=192 (OpenFHE accounts UNIFORM_TERNARY)  dnum=6  complex_payload=1
+  security: HEStd_128_classic enforced & OK (logQ 1460 <= uniform-ternary budget 1761)
+[ckks_params] ===============================
+[ckks_params] keygen: h_weight=192  bts mode=ENCAPS(sparse-inside-bootstrap)
+
+Warning, the level budget for encoding is too large. Setting it to 1
+
+Warning, the level budget for decoding is too large. Setting it to 1
+GPU 0: NVIDIA RTX A6000
+ SMs: 84, SharedMem: 100 KB, Blocks/SM: 16, Threads/SM: 1536, L2 size: 6 MB, Bus: 384-bit
+[rot_band] band=22 full_keep=76 (precom entries=3)
+[rot_band] model keys: banded=20 full=42
+Adding bootstrap precomputation to GPU for 1 slots.
+Plaintexts loaded: 2 ~ 24MB
+Rotation keys loaded: 71 ~ 13418MB
+[lt_compact] slots=512 CtS stage 0: mask 0xffffffc0
+[lt_compact] slots=512 CtS stage 1: mask 0xffffff00
+[lt_compact] slots=512 CtS stage 2: mask 0xfffffc00
+[lt_compact] slots=512 CtS stage 3: mask 0xffffffe0
+[lt_compact] slots=512 StC stage 0: mask 0xffffffe0
+[lt_compact] slots=512 StC stage 1: mask 0xfffffe00
+[lt_compact] slots=512 StC stage 2: mask 0xffffffc0
+Adding bootstrap precomputation to GPU for 512 slots.
+Plaintexts loaded: 73 ~ 798MB
+[boot_lt] CtS level 0: slots=7 bStep=4 gStep=2
+[boot_lt] CtS level 1: slots=7 bStep=4 gStep=2
+[boot_lt] CtS level 2: slots=7 bStep=4 gStep=2
+[boot_lt] CtS level 3: slots=15 bStep=8 gStep=2
+[boot_lt] StC level 0: slots=15 bStep=8 gStep=2
+[boot_lt] StC level 1: slots=15 bStep=8 gStep=2
+[boot_lt] StC level 2: slots=15 bStep=8 gStep=2
+Rotation keys loaded: 78 ~ 14742MB
+[lt_compact] slots=32768 CtS stage 0: mask 0xffffffff
+[lt_compact] slots=32768 CtS stage 1: mask 0xfffffff0
+[lt_compact] slots=32768 CtS stage 2: mask 0xffffff00
+[lt_compact] slots=32768 CtS stage 3: mask 0xfffff000
+[lt_compact] slots=32768 StC stage 0: mask 0xfffffc00
+[lt_compact] slots=32768 StC stage 1: mask 0xffffffe0
+[lt_compact] slots=32768 StC stage 2: mask 0xffffffff
+Adding bootstrap precomputation to GPU for 32768 slots.
+Plaintexts loaded: 313 ~ 3450MB
+[boot_lt] CtS level 0: slots=31 bStep=16 gStep=2
+[boot_lt] CtS level 1: slots=31 bStep=16 gStep=2
+[boot_lt] CtS level 2: slots=31 bStep=16 gStep=2
+[boot_lt] CtS level 3: slots=15 bStep=8 gStep=2
+[boot_lt] StC level 0: slots=63 bStep=16 gStep=4
+[boot_lt] StC level 1: slots=63 bStep=16 gStep=4
+[boot_lt] StC level 2: slots=63 bStep=16 gStep=4
+Rotation keys loaded: 96 ~ 18144MB
+[sparse_bts] precomps={1,512} routing_default=512 vram_free_gb=35.5074
+[ksk_regen] active: fusedDotKSK regenerating kska from seed (stage B, register)
+[ksk_regen] active: hoistedRotateDotKSK regenerating kska from seed (stage B)
+[lt_fused_rescale] stage-end ModDown+rescale fused
+[cheb_ps] n=14 k=5 m=2
+[bts-level] btp_overhead=16 bts_iterations=1 params_formula=32 probed=34 -> encoding weights at level 34
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+{"pos": 0, "seconds": 237.31, "relErrRms_vs_mirror": 0.009578331489069728, "relErrRms_vs_exact": 0.009578331489069784, "logits_relErrRms_vs_exact": 0.004005590182208354, "logits_relErrRms_worst_conversation": 0.029552080584807423, "top1_agree_vs_exact": 1.0, "bootstraps": 136, "runtime_bootstraps": 1968, "out_level": 38, "free_gb": 14.2}
+[mag] items=29258 copies=608 store_ms=1067273 backpressure_ms=0
+[mag] items=29216 copies=608 store_ms=1142894 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1040254 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1045883 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1046818 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1043974 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1043716 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1036197 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1041526 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1039998 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1045057 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1081794 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1031971 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1043127 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1044146 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1043040 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1047375 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1044809 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1043442 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1035462 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1080011 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1062174 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1038900 backpressure_ms=0
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[mag] items=29226 copies=608 store_ms=1040904 backpressure_ms=0
+[mag] items=187 copies=20 store_ms=80 backpressure_ms=0
+{"pos": 1, "seconds": 26974.62, "relErrRms_vs_mirror": 0.010143577668730861, "relErrRms_vs_exact": 0.010143577668730868, "logits_relErrRms_vs_exact": 0.004272749535695374, "logits_relErrRms_worst_conversation": 0.02183886503066422, "top1_agree_vs_exact": 1.0, "bootstraps": 136, "runtime_bootstraps": 1968, "out_level": 38, "free_gb": 13.1}
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36
+[planted_bts] hint var= s=0 cf=-1 in=44 out=36

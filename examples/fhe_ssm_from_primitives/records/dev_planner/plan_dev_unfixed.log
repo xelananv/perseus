@@ -1,0 +1,313 @@
+[plan] out=bootstrap_placements/fhe_ssm_dev bts_level=36 max_level=50 unit=2 table_measured=True err_target=0.01
+[plan] [block_0] (capture-derived)
+[plan] erased 106 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 7 cut pass(es); 46 refresh(es) placed
+[plan] shared_realize: 227 shared-operand realize anchor(s), bootstraps 47 -> 47
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 37 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 31 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_89(20), v_6(18.9), v_4509(13.6), v_4592(11.3), v_4593(11.3), v_21361(7.16)
+[plan] placed_input_level_hist 42:6 44:1 46:11 48:10 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=36 hints=1/7 deliberate=2 total=39
+[plan] CF {'2': 7, '3': 4, '8': 6, '9': 6, '10': 14}  out-levels {'36': 37}  pred rel_err median=7.65e-05 p90=0.000102
+[plan] [block_1] (entry=42/d2)
+[plan] erased 64 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 7 cut pass(es); 46 refresh(es) placed
+[plan] feasible after 8 cut pass(es); 48 refresh(es) placed
+[plan] vetoed 1 hint(s) predicted to fire past absolute level 48; the cut covers them instead
+[plan] shared_realize: 230 shared-operand realize anchor(s), bootstraps 49 -> 49
+[plan] prune: 11 redundant refresh(es) removed
+[plan] cf clamp: 0 of 38 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan] P3c(drift): 1 cut-chosen refresh(es) priced inside the envelope now start past it by their pending rescale (nominal <= 48, within the runtime guard) in the final sim: v_172@50; PLAN_DRIFT_RECUT=1 re-cuts them.
+[plan]  P4: 29 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_21389(15.1), v_21361(11.1), v_21291(10.9), v_21305(9.99), v_4509(9.74), v_21319(8.78)
+[plan] placed_input_level_hist 42:4 44:2 46:10 48:20 50:1
+[plan] P3c(reactive): 3 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_87@50, v_170@50, v_171@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=37 hints=1/7 deliberate=2 total=40
+[plan] CF {'2': 11, '3': 1, '8': 6, '9': 6, '10': 12, '11': 2}  out-levels {'36': 38}  pred rel_err median=7.16e-05 p90=0.000108
+[plan] [block_2] (entry=44/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 50 refresh(es) placed
+[plan] shared_realize: 198 shared-operand realize anchor(s), bootstraps 52 -> 52
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_172(8.68), v_87(8.61), v_21311(7.96), v_4509(7.95), v_21368(7.06), v_21338(6.63)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 14, '3': 2, '8': 6, '9': 7, '10': 13}  out-levels {'36': 42}  pred rel_err median=6.88e-05 p90=0.000105
+[plan] [block_3] (entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] [block_3] infeasible at entry 46/d2 — retrying block_2 with a terminal-exit refresh on v_29758
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+[plan] feasible after 8 cut pass(es); 51 refresh(es) placed
+[plan] shared_realize: 198 shared-operand realize anchor(s), bootstraps 53 -> 52
+[plan] prune: 10 redundant refresh(es) removed
+[plan] cf clamp: 0 of 42 typed sites at cf_max=20 (0 pinned; 0 miss err_target=0.01)
+[plan]  P4: 86 branch(es) fed an over-budget op but were never cuttable (non-binding operands the min-cut cannot see). Largest |m|: v_172(8.68), v_87(8.61), v_21311(7.96), v_4509(7.95), v_21368(7.06), v_21338(6.63)
+[plan] placed_input_level_hist 42:6 46:2 48:24 50:8
+[plan] P3c(reactive): 8 var(s) are predicted past the envelope (abs level > 48) with NO placed or hinted refresh -- the runtime will refresh them there and stop with [bts_depth_error]: v_44@50, v_54@50, v_64@50, v_74@50, v_127@50, v_137@50  -> lower --max-level. (--baseline-depth-cap does NOT cover this class: it bounds a PLACED refresh's input depth, and these are precisely the vars nothing places.)
+[plan] placements=40 hints=2/7 deliberate=2 total=44
+[plan] CF {'2': 14, '3': 2, '8': 6, '9': 7, '10': 13}  out-levels {'36': 42}  pred rel_err median=6.88e-05 p90=0.000105
+[plan] [block_3] (retry entry=46/d2)
+[plan] erased 74 reactive auto_bootstrap(s); 2 deliberate fixed point(s) kept
+Traceback (most recent call last):
+  File "<perseus>/perseus/plan/placer/place.py", line 647, in _one_cut_impl
+    cut_value, (side_s, _) = nx.minimum_cut(F, "S", "T")
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<class 'networkx.utils.decorators.argmap'> compilation 20", line 3, in argmap_minimum_cut_17
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/utils/backends.py", line 551, in _call_if_no_backends_installed
+    return self.orig_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/maxflow.py", line 458, in minimum_cut
+    R = flow_func(flowG, _s, _t, capacity=capacity, value_only=True, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<class 'networkx.utils.decorators.argmap'> compilation 24", line 3, in argmap_preflow_push_21
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/utils/backends.py", line 551, in _call_if_no_backends_installed
+    return self.orig_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/preflowpush.py", line 422, in preflow_push
+    R = preflow_push_impl(G, s, t, capacity, residual, global_relabel_freq, value_only)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/preflowpush.py", line 41, in preflow_push_impl
+    detect_unboundedness(R, s, t)
+  File "<class 'networkx.utils.decorators.argmap'> compilation 32", line 3, in argmap_detect_unboundedness_29
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/utils/backends.py", line 551, in _call_if_no_backends_installed
+    return self.orig_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/utils.py", line 178, in detect_unboundedness
+    raise nx.NetworkXUnbounded(
+networkx.exception.NetworkXUnbounded: Infinite capacity path, flow unbounded above.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<perseus>/perseus/plan/placer/place.py", line 528, in _one_cut
+    return self._one_cut_impl(sim, deep_operands=True)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/place.py", line 655, in _one_cut_impl
+    raise PlanInfeasible(
+perseus.plan.placer.place.PlanInfeasible: every S->T path crosses only unrefreshable sites (infinite cut); over-budget ops: ['square@blk3.blk3.tm.norm', 'mult@blk3.blk3.tm.norm', 'add@blk3.blk3.tm.norm', 'mult@blk3.blk3.tm.norm', 'square@blk3.blk3.tm.norm', 'mult@blk3.blk3.tm.norm']; finite candidates in net: ['v_1', 'v_10', 'v_100', 'v_1000', 'v_10000', 'v_10001', 'v_10002', 'v_10003']
+  refused site(s):
+    anon_87301: fresh graph input — never refreshable
+    tile4294967338.0.0: fresh graph input — never refreshable
+    tile4294967338.0.1: fresh graph input — never refreshable
+    tile4294967338.0.10: fresh graph input — never refreshable
+    tile4294967338.0.11: fresh graph input — never refreshable
+    tile4294967338.0.12: fresh graph input — never refreshable
+    tile4294967338.0.13: fresh graph input — never refreshable
+    tile4294967338.0.14: fresh graph input — never refreshable
+    tile4294967338.0.15: fresh graph input — never refreshable
+    tile4294967338.0.16: fresh graph input — never refreshable
+    tile4294967338.0.17: fresh graph input — never refreshable
+    tile4294967338.0.18: fresh graph input — never refreshable
+    ... and 10231 more
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<perseus>/perseus/plan/placer/place.py", line 647, in _one_cut_impl
+    cut_value, (side_s, _) = nx.minimum_cut(F, "S", "T")
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<class 'networkx.utils.decorators.argmap'> compilation 20", line 3, in argmap_minimum_cut_17
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/utils/backends.py", line 551, in _call_if_no_backends_installed
+    return self.orig_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/maxflow.py", line 458, in minimum_cut
+    R = flow_func(flowG, _s, _t, capacity=capacity, value_only=True, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<class 'networkx.utils.decorators.argmap'> compilation 24", line 3, in argmap_preflow_push_21
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/utils/backends.py", line 551, in _call_if_no_backends_installed
+    return self.orig_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/preflowpush.py", line 422, in preflow_push
+    R = preflow_push_impl(G, s, t, capacity, residual, global_relabel_freq, value_only)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/preflowpush.py", line 41, in preflow_push_impl
+    detect_unboundedness(R, s, t)
+  File "<class 'networkx.utils.decorators.argmap'> compilation 32", line 3, in argmap_detect_unboundedness_29
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/utils/backends.py", line 551, in _call_if_no_backends_installed
+    return self.orig_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/utils.py", line 178, in detect_unboundedness
+    raise nx.NetworkXUnbounded(
+networkx.exception.NetworkXUnbounded: Infinite capacity path, flow unbounded above.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<perseus>/perseus/plan/placer/planner.py", line 1092, in plan_graph_dir
+    result = plan_block(gf, cfg, entry_level=entry_level, entry_deg=entry_deg,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/planner.py", line 628, in plan_block
+    sim = placer.run()
+          ^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/place.py", line 335, in run
+    return self._run_with_hint_veto()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/place.py", line 393, in _run_with_hint_veto
+    res = self._run_once()
+          ^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/place.py", line 472, in _run_once
+    cut_vars = self._one_cut(sim)
+               ^^^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/place.py", line 530, in _one_cut
+    return self._one_cut_impl(sim, deep_operands=False)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/place.py", line 655, in _one_cut_impl
+    raise PlanInfeasible(
+perseus.plan.placer.place.PlanInfeasible: every S->T path crosses only unrefreshable sites (infinite cut); over-budget ops: ['square@blk3.blk3.tm.norm', 'mult@blk3.blk3.tm.norm', 'add@blk3.blk3.tm.norm', 'mult@blk3.blk3.tm.norm', 'square@blk3.blk3.tm.norm', 'mult@blk3.blk3.tm.norm']; finite candidates in net: ['v_1', 'v_10', 'v_100', 'v_1000', 'v_10000', 'v_10001', 'v_10002', 'v_10003']
+  refused site(s):
+    anon_87301: fresh graph input — never refreshable
+    tile4294967338.0.0: fresh graph input — never refreshable
+    tile4294967338.0.1: fresh graph input — never refreshable
+    tile4294967338.0.10: fresh graph input — never refreshable
+    tile4294967338.0.11: fresh graph input — never refreshable
+    tile4294967338.0.12: fresh graph input — never refreshable
+    tile4294967338.0.13: fresh graph input — never refreshable
+    tile4294967338.0.14: fresh graph input — never refreshable
+    tile4294967338.0.15: fresh graph input — never refreshable
+    tile4294967338.0.16: fresh graph input — never refreshable
+    tile4294967338.0.17: fresh graph input — never refreshable
+    tile4294967338.0.18: fresh graph input — never refreshable
+    ... and 10231 more
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<perseus>/perseus/plan/placer/place.py", line 647, in _one_cut_impl
+    cut_value, (side_s, _) = nx.minimum_cut(F, "S", "T")
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<class 'networkx.utils.decorators.argmap'> compilation 20", line 3, in argmap_minimum_cut_17
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/utils/backends.py", line 551, in _call_if_no_backends_installed
+    return self.orig_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/maxflow.py", line 458, in minimum_cut
+    R = flow_func(flowG, _s, _t, capacity=capacity, value_only=True, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<class 'networkx.utils.decorators.argmap'> compilation 24", line 3, in argmap_preflow_push_21
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/utils/backends.py", line 551, in _call_if_no_backends_installed
+    return self.orig_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/preflowpush.py", line 422, in preflow_push
+    R = preflow_push_impl(G, s, t, capacity, residual, global_relabel_freq, value_only)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/preflowpush.py", line 41, in preflow_push_impl
+    detect_unboundedness(R, s, t)
+  File "<class 'networkx.utils.decorators.argmap'> compilation 32", line 3, in argmap_detect_unboundedness_29
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/utils/backends.py", line 551, in _call_if_no_backends_installed
+    return self.orig_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/utils.py", line 178, in detect_unboundedness
+    raise nx.NetworkXUnbounded(
+networkx.exception.NetworkXUnbounded: Infinite capacity path, flow unbounded above.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<perseus>/perseus/plan/placer/place.py", line 528, in _one_cut
+    return self._one_cut_impl(sim, deep_operands=True)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/place.py", line 655, in _one_cut_impl
+    raise PlanInfeasible(
+perseus.plan.placer.place.PlanInfeasible: every S->T path crosses only unrefreshable sites (infinite cut); over-budget ops: ['square@blk3.blk3.tm.norm', 'mult@blk3.blk3.tm.norm', 'add@blk3.blk3.tm.norm', 'mult@blk3.blk3.tm.norm', 'square@blk3.blk3.tm.norm', 'mult@blk3.blk3.tm.norm']; finite candidates in net: ['v_1', 'v_10', 'v_100', 'v_1000', 'v_10000', 'v_10001', 'v_10002', 'v_10003']
+  refused site(s):
+    anon_87301: fresh graph input — never refreshable
+    tile4294967338.0.0: fresh graph input — never refreshable
+    tile4294967338.0.1: fresh graph input — never refreshable
+    tile4294967338.0.10: fresh graph input — never refreshable
+    tile4294967338.0.11: fresh graph input — never refreshable
+    tile4294967338.0.12: fresh graph input — never refreshable
+    tile4294967338.0.13: fresh graph input — never refreshable
+    tile4294967338.0.14: fresh graph input — never refreshable
+    tile4294967338.0.15: fresh graph input — never refreshable
+    tile4294967338.0.16: fresh graph input — never refreshable
+    tile4294967338.0.17: fresh graph input — never refreshable
+    tile4294967338.0.18: fresh graph input — never refreshable
+    ... and 10231 more
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "<perseus>/perseus/plan/placer/place.py", line 647, in _one_cut_impl
+    cut_value, (side_s, _) = nx.minimum_cut(F, "S", "T")
+                             ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<class 'networkx.utils.decorators.argmap'> compilation 20", line 3, in argmap_minimum_cut_17
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/utils/backends.py", line 551, in _call_if_no_backends_installed
+    return self.orig_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/maxflow.py", line 458, in minimum_cut
+    R = flow_func(flowG, _s, _t, capacity=capacity, value_only=True, **kwargs)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<class 'networkx.utils.decorators.argmap'> compilation 24", line 3, in argmap_preflow_push_21
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/utils/backends.py", line 551, in _call_if_no_backends_installed
+    return self.orig_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/preflowpush.py", line 422, in preflow_push
+    R = preflow_push_impl(G, s, t, capacity, residual, global_relabel_freq, value_only)
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/preflowpush.py", line 41, in preflow_push_impl
+    detect_unboundedness(R, s, t)
+  File "<class 'networkx.utils.decorators.argmap'> compilation 32", line 3, in argmap_detect_unboundedness_29
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/utils/backends.py", line 551, in _call_if_no_backends_installed
+    return self.orig_func(*args, **kwargs)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<work>/venv311/lib/python3.11/site-packages/networkx/algorithms/flow/utils.py", line 178, in detect_unboundedness
+    raise nx.NetworkXUnbounded(
+networkx.exception.NetworkXUnbounded: Infinite capacity path, flow unbounded above.
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "<perseus>/perseus/plan/placer/__main__.py", line 232, in <module>
+    main()
+  File "<perseus>/perseus/plan/placer/__main__.py", line 221, in main
+    summaries = plan_graph_dir(graph_dir, out_dir, cfg)
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/planner.py", line 1116, in plan_graph_dir
+    result = plan_block(gf, cfg, entry_level=entry_level, entry_deg=entry_deg,
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/planner.py", line 628, in plan_block
+    sim = placer.run()
+          ^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/place.py", line 335, in run
+    return self._run_with_hint_veto()
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/place.py", line 393, in _run_with_hint_veto
+    res = self._run_once()
+          ^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/place.py", line 472, in _run_once
+    cut_vars = self._one_cut(sim)
+               ^^^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/place.py", line 530, in _one_cut
+    return self._one_cut_impl(sim, deep_operands=False)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "<perseus>/perseus/plan/placer/place.py", line 655, in _one_cut_impl
+    raise PlanInfeasible(
+perseus.plan.placer.place.PlanInfeasible: every S->T path crosses only unrefreshable sites (infinite cut); over-budget ops: ['square@blk3.blk3.tm.norm', 'mult@blk3.blk3.tm.norm', 'add@blk3.blk3.tm.norm', 'mult@blk3.blk3.tm.norm', 'square@blk3.blk3.tm.norm', 'mult@blk3.blk3.tm.norm']; finite candidates in net: ['v_1', 'v_10', 'v_100', 'v_1000', 'v_10000', 'v_10001', 'v_10002', 'v_10003']
+  refused site(s):
+    anon_87301: fresh graph input — never refreshable
+    tile4294967338.0.0: fresh graph input — never refreshable
+    tile4294967338.0.1: fresh graph input — never refreshable
+    tile4294967338.0.10: fresh graph input — never refreshable
+    tile4294967338.0.11: fresh graph input — never refreshable
+    tile4294967338.0.12: fresh graph input — never refreshable
+    tile4294967338.0.13: fresh graph input — never refreshable
+    tile4294967338.0.14: fresh graph input — never refreshable
+    tile4294967338.0.15: fresh graph input — never refreshable
+    tile4294967338.0.16: fresh graph input — never refreshable
+    tile4294967338.0.17: fresh graph input — never refreshable
+    tile4294967338.0.18: fresh graph input — never refreshable
+    ... and 10231 more
+Traceback (most recent call last):
+  File "<frozen runpy>", line 198, in _run_module_as_main
+  File "<frozen runpy>", line 88, in _run_code
+  File "<perseus>/examples/fhe_ssm_from_primitives/plan.py", line 122, in <module>
+    sys.exit(main())
+             ^^^^^^
+  File "<perseus>/examples/fhe_ssm_from_primitives/plan.py", line 114, in main
+    subprocess.run(["bash", str(RUNNER)], cwd=ROOT, env=full, check=True)
+  File "<home>/.local/share/uv/python/cpython-3.11.15-macos-aarch64-none/lib/python3.11/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['bash', '<perseus>/scripts/utils/run_bootstrap_all_blocks.sh']' returned non-zero exit status 1.

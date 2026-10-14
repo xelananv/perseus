@@ -1,0 +1,26 @@
+block_0_placement.json: capture_env
+block_1_placement.json: capture_env
+block_2_placement.json: capture_env, real_route (one side only)
+block_3_placement.json: capture_env
+block_4_placement.json: capture_env, real_route (one side only)
+block_5_placement.json: capture_env
+block_6_placement.json: capture_env, real_route (one side only)
+block_7_placement.json: capture_env
+block_8_placement.json: capture_env, real_route (one side only)
+block_9_placement.json: capture_env
+block_10_placement.json: capture_env, real_route (one side only)
+block_11_placement.json: capture_env
+block_12_placement.json: capture_env, real_route (one side only)
+block_13_placement.json: capture_env
+block_14_placement.json: capture_env, real_route (one side only)
+block_15_placement.json: capture_env
+block_16_placement.json: capture_env, real_route (one side only)
+block_17_placement.json: capture_env
+block_18_placement.json: capture_env, real_route (one side only)
+block_19_placement.json: capture_env
+block_20_placement.json: capture_env, real_route (one side only)
+block_21_placement.json: capture_env
+block_22_placement.json: capture_env, real_route (one side only)
+block_23_placement.json: capture_env
+block_24_placement.json: capture_env, real_route (one side only)
+keys that differ, over all blocks: {'capture_env': 25, 'real_route': 12}

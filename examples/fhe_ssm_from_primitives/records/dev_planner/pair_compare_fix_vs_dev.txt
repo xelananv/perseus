@@ -1,0 +1,27 @@
+plan                                               A=B  A=ship  B=ship  first difference A vs B
+gpt2_decode_python_n32                            True    True    True  
+gpt2_decode_python_n32_dense                     False   False   False  block_0_feedback_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_526', '
+gpt2_decode_python_n32_ilp                        True   False   False  
+gpt2_decode_python_n32_shipped                    True    True    True  
+gpt2_decode_python_n32_smcheb                     True    True    True  
+gpt2_decode_python_n32_stcf_accurate              True   False   False  
+gpt2_decode_python_n32_top512                     True    True    True  
+gpt2_decode_python_n64                            True   False   False  
+gpt2_decode_python_n64_dense                      True   False   False  
+gpt2_heat_decode_python_n32                      False   False   False  block_0_feedback_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_455', '
+gpt2_heat_decode_python_n32_ilp                   True   False   False  
+python/ablations/cf_fixed_10                     False   False   False  block_0_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_643', 'v_599', '
+python/ablations/cf_fixed_7                      False   False   False  block_11_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_533', 'v_395', 
+python/ablations/cf_fixed_8                      False   False   False  block_11_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_533', 'v_595', 
+python/ablations/cf_fixed_9                      False   False   False  block_0_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_599', 'v_643'] -
+python/ablations/kappa_1                         False   False   False  block_11_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_533', 'v_395', 
+python/ablations/kappa_128                       False   False   False  block_10_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_490', 'v_395'] 
+python/ablations/kappa_16                        False   False   False  block_10_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_490', 'v_395'] 
+python/ablations/kappa_32                        False   False   False  block_11_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_614', 'v_395', 
+python/ablations/kappa_4                         False   False   False  block_10_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_395', 'v_490'] 
+python/ablations/kappa_64                        False   False   False  block_10_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_490', 'v_395'] 
+python/ablations/kappa_8                         False   False   False  block_10_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_395', 'v_490'] 
+python/fhelipe                                   False   False   False  block_0_feedback_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_1375', 
+python/fhelipe_dense                             False   False   False  block_0_feedback_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_596', '
+shift/all3_veto1                                 False   False   False  block_4_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_797', 'v_487', '
+shift/gpt2_decode_python_n32                     False   False   False  block_10_placement.json: summary regressed at summary.bts_quality.env_cap.placed_past_cap: ['v_428', 'v_539'] 

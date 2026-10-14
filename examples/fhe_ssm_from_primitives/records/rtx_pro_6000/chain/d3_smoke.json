@@ -1,0 +1,57 @@
+{
+ "session": "gpu",
+ "open_seconds": 38.5,
+ "build": "{'version': '0.1.0', 'chain': 'n32', 'native_int_bits': 32, 'pybind11': '3.1.0', 'cuda_runtime': 13000, 'compiled': 'Oct 13 2026 17:36:06'}",
+ "rotation_audit": {
+  "n_missing": 0,
+  "missing": []
+ },
+ "roundtrip": {
+  "ok": true,
+  "relErrRms": 4.363790410908752e-10,
+  "level": 34,
+  "seconds": 0.43,
+  "free_gb_before": 82.48,
+  "free_gb_after": 81.68
+ },
+ "linear": {
+  "ok": true,
+  "relErrRms": 3.4177161385552077e-10,
+  "seconds": 0.15,
+  "free_gb_before": 81.68,
+  "free_gb_after": 80.92
+ },
+ "ticks": {
+  "ok": true,
+  "ticks": [
+   {
+    "pos": 0,
+    "seconds": 5.27,
+    "projected_full_tick_s": 126.4,
+    "relErrRms_vs_mirror": 0.012517366893174247,
+    "relErrRms_vs_exact": 0.012517366919946505,
+    "logits_relErrRms_vs_exact": 0.039210688053091775,
+    "top1_agree_vs_exact": 1.0,
+    "out_level": 36,
+    "bootstraps_total": 4,
+    "runtime_bootstraps_total": 141
+   },
+   {
+    "pos": 1,
+    "seconds": 4.85,
+    "projected_full_tick_s": 116.4,
+    "relErrRms_vs_mirror": 0.012659390894316055,
+    "relErrRms_vs_exact": 0.012659388974649952,
+    "logits_relErrRms_vs_exact": 0.027673946633515075,
+    "top1_agree_vs_exact": 1.0,
+    "out_level": 36,
+    "bootstraps_total": 6,
+    "runtime_bootstraps_total": 279
+   }
+  ],
+  "seconds": 10.3,
+  "free_gb_before": 80.92,
+  "free_gb_after": 70.03
+ },
+ "total_seconds": 50.0
+}
