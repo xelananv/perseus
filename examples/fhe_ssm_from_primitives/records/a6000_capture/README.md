@@ -31,8 +31,14 @@ their decrypted magnitudes differ by the FHE error of each; the script reports t
 | device probe | 1,297 (`plan_gpumag_ml48.log`:271) | 959 (`plan_gpumag_ml50.log`:373) |
 | second device probe | 1,295 (`plan_gpumag2_ml48.log`:270) | 956 (`plan_gpumag2_ml50.log`:383) |
 
-(refreshes per tick). The plan files differ in equal-cost site choices (`plans.identical` 0 of 25 at 48;
-`decision_identical` 22 of 25 at 50); the costs agree.
+(refreshes per tick). The plans split in block 0, which ends at a different level from each capture: 44 from the host
+capture and 40 from the device one, at 56 vs 52 refreshes (ceiling 48) and 39 vs 36 (ceiling 50) — the block-0
+`placements=` lines of the four planner logs. Each block is planned from the level the previous one ends at, so the
+split carries forward: at 48 both plans run the same six-block cycle with the device plan two blocks behind
+(`plans.identical` 0 of 25) and the tick totals come out equal; at 50 blocks 0–2 differ (117 vs 119 refreshes) and
+blocks 3–24 are decision-identical (`decision_identical` 22 of 25). The second device capture's block 0 ends at 44, like
+the host capture's (54 and 38 refreshes), and its plans split from the first device capture's in the same way
+(`compare_gpumag_runs_*.json`): the split is run-to-run noise, not the probe.
 
 **Eight planned ticks** with the device capture's ceiling-50 plan (`planned8.log`, `planned8.json`, `planned8.meta`):
 959 runtime refreshes every tick, logits relative error vs the closed form 0.000265–0.000958, top-1 agreement 1.0 on
