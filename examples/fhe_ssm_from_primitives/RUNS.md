@@ -100,3 +100,36 @@ kernels on numpy), `relErrRms_vs_exact` and `logits_relErrRms_vs_exact` (against
 closed-form forward, with the worst conversation), `top1_agree_vs_exact`, the refreshes (`bootstraps`
 deliberate, `runtime_bootstraps` in total), `out_level` and `free_gb`; the header records Perseus's
 commit and the sha256 of the weights, seeds and config. The README's table explains each field.
+
+## Where a tick's time went: `--metrics`, the box sampler and the blip analysis
+
+Both 148-tick runs on the PRO 6000 slowed at ticks 16, 34, 70 and 142 with the refresh count and
+the device memory unchanged (`records/rtx_pro_6000/README.md`); the reports hold only each tick's
+`seconds`, and the 5-second `nvidia-smi` stream beside them has no per-tick timestamps. Three tools
+make the next such run explainable from its records alone:
+
+```bash
+python -m examples.fhe_ssm_from_primitives.sample_box --out samples --gpu 0 --pid $RUN_PID &   # 1-second GPU and host samples, process lists
+python -m examples.fhe_ssm_from_primitives.gpu_run $M --mode planned --plan-dir bootstrap_placements/fhe_ssm \
+    --tokens tokens.json --free-run --ticks 80 --out planned80.json --metrics planned80.jsonl
+python -m examples.fhe_ssm_from_primitives.blips --report planned80.json --metrics planned80.jsonl \
+    --nvsmi samples/gpu.csv --host samples/host.csv --label planned80 --out blips
+```
+
+`--metrics` appends one JSON line per tick, flushed before the next tick starts (`tickmetrics.py`):
+the step's wall-clock window, its CPU time, page faults and context switches, the scheduler's
+run-queue wait, bytes read and written, Python's collector, glibc's arena, the process's RSS and
+swap and the box's available memory and load, the runtime's bootstrap and encode counters and its
+encode cache, what `ImplModel.token_end` measures (ring gaps, mask staging), and every stage's wall,
+CPU and faults, so a slow tick is charged to a block or to the gaps between blocks. The header line
+carries the build identity (commit, `_core` sha256, `build_info`), the environment and the load
+state at the start. `sample_box.py` streams `nvidia-smi` (memory used and reserved, utilisation,
+clocks, temperature, power, the active clock-event reasons) and `/proc` once a second and the top
+processes every five, each row stamped with the epoch. `blips.py` marks the ticks more than six
+robust standard deviations above the median, tests the spacing for the doubling signature of a
+container growing by reallocation, scores every sampled metric at each blip against the normal
+ticks (robust z, percentile, Spearman correlation with `seconds`), cuts the samplers' streams into
+the ticks' windows (fitted from `--start` when a run has no per-tick timestamps, as the two 148-tick
+records) and draws the figure. On those records it finds the four blips in each run, the gaps
+doubling as `tick + 2`, the excess growing by about 0.055 s per tick, and the GPU idle in the middle
+of the blip ticks that the samples caught: the excess is a host-side pause.

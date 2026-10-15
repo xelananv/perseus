@@ -10,7 +10,7 @@
     source scripts/local_env.sh      # the n32 chain's defaults
     python -m examples.fhe_ssm_from_primitives.gpu_run --weights W --seeds S --config C \\
         --mode eager|capture|planned [--graph-dir DIR] [--plan-dir DIR] [--ticks 4] [--blocks 24] \\
-        [--tokens tokens.json] [--scales shipped] [--out run.json] [--fake]
+        [--tokens tokens.json] [--scales shipped] [--out run.json] [--fake] [--metrics run.jsonl]
 
 Every tick is checked against the mirror (the same kernels and folds on numpy) and the
 trainer's closed form: the reply's error, the logits' error and top-1 agreement on the tied
@@ -21,7 +21,9 @@ each conversation's prompt teacher-forced and then feeds back the pick of the re
 policy (``decodePolicy``, decode.py) on the decrypted logits, the conversation's fed tokens as its
 history: how the published run generated its tokens. The same policy on the closed form's logits,
 on the same history, gives the fidelity check (``pick_agree_vs_exact``); agreement with the record
-is counted only over the conversations whose fed tokens still match it.
+is counted only over the conversations whose fed tokens still match it. ``--metrics`` appends
+one JSON line per tick with where the tick's time went and the process's and the box's state
+beside it (tickmetrics.py), flushed before the next tick starts.
 """
 
 from __future__ import annotations
@@ -44,6 +46,7 @@ from .decode import Policy
 from .gpu_smoke import open_session
 from .model import PAYLOADS, FheSsmModel
 from .ref import ExactModel, MirrorModel, rel_err_rms
+from .tickmetrics import TickMeter
 from .weights import load_model
 
 MODES = ("eager", "capture", "planned")
@@ -137,13 +140,16 @@ class FreeRun:
         }
 
 
-def tick_record(model, rows, pos, mirror, exact, emb, before, decode=None):
+def tick_record(model, rows, pos, mirror, exact, emb, before, decode=None, meter=None):
     """One tick: the model against both references, its time and its refreshes; ``decode``
-    (free running) also gets the decrypted and the closed form's logits."""
+    (free running) also gets the decrypted and the closed form's logits; ``meter`` (a
+    TickMeter) brackets the step and gets the row to write."""
     # the runtime's own count (deliberate + reactive + iterations), where it exposes one: the
     # port's n_bootstraps counts only its explicit hints and carries
     fhe = getattr(model.inf, "fhe", None)
     rt0 = getattr(fhe, "total_bootstraps", None)
+    if meter is not None:
+        meter.begin(pos)
     t0 = time.time()
     rec = model.step(rows, pos)
     seconds = time.time() - t0
@@ -152,7 +158,7 @@ def tick_record(model, rows, pos, mirror, exact, emb, before, decode=None):
     got_logits, want_logits = rec["out"] @ emb.T, want @ emb.T
     per_conv = [rel_err_rms(got_logits[k], want_logits[k]) for k in range(len(rows))]
     extra = decode(got_logits, want_logits) if decode is not None else {}
-    return {
+    row = {
         "pos": pos,
         "seconds": round(seconds, 2),
         "relErrRms_vs_mirror": rel_err_rms(rec["out"], mirror.step(rows)),
@@ -168,6 +174,18 @@ def tick_record(model, rows, pos, mirror, exact, emb, before, decode=None):
         "free_gb": rec.get("free_gb"),
         **extra,
     }
+    if meter is not None:
+        meter.end(pos, round(seconds, 3), rec, row)
+    return row
+
+
+def open_meter(a, core, report: dict):
+    """The per-tick meter of ``--metrics`` (tickmetrics.py), or a no-op context without it."""
+    if not a.metrics:
+        return contextlib.nullcontext()
+    report["metrics"] = str(a.metrics)
+    keys = ("mode", "ticks", "blocks", "tokens", "free_run", "plan_dir", "weights", "fake")
+    return TickMeter(a.metrics, core=core, run={k: getattr(a, k) for k in keys})
 
 
 def fake_session(params, payload):
@@ -225,7 +243,7 @@ def run(a) -> dict:
                 file=sys.stderr,
                 flush=True,
             )
-    with session as s:
+    with session as s, open_meter(a, core, report) as meter:
         inf = s if a.fake else s.inf
         model = FheSsmModel(
             inf,
@@ -236,6 +254,8 @@ def run(a) -> dict:
             resident_weights=False,
             scales=folds,
         )
+        if meter is not None:
+            meter.attach(model)
         missing = model.rotation_audit()
         report["rotation_audit_missing"] = missing[:16]
         if missing:
@@ -264,7 +284,9 @@ def run(a) -> dict:
             before = model.rt.ops.n_bootstraps
             rows = token_rows(params, streams, pos)
             hook = None if free is None else (lambda g, w, p=pos: free.tick(p, g, w))
-            rec = tick_record(model, rows, pos, mirror, exact, emb, before, decode=hook)
+            rec = tick_record(
+                model, rows, pos, mirror, exact, emb, before, decode=hook, meter=meter
+            )
             if free is not None:
                 report["diverged_at"] = free.diverged_at
             report["ticks"].append(rec)
@@ -293,6 +315,7 @@ def main(argv=None) -> int:
     ap.add_argument("--seed", type=int, default=7)
     ap.add_argument("--fake", action="store_true", help="the numpy fake instead of a GPU session")
     ap.add_argument("--out", default="gpu_run.json")
+    ap.add_argument("--metrics", default=None, help="append one JSON line of metrics per tick here")
     a = ap.parse_args(argv)
     if a.capture_tick < 0:
         ap.error("--capture-tick must be >= 0")
