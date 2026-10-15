@@ -1,5 +1,6 @@
 #include "slot_layout.h"
 #include "fhe_errors.h"
+#include "expiring_registry.h"
 
 #include "inference.h"
 
@@ -25,6 +26,7 @@ struct Entry {
 };
 std::mutex g_mtx;
 std::unordered_map<const void*, Entry> g_layouts;
+std::size_t g_layouts_swept = 0;   // size after the last sweep (expiring_registry.h)
 
 bool g_strict = false;
 
@@ -61,6 +63,8 @@ void set(const Ctx& ct, Kind k) {
         return;
     }
     g_layouts[(const void*)ct.get()] = Entry{ct, k};
+    expiring::sweep_if_doubled(g_layouts, g_layouts_swept,
+                               [](const Entry& e) { return e.wp.expired(); });
 }
 
 void propagate(const Ctx& from, const Ctx& to) { set(to, get(from)); }

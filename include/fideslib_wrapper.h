@@ -47,6 +47,8 @@ namespace FIDESlib::CKKS { void setArcsineOverride(int v); }  // ApproxModEval.c
 #include <omp.h>
 #endif
 #include <unordered_map>
+
+#include "expiring_registry.h"
 #include <unordered_set>
 #include <map>
 #include <sstream>
@@ -744,18 +746,25 @@ struct CKKSContext {
     // would silently mis-tag an unrelated ciphertext. Identity is therefore held by a
     // WEAK POINTER, which expires the moment the original is destroyed, so a reused address
     // fails the check deterministically and yields unknown (the conservative answer).
+    // The weak pointer also keeps a dead ciphertext's block allocated (FIDESlib makes every
+    // facade with std::make_shared), so no address is recycled and the erase in tag_of_ct never
+    // runs on its own: tag_ct sweeps the expired entries once per doubling of the map instead
+    // (expiring_registry.h).
     struct CtTagEntry {
         std::weak_ptr<Ctx::element_type> wp;
         std::string var;
         packtag::PackTag tag;
     };
     std::unordered_map<const void*, CtTagEntry> ct_tags;
+    std::size_t ct_tags_swept = 0;   // size after the last sweep
 
     void tag_ct(const Ctx& ct, const packtag::PackTag& t) {
         if (!ct) return;
         std::lock_guard<std::mutex> lk(tags_mtx);
         ct_tags[(const void*)ct.get()] = CtTagEntry{std::weak_ptr<Ctx::element_type>(ct),
                                                      var_for_ct(ct), t};
+        expiring::sweep_if_doubled(ct_tags, ct_tags_swept,
+                                   [](const CtTagEntry& e) { return e.wp.expired(); });
     }
     packtag::PackTag tag_of_ct(const Ctx& ct) {
         if (!ct) return packtag::PackTag{};
