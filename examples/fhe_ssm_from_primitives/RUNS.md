@@ -108,6 +108,10 @@ the device memory unchanged (`records/rtx_pro_6000/README.md`); the reports hold
 `seconds`, and the 5-second `nvidia-smi` stream beside them has no per-tick timestamps. Three tools
 make the next such run explainable from its records alone:
 
+`blips_run.sh` does the three steps below as one command on an existing checkout (planned, 80 ticks, GPU 0 by
+default; `MODE=eager TICKS=40` for the other arm) and leaves one archive to send: the report, the metrics, the log,
+the meta, the samples and the analysis.
+
 ```bash
 python -m examples.fhe_ssm_from_primitives.sample_box --out samples --gpu 0 --pid $RUN_PID &   # 1-second GPU and host samples, process lists
 python -m examples.fhe_ssm_from_primitives.gpu_run $M --mode planned --plan-dir bootstrap_placements/fhe_ssm \
