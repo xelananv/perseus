@@ -1,11 +1,10 @@
 #!/bin/bash
-# run_gpu.sh — the fhe-ssm port's GPU session on a fresh box, one subcommand per step of
-# results/perseus-20261006/fork_port/gpu_20261011/speedrun_port_20261027/RUNSHEET_GPU.md (research repository).
+# run_gpu.sh — the fhe-ssm port's GPU session on a fresh box, one subcommand per step of tools/fhe_ssm/RUNSHEET_GPU.md.
 #
 #   bash tools/fhe_ssm/run_gpu.sh box              record the box: GPU, driver, nvcc, RAM, disk, load, commit
 #   bash tools/fhe_ssm/run_gpu.sh build            uv venv + editable install + maturin develop --release
-#   bash tools/fhe_ssm/run_gpu.sh verify           _pc on the device, upstream's CPU tests, the port's tests, additive,
-#                                                  the CPU compile check built
+#   bash tools/fhe_ssm/run_gpu.sh verify           _pc loads (its device classes present), the GPU's memory, upstream's
+#                                                  CPU tests, the port's tests, the change check, the CPU compile check
 #   bash tools/fhe_ssm/run_gpu.sh bench            this build's refresh prices (pc-bench bts --all --k 1,8) -> PLAN_BTS_MS
 #   bash tools/fhe_ssm/run_gpu.sh arms             the axis arms and what each sets
 #   bash tools/fhe_ssm/run_gpu.sh capture ARM      the CPU-twin capture of ARM (no GPU; reused when present)
@@ -46,8 +45,11 @@ resolve_data() {   # WEIGHTS / SEEDS / CONFIG, else the first match of each in D
 
 # ---- the arms: capture flags | make_plan.sh environment | run flags
 # The capture flags are run_fake.py's (python/perseus/examples/fhe_ssm/run_fake.py); the run repeats them so the
-# driver rebuilds the same model on its CPU twin. LANDING=high also exports the landing's runtime switches to the
-# capture (the fake reads its routes and landings from the Config in the environment, impl/fakecap.py:841-860).
+# driver rebuilds the same model on its CPU twin. LANDING=high's runtime switches (CAPENV) are exported to the capture
+# and the run, but they do NOT reach the port's capture today: fakes.make_capture_session builds its Config from the
+# ceiling, the landing and the unit only (python/perseus/examples/fhe_ssm/fakes.py:45-49, 139), so its capture_config.json
+# has no stc_first / raise_drop and its own refreshes land in the shipped order. `capture` refuses such a capture for a
+# LANDING=high arm. Next work: a capture Config that carries bts.stc_first=2 and bts.raise_drop=512:1.
 ARMS="ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24 pcmm24 best lockstep2 lockstep4"
 arm() {   # sets CAP, PLANENV, RUNF, NOTE for arm $1
     CAP=""; PLANENV="LANDING=stock"; RUNF=""; NOTE=""
@@ -66,7 +68,7 @@ arm() {   # sets CAP, PLANENV, RUNF, NOTE for arm $1
                     PLANENV="LANDING=high PAIR=1"; RUNF="--schedule siblings"; NOTE="the stack; compare with ref and high" ;;
         lockstep2|lockstep4)
                     CAP="--streams ${1#lockstep}"; PLANENV="LANDING=high"; RUNF="--schedule lockstep"
-                    NOTE="BLOCKED until the port captures k ciphertext sets per stage (UPSTREAM_API §2.4)" ;;
+                    NOTE="BLOCKED until the port captures k ciphertext sets per stage (RUNSHEET_GPU.md §3)" ;;
         *) die "unknown arm $1 (arms: $ARMS)" ;;
     esac
     case "$PLANENV" in *LANDING=high*) CAPENV="FIDESLIB_BTS_STC_FIRST=2 FIDESLIB_BTS_STC_FIRST_ROUTES=dense FIDESLIB_BTS_STC_FIRST_CF=13 FIDESLIB_BTS_RAISE_DROP=512:1 AUTO_BTS_LEVEL=44" ;;
@@ -81,7 +83,7 @@ capname() {   # the capture an arm uses: arms that differ only at plan or run ti
 
 gpu_free() {
     local apps; apps=$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader -i "$GPU" 2>/dev/null)
-    [ -z "$apps" ] || die "GPU $GPU runs other processes ($apps): a timing needs an idle GPU (CLAUDE.md R6)"
+    [ -z "$apps" ] || die "GPU $GPU runs other processes ($apps): a timing needs an idle GPU (RUNSHEET_GPU.md §0)"
 }
 build_id() {
     echo "commit=$(git -C "$W" rev-parse --short HEAD) dirty=$(git -C "$W" status --porcelain --untracked-files=no | wc -l | tr -d ' ')" \
@@ -111,13 +113,18 @@ build)
         && .venv/bin/maturin develop --release ) > "$OUT/build.log" 2>&1 || { tail -30 "$OUT/build.log"; die "build failed ($OUT/build.log)"; }
     log "build: done in $(( $(date +%s) - t0 )) s; $(build_id)" ;;
 verify)
-    ( cd "$W" && "$PY" -c "from perseus import _pc; print('perseus._pc', [n for n in ('Session','Program','KeySource','Client') if hasattr(_pc, n)], 'device free GB', _pc.device_free_gb())" ) 2>&1 | tee -a "$OUT/session.log" || die "_pc does not load with a device"
+    # the device classes of the full extension (crates/pc-py/src/lib.rs:31-48); a session's own memory is its
+    # `mem_report` and `fhe.mem_info()` = (free, total) bytes (crates/pc-py/src/fhe.rs:1307-1310), which the driver records
+    ( cd "$W" && "$PY" -c "from perseus import _pc; import sys; want = ('Session', 'Program', 'KeySource', 'Client', 'PtStore'); miss = [n for n in want if not hasattr(_pc, n)]; print('perseus._pc loaded; device classes missing:', miss or 'none'); sys.exit(1 if miss else 0)" ) 2>&1 | tee -a "$OUT/session.log"
+    [ "${PIPESTATUS[0]}" = 0 ] || die "_pc is not the full (CUDA) extension"
+    nvidia-smi --query-gpu=index,name,memory.used,memory.free,memory.total --format=csv -i "$GPU" 2>&1 | tee -a "$OUT/session.log"
     ( cd "$W" && CUDA_VISIBLE_DEVICES="" "$PY" -m pytest -q -p no:cacheprovider -m 'not gpu' python/tests/test_fake_shadow.py \
         python/tests/test_pairing_cpu.py python/tests/test_rmsnorm_example.py python/tests/test_prefill_cpu.py 2>&1 | tail -3 ) | tee -a "$OUT/session.log"
     if [ -d "$W/python/perseus/examples/fhe_ssm/tests" ]; then
         ( cd "$W" && CUDA_VISIBLE_DEVICES="" "$PY" -m pytest -q -p no:cacheprovider python/perseus/examples/fhe_ssm/tests 2>&1 | tail -3 ) | tee -a "$OUT/session.log"
     fi
     bash "$HERE/check_additive.sh" | tee -a "$OUT/session.log"
+    [ "${PIPESTATUS[0]}" = 0 ] || die "the branch changes an unlisted upstream file (tools/fhe_ssm/UPSTREAM_CHANGES.md)"
     bash "$HERE/compile_check/build.sh" | tee -a "$OUT/session.log"
     log "verify: $(build_id)" ;;
 bench)
@@ -137,12 +144,18 @@ capture)
     ( cd "$W" && env CUDA_VISIBLE_DEVICES="" PYTHONPATH="$W/python" $CAPENV "$PY" -m perseus.examples.fhe_ssm.run_fake \
         $MODEL_ARGS --tokens 2 $CAP --capture "$c.part" --capture-tick 1 --out "$OUT/$(capname "$a").fake.json" ) \
         > "$OUT/$(capname "$a").capture.log" 2>&1 || { tail -20 "$OUT/$(capname "$a").capture.log"; die "capture $a failed"; }
+    case "$PLANENV" in *LANDING=high*)
+        "$PY" -c "import json, sys; b = json.load(open(sys.argv[1]))['bts']; sys.exit(0 if int(b.get('stc_first') or 0) == 2 and b.get('raise_drop') == '512:1' else 1)" "$c.part/capture_config.json" \
+            || die "capture $a: capture_config.json lacks stc_first=2 / raise_drop=512:1, the port's capture cannot make a LANDING=high capture yet (header comment); kept at $c.part" ;;
+    esac
     rm -rf "$c"; mv "$c.part" "$c"
     log "capture $a: done in $(( $(date +%s) - t0 )) s" ;;
 plan)
     a=${1:?arm}; arm "$a"; c="$OUT/$(capname "$a")"
     [ -d "$c" ] || die "no capture $c: run_gpu.sh capture $a"
     ( env $PLANENV PLAN_ROOT="$OUT" MEMGUARD_GB= bash "$HERE/make_plan.sh" "$c" "plan_$a" ) 2>&1 | tee "$OUT/plan_$a.log" | tail -8
+    rc=${PIPESTATUS[0]}
+    [ "$rc" = 0 ] || die "plan $a: make_plan.sh exit $rc (a PlanInfeasible block, a bad NAME, ...): $OUT/plan_$a.log"
     grep -q "compile check FAILED" "$OUT/bootstrap_placements/plan_$a/summary.txt" && die "plan $a does not bind (compile check)"
     log "plan $a: $OUT/bootstrap_placements/plan_$a" ;;
 run)
@@ -150,19 +163,20 @@ run)
     [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
     "$PY" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$DRIVER') else 1)" 2>/dev/null \
         || die "no driver module $DRIVER yet (RUNSHEET_GPU.md §4 is its contract)"
-    case "$CAP" in *"--linear pcmm"*) ;; *) log "note: $a uses diagonal linears: the driver must stream them (UPSTREAM_API §0.2)";; esac
+    case "$CAP" in *"--linear pcmm"*) ;; *) log "note: $a uses diagonal linears: the driver must stream them (RUNSHEET_GPU.md §3)";; esac
     gpu_free
+    resolve_data
     r="$OUT/run_$a"; mkdir -p "$r"
     echo "$(build_id)" > "$r/build_id.txt"
     nvidia-smi --query-gpu=timestamp,memory.used,utilization.gpu,power.draw --format=csv -lms 500 -i "$GPU" > "$r/nvsmi.csv" 2>/dev/null &
     smi=$!
+    trap 'kill "$smi" 2>/dev/null; wait "$smi" 2>/dev/null' EXIT       # the sampler dies with the step, whatever ends it
     log "run $a: $DRIVER --plan $p --ticks $TICKS --profile $CAP $RUNF --keys $KEYS"
     t0=$(date +%s)
-    resolve_data
     ( cd "$W" && env CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH="$W/python" $CAPENV "$PY" -m "$DRIVER" $MODEL_ARGS --plan "$p" --ticks "$TICKS" \
         --profile --keys "$KEYS" $CAP $RUNF --out "$r/record.json" ) > "$r/run.log" 2>&1
     rc=$?
-    kill "$smi" 2>/dev/null; wait "$smi" 2>/dev/null
+    kill "$smi" 2>/dev/null; wait "$smi" 2>/dev/null; trap - EXIT
     peak=$(awk -F', ' 'NR>1 {gsub(/ MiB/,"",$2); if ($2+0>m) m=$2+0} END {print m+0}' "$r/nvsmi.csv")
     log "run $a: exit $rc in $(( $(date +%s) - t0 )) s; nvidia-smi peak ${peak} MiB; $r/record.json; $(build_id)"
     tail -15 "$r/run.log"

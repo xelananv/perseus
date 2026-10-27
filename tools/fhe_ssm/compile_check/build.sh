@@ -6,7 +6,7 @@
 # features: the CUDA-free compiler) and the worktree's Cargo.lock, so the build tracks upstream and leaves nothing in git.
 # Toolchain: RUSTUP_TOOLCHAIN (default stable). The build runs with BUILD_DIR as its working directory; a cargo or
 # rustup command run INSIDE the worktree reads its rust-toolchain.toml (channel 1.99.1) and rustup installs that channel
-# over the network if it is missing. Under <research repo>/tools/memguard.sh 4 when that script exists.
+# over the network if it is missing. Under <worktree>/../../tools/memguard.sh 4 when that script exists.
 set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=$(git -C "$HERE" rev-parse --show-toplevel)

@@ -1,19 +1,13 @@
-//! compile_check — compile a plan directory against its graph directory with upstream's own compiler (pc-program,
-//! CUDA-free), on any machine, and print what a planned GPU session of this branch would get from it.
+//! compile_check — compile a plan directory against its graph directory with pc-program's CUDA-free compiler and
+//! print what a planned session would get from it.
 //!
 //!     compile_check <plan_dir> <graph_dir> [--schedule program|siblings|lockstep] [--no-batch] [--json <out.json>]
 //!
-//! It runs the same call the planned driver makes through `_pc.Program.compile` (crates/pc-py/src/program.rs:78-87:
-//! `compile_dir(plan_dir, graph_dir, &CompileOpts { schedule, no_batch, .. })`), so the Config is the plan's own
-//! (each block plan's stamp / capture_env overlaid by PLAN_CMD.txt's `runtime=` line, the PlanConfig from its
-//! `recipe=` line: crates/pc-program/src/plan.rs:226-259). Not checked here: the contract check against a live
-//! session's Config, and anything the device does (routes, keys, memory). Without `live_out` / `input_metas` (the
-//! driver's K/V and carried-state hints) a block's carried inputs take the compiler's own seeds.
-//!
-//! Per block: refresh sites by kind (placed / fired hint / deliberate) and by route (dense StC-first, dense shipped
-//! order, real payload, each sparse slot count), launches after K-batching, refresh launches, refresh pairs formed
-//! (PC_BTS_PAIR on the plan's runtime= line), the level check's pins (exact / richer) and its errors.
-//! Exit 0 when every block compiles with 0 check errors, 1 otherwise, 2 on usage.
+//! The call is the one `_pc.Program.compile` makes (crates/pc-py/src/program.rs:78-87), so the Config is the plan's
+//! own (stamp + PLAN_CMD.txt `runtime=`, PlanConfig from `recipe=`: crates/pc-program/src/plan.rs:226-259); without
+//! the driver's `live_out` / `input_metas`, carried inputs take the compiler's seeds. Per block: refresh sites by kind
+//! and route, launches, refresh launches, pairs, the level check's pins and errors. Exit 0 when every block compiles
+//! with 0 check errors, 1 otherwise, 2 on usage. Not checked: the contract against a live session, anything on device.
 use pc_program::compile::batch::Schedule;
 use pc_program::compile::{compile_dir, CompileOpts};
 use pc_program::program::SiteKind;

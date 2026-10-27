@@ -7,7 +7,10 @@
 # GRAPH_DIR: a capture (block_<b>/graph.json for every stage, capture_config.json or capture_env.json), made by the
 # port's run_fake.py --capture UNDER THE SAME LANDING's runtime switches (the capture's own refreshes land where the
 # fake's landing table says; a plan binds only when capture, recipe and runtime agree — the compile check below catches
-# a mismatch). Every block is planned in ONE planner pass, block b entered at block b-1's planned exit
+# a mismatch). The port's capture does not take the StC-first switches yet (its Config holds the ceiling, the landing
+# and the unit only: python/perseus/examples/fhe_ssm/fakes.py:45-49, 139), so LANDING=high has no matching capture; on
+# a stock capture its block 1 is infeasible. Every block is planned in ONE planner pass, block b entered at block b-1's
+# planned exit
 # (python/perseus/plan/run_bootstrap_all_blocks.sh -> python -m perseus.plan.placer).
 #
 # Axes (environment; default first):
@@ -41,14 +44,15 @@
 #                             a3dff85 does not have (compile/mod.rs:240 lists 1024/512/256 at 24): expect the compile
 #                             check to refuse "no landing for route slots=32" until upstream adds one.
 #   HARD_ENV_CAP=1|0|''       PLAN_HARD_ENV_CAP: 1 = the refresh envelope is absolute (the fork's plans needed it on a
-#                             residual stream that crosses blocks unrefreshed, MEASUREMENTS.md §1d); '' = planner default.
+#                             residual stream that crosses blocks unrefreshed: without it the envelope relaxes and the
+#                             blocks' exits drift to the top of the window); '' = planner default.
 #   SPARSE_B_K=''|16|24       FIDESLIB_BTS_SPARSE_B_K on the runtime= line (SparseB's EvalMod series; the Prefill-128
 #                             record runs 16). Replay only: it moves no refresh.
 #   RUNTIME_EXTRA='K=V ...'   more runtime= tokens (they win: later tokens win, crates/pc-program/src/plan.rs:152).
 # Any recipe variable the caller exports wins over these defaults (MAX_LEVEL, BTS_LEVEL, PLAN_*; set-but-empty is
 # kept, e.g. PLAN_SPARSE_SLOTS= for a dense plan).
 # Other knobs: PLAN_ROOT (default <worktree>/.cache/fhe_ssm, gitignored; the plan lands in PLAN_ROOT/bootstrap_placements/
-# NAME), PY (default <worktree>/.venv/bin/python), MEMGUARD_GB (the planner under <research repo>/tools/memguard.sh at
+# NAME), PY (default <worktree>/.venv/bin/python), MEMGUARD_GB (the planner under <worktree>/../../tools/memguard.sh at
 # that ceiling when the script exists; default 6, '' = no guard), CHECK=1|0 (run tools/fhe_ssm/compile_check on the
 # result when its binary exists: bash tools/fhe_ssm/compile_check/build.sh), SCHEDULE=program|siblings|lockstep (the
 # check's compile schedule; default siblings with PAIR=1, else program).
@@ -62,6 +66,9 @@ set -euo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=$(git -C "$HERE" rev-parse --show-toplevel)
 GRAPH_DIR="${1:?usage: make_plan.sh GRAPH_DIR NAME}"; NAME="${2:?usage: make_plan.sh GRAPH_DIR NAME}"
+# NAME becomes a directory that is deleted and rewritten: one plain path component, nothing else
+[[ "$NAME" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]] && [[ "$NAME" != *..* ]] \
+    || { echo "make_plan: NAME '$NAME' must be one path component of [A-Za-z0-9._-], starting alphanumeric, without '..'" >&2; exit 2; }
 [ -d "$GRAPH_DIR" ] || { echo "make_plan: no graph dir $GRAPH_DIR" >&2; exit 2; }
 GRAPH_DIR=$(cd "$GRAPH_DIR" && pwd)
 ls "$GRAPH_DIR"/block_*/graph.json >/dev/null 2>&1 || { echo "make_plan: no block_<b>/graph.json under $GRAPH_DIR" >&2; exit 2; }
