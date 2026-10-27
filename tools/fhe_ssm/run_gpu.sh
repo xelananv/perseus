@@ -136,6 +136,7 @@ verify)
     bash "$HERE/check_additive.sh" | tee -a "$OUT/session.log"
     [ "${PIPESTATUS[0]}" = 0 ] || die "the branch changes an unlisted upstream file (tools/fhe_ssm/UPSTREAM_CHANGES.md)"
     bash "$HERE/compile_check/build.sh" | tee -a "$OUT/session.log"
+    [ "${PIPESTATUS[0]}" = 0 ] || die "the compile check did not build (tools/fhe_ssm/compile_check/build.sh): plans could not be gated"
     log "verify: $(build_id)" ;;
 bench)
     gpu_free
@@ -167,6 +168,7 @@ plan)
     rc=${PIPESTATUS[0]}
     [ "$rc" = 0 ] || die "plan $a: make_plan.sh exit $rc (a PlanInfeasible block, a bad NAME, ...): $OUT/plan_$a.log"
     grep -q "compile check FAILED" "$OUT/bootstrap_placements/plan_$a/summary.txt" && die "plan $a does not bind (compile check)"
+    grep -q "compile check: skipped" "$OUT/bootstrap_placements/plan_$a/summary.txt" && die "plan $a was not gated: the compile check is missing (run_gpu.sh verify builds it)"
     log "plan $a: $OUT/bootstrap_placements/plan_$a" ;;
 run)
     a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a"
