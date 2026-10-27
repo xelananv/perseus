@@ -81,7 +81,7 @@ def cm_gate(ops: Ops, k, r, w, j: int = 0):
 def time_mix(ops: Ops, geo: Geometry, h, w, st: BlockState, form: str, pack_stats: str = "off"):
     """``h + W_out g``; updates ``st`` in place (``s``, ``n_prev`` not yet carried)."""
     with geo.step("tm.norm"):
-        n = norm(geo, h, w.norm_tm, w.key("tm.norm"), form, pack_stats)
+        n = norm(geo, h, w.norm_tm, w.site("tm.norm"), form, pack_stats)
     with geo.step("tm.in"):
         um = ops.add(
             ops.mult_pt(n, w.mix, key=w.key("mix")),
@@ -103,7 +103,7 @@ def time_mix(ops: Ops, geo: Geometry, h, w, st: BlockState, form: str, pack_stat
 def channel_mix(ops: Ops, geo: Geometry, h, w, form: str, pack_stats: str = "off"):
     """``h + W_v (act (.) gate)``, block by block over d_ffn."""
     with geo.step("cm.norm"):
-        n = norm(geo, h, w.norm_cm, w.key("cm.norm"), form, pack_stats)
+        n = norm(geo, h, w.norm_cm, w.site("cm.norm"), form, pack_stats)
     with geo.step("cm.kr"):
         ks, rs = geo.up(geo.hint(n), [w.wk, w.wr])
     with geo.step("cm.gate"):

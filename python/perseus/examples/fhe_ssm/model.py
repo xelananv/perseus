@@ -45,7 +45,7 @@ class FheSsmModel(ImplModel):
         scales=None,
         pack_stats="off",
         linear="diagonal",
-        diag_hint=2,
+        diag_hint=1,
         pcmm_wbits=16,
     ):
         super().__init__(inf, core=core, unit=unit, profile=profile)
@@ -115,8 +115,9 @@ class FheSsmModel(ImplModel):
 
     def block_weights(self, b):
         """The block's operands; with ``resident_weights`` built once and the per-channel constants
-        named for the runtime's plaintext caches, else rebuilt per use and unnamed (a CPU pass over many
-        blocks). The linears' plaintexts are streamed either way (``DiagLinear`` encodes at use)."""
+        keyed for the runtime's plaintext caches, else rebuilt per use with the constants streamed (a
+        CPU pass over many blocks). The linears are named ``b<b>.<kind>`` either way (a PCMM finish is
+        looked up by that name on the device); the diagonal linears' plaintexts are streamed either way."""
         sc = None if self.scales is None else self.scales[b]
         if not self.resident:
             return encode_block(self.params.block(b), self.geo, f"b{b}.", named=False, scales=sc)

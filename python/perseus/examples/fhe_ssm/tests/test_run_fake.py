@@ -56,7 +56,7 @@ def test_driver_report(tmp_path, layout, payload, route, capacity):
     assert rep["axes"] == {
         "newton_form": "perseus", "newton_sites": "served", "pack_stats": "off",
         "linear": None if layout == "decode" else "diagonal",
-        "diag_hint": None if layout == "decode" else 2, "pcmm_wbits": None, "lane_mix": "off",
+        "diag_hint": None if layout == "decode" else 1, "pcmm_wbits": None, "lane_mix": "off",
     }  # fmt: skip
     assert (rep["limit"], rep["bts_out"]) == (46, 34)
     for tick in rep["ticks"]:
@@ -91,6 +91,31 @@ def test_the_axes_reach_the_report(tmp_path):
     assert rep["norm"]["ln_out"] == {"k": 5.5, "frac": 0.1, "min_iters": 12}
     assert "lane_mix_note" in rep
     assert rep["ticks"][1]["relErrRms_vs_mirror"] < 1e-9  # the mirror runs the same kernel
+
+
+def test_linears_are_named_whatever_the_residency():
+    """A PCMM finish is looked up by its linear's name on the device: every linear is ``b<b>.<kind>``, resident
+    or streamed; ``named`` only keys the per-channel constants."""
+    from perseus.examples.fhe_ssm import fakes, weights
+    from perseus.examples.fhe_ssm.model import FheSsmModel
+    from perseus.impl import fake
+
+    params, *_ = synthetic(L=2, seed=17)
+    fhe, inf = fakes.make_runtime_fake(
+        N=1024, hid=32, dim=32, H=1, H_real=1, E=128, E_real=128, complex_payload=True
+    )
+    for resident in (False, True):
+        model = FheSsmModel(inf, params, core=fake.core, unit=fhe.unit, resident_weights=resident)
+        w = model.block_weights(1)
+        assert [getattr(w, k).name for k in ("win", "wout", "wk", "wr", "wv")] == [
+            f"b1.{k}" for k in ("win", "wout", "wk", "wr", "wv")
+        ]
+        assert w.key("mix") == ("b1.mix" if resident else None)
+    with pytest.raises(ValueError, match="name"):
+        model.geo.weight(np.zeros((32, 32)), None, "win")
+    bw = weights.encode_block(params.block(0), model.geo, "b0.", named=False)
+    assert bw.named is False
+    assert bw.wv.name == "b0.wv"
 
 
 def test_too_many_conversations_are_refused(tmp_path):

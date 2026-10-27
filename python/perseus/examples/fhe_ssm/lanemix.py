@@ -68,18 +68,23 @@ class LaneMixKernel:
         return total
 
     def rows(self, rows) -> np.ndarray:
-        """``T`` on ``(2t, d)`` rows (the mirror): conversation ``j`` real, ``j + t`` imaginary."""
+        """``T`` on ``(n, d)`` rows (the mirror), conversation ``j`` on lane ``j`` real, ``j + t`` imaginary:
+        fewer than ``2t`` rows are parked as the fake parks its lanes (copies of conversation 0, which the
+        live lanes below them read), and the parked rows are dropped from the result."""
         rows = np.asarray(rows, dtype=np.float64)
         t = self.t
-        if rows.shape[0] != 2 * t:
-            raise ValueError(f"the lane mix needs {2 * t} conversations (pairs), got {rows.shape[0]}")
+        n = rows.shape[0]
+        if not 1 <= n <= 2 * t:
+            raise ValueError(f"the lane mix holds 1 .. {2 * t} conversations (pairs), got {n}")
+        if n < 2 * t:
+            rows = np.concatenate([rows, np.repeat(rows[:1], 2 * t - n, axis=0)])
         X = rows[:t] + 1j * rows[t:]
         T = np.zeros_like(X)
         for s in range(t):
             y = np.zeros_like(X)
             y[s:] = X[: t - s]
             T += self.P[s][None, :] * y + self.Pc[s][None, :] * np.conj(y)
-        return np.concatenate([T.real, T.imag])
+        return np.concatenate([T.real, T.imag])[:n]
 
     @staticmethod
     def rotation_steps(N: int) -> set[int]:

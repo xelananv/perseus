@@ -203,7 +203,7 @@ def run(
     scales=None,
     pack_stats="off",
     linear="diagonal",
-    diag_hint=2,
+    diag_hint=1,
     pcmm_wbits=16,
     capture=None,
     capture_tick=1,
@@ -373,10 +373,20 @@ def main(argv=None):
     ap.add_argument(
         "--pcmm-wbits", type=int, default=16, choices=PCMM_WBITS, help="PCMM integer weight width"
     )
-    ap.add_argument("--diag-hint", type=int, default=2, choices=(1, 2),
-                    help="headroom (product units) of the diagonal linear's input hint: 2 = upstream's diag_apply, 1 = the fork")  # fmt: skip
-    ap.add_argument("--lane-mix", default="off", choices=LANE_MIX,
-                    help="random = the cost-only lane-mixing term per block (no trained kernel: counts only)")  # fmt: skip
+    ap.add_argument(
+        "--diag-hint",
+        type=int,
+        default=1,
+        choices=(1, 2),
+        help="headroom (product units) of the diagonal linear's input hint: 1 = the reference circuit (the fork's), "
+        "2 = upstream's diag_apply rule",
+    )
+    ap.add_argument(
+        "--lane-mix",
+        default="off",
+        choices=LANE_MIX,
+        help="random = the cost-only lane-mixing term per block (no trained kernel: counts only)",
+    )
     ap.add_argument("--ms-norm-k", type=float, default=5.5, help="sigma = -K b / a (--ms-norm)")
     ap.add_argument(
         "--newton-frac",

@@ -108,11 +108,11 @@ def encode_diag(W, N: int, t: int, name: str | None = None) -> DiagLinear:
     return DiagLinear(pts.n_in, pts.n_out, pts.b, pts.g, pts=pts, name=name)
 
 
-def apply_diag(rt, Xs, lins, hint: int = 2):
+def apply_diag(rt, Xs, lins, hint: int = 1):
     """``prefill.diag_apply`` (prefill.py:1222-1247) with the input hint's headroom as a parameter: every
-    input is refreshed unless ``hint`` more product units fit under the ceiling (2 = upstream's rule: the
-    products, one unit deeper, stay under the limit; 1 = the fork's reference circuit, the linear's one
-    product fits and its output may sit at the ceiling). At ``hint=2`` this records ``diag_apply``'s op
+    input is refreshed unless ``hint`` more product units fit under the ceiling (1 = the reference circuit,
+    the fork's: the linear's one product fits and its output may sit at the ceiling; 2 = upstream's rule:
+    the products, one unit deeper, stay under the limit). At ``hint=2`` this records ``diag_apply``'s op
     stream exactly (tests/test_filling_fake.py). ``lins`` share ``Xs`` (one set of baby rotations); per
     linear its ``n_out`` output blocks."""
     ops, d = rt.ops, rt.dims

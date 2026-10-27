@@ -214,16 +214,25 @@ class BlockWeights:
     norm_tm: NormSite
     norm_cm: NormSite
     lanemix: Any = None
+    #: whether the per-channel constants are keyed (cached as named slot plaintexts by the runtime)
+    named: bool = True
 
-    def key(self, name: str) -> str:
+    def key(self, name: str) -> str | None:
+        """The constant's plaintext key, or None when the block's constants are streamed (encoded at use)."""
+        return self.tag + name if self.named else None
+
+    def site(self, name: str) -> str:
+        """A site's label (``b3.tm.norm``): the mask site of a norm, whatever the constants' caching."""
         return self.tag + name
 
 
 def encode_block(
     p: BlockParams, geo, tag: str, named: bool = True, scales: BlockScales | None = None
 ) -> BlockWeights:
-    """``named=False`` leaves the linears' plaintexts unnamed (encoded at every use, nothing
-    cached by the runtime): the low-memory choice for a CPU pass over many blocks.
+    """The linears are always named ``<tag><kind>`` (``b3.wv``): a PCMM finish is recorded under its linear's
+    name and the device service looks the weights up by it. ``named=False`` leaves the per-channel
+    constants unkeyed (encoded at every use, nothing cached by the runtime, every plaintext tagged at
+    use): the low-memory choice for a CPU pass over many blocks.
 
     On split pairs (``geo.split_gain = 0.5``) the operands that make the inputs of the two gate
     sections are halved, exactly (a power of two): ``c`` and ``dd`` (they make ``z``) and
@@ -239,10 +248,11 @@ def encode_block(
     G, A, B = float(2**sc.gate_tm), float(2**sc.act_cm), float(2**sc.gate_cm)
 
     def lin(w, name):
-        return geo.weight(w, tag + name if named else None, name)
+        return geo.weight(w, tag + name, name)
 
     return BlockWeights(
         tag=tag,
+        named=bool(named),
         win=lin(p.win, "win"),
         wout=lin(p.wout / G, "wout"),
         wk=lin(p.wk * half, "wk"),

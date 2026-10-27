@@ -214,7 +214,7 @@ class FilledGeometry:
         d: int,
         d_ffn: int,
         linear: str = "diagonal",
-        diag_hint: int = 2,
+        diag_hint: int = 1,
         pcmm_wbits: int = 16,
         lane_mix: bool = False,
     ):
@@ -224,7 +224,9 @@ class FilledGeometry:
         if linear not in LINEARS:
             raise ValueError(f"linear must be one of {LINEARS}, got {linear!r}")
         if diag_hint not in (1, 2):
-            raise ValueError(f"diag_hint is 2 (upstream's diag_apply) or 1 (the fork), got {diag_hint!r}")
+            raise ValueError(
+                f"diag_hint is 1 (the reference circuit) or 2 (upstream's diag_apply rule), got {diag_hint!r}"
+            )
         if pcmm_wbits not in PCMM_WBITS:
             raise ValueError(f"pcmm_wbits must be one of {PCMM_WBITS}, got {pcmm_wbits!r}")
         self.rt = rt
@@ -273,6 +275,10 @@ class FilledGeometry:
         return [self.lane(v[j * self.d : (j + 1) * self.d]) for j in range(self.n_tiles)]
 
     def weight(self, w, name, kind):
+        if not name:
+            raise ValueError(
+                "a linear needs its name (b<b>.<kind>): a PCMM finish is looked up by it on the device"
+            )
         if self.is_pcmm(kind):
             return PcmmLinear.encode(
                 np.asarray(w, dtype=np.float64), self.t, 1.0, name=name, wbits=self.pcmm_wbits

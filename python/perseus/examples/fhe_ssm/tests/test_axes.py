@@ -7,7 +7,7 @@ and a later tick, parked lanes, both halves of a pack, the output norm's own cou
 import numpy as np
 import pytest
 
-from perseus.examples.fhe_ssm import block, fakes, filling, geometry, norm, pairs, ref
+from perseus.examples.fhe_ssm import block, fakes, filling, geometry, norm, pairs, ref, run_fake
 from perseus.examples.fhe_ssm.lanemix import NB, NG, LaneMixKernel
 from perseus.examples.fhe_ssm.model import FheSsmModel
 from perseus.examples.fhe_ssm.synthetic import synthetic
@@ -17,6 +17,21 @@ from perseus.impl.ops import FheOps
 
 D, DFF, N, T = 32, 128, 1024, 32
 B, G = 8, 4  # DiagLinear.split(32)
+#: the reference circuit's refreshes per tick at this shape (2 blocks, 64 split pairs, seeds window 2e-4..2e-3)
+OFF_REFRESHES = 208
+OFF_BY_STEP = {"tm.norm": 60, "tm.gate": 10, "cm.norm": 60, "cm.gate": 40, "carry": 4, "tail": 34}
+#: the same circuit under upstream's hint rule (--diag-hint 2): the linears' inputs refreshed a level earlier
+ON_REFRESHES = 173
+ON_BY_STEP = {
+    "tm.norm": 60,
+    "tm.gate": 8,
+    "cm.norm": 60,
+    "cm.kr": 2,
+    "cm.v": 8,
+    "carry": 4,
+    "tm.in": 1,
+    "tail": 30,
+}
 
 
 def make(params, **kw):
@@ -77,14 +92,26 @@ def run_arm(params, ticks=2, seed=8, **kw):
 
 
 def test_every_axis_off_is_the_reference_circuit():
+    """The default settings are the fork's reference circuit: the same op stream (refreshes included) and the
+    same numbers as every axis named at its off value, and that circuit's refresh count at this shape."""
     params, *_ = synthetic(L=2, seed=3)
-    explicit = {"newton_form": "perseus", "pack_stats": "off", "linear": "diagonal", "diag_hint": 2}
+    off = {"newton_form": "perseus", "pack_stats": "off", "linear": "diagonal", "diag_hint": 1}
     _m, plain = run_arm(params)
-    _m, named = run_arm(params, **explicit)
-    assert plain[1][1] == named[1][1]  # the same op stream, call for call
+    _m, named = run_arm(params, **off)
+    for (ga, ca, _, _, ba), (gb, cb, _, _, bb) in zip(plain, named):
+        assert ca == cb  # the whole call list, "bootstrap" entries included
+        np.testing.assert_array_equal(ga, gb)
+        assert ba == bb
     c = census(plain[1][1])
     want = reference_counts(2)
     assert {k: c[k] for k in want} == want
+    ids = np.random.default_rng(8).integers(0, params.vocab, size=(2, 64))
+    rep = run_fake.run(params, ids, logn=11, log=lambda _s: None)
+    assert rep["axes"] == {**off, "newton_sites": "served", "pcmm_wbits": None, "lane_mix": "off"}
+    for t in rep["ticks"]:
+        assert (t["bootstraps"], t["reactive"], t["hints"], t["carry"]) == (OFF_REFRESHES, 204, 0, 4)
+        assert t["bootstraps_by_step"] == OFF_BY_STEP
+        assert t["out_level"] == 38
 
 
 def test_reference_counts_follow_the_formulas():
@@ -227,17 +254,23 @@ def test_pack_stats_needs_the_split_pair_route():
 # ── linear: the hint rule and the refusals (PCMM itself needs d = 1024: test_pcmm.py) ─────────
 
 
-def test_diag_hint_1_reproduces_the_forks_hint_sites():
-    """With the input hint at headroom(1) the block's own hints (also headroom(1)) are the only
-    ones, as in the fork; at headroom(2) the linear refreshes one level earlier."""
+def test_diag_hint_2_is_upstreams_rule_and_moves_only_refreshes():
+    """``--diag-hint 2`` (upstream's ``diag_apply`` headroom) refreshes a linear's input one level earlier than the
+    reference: the products and rotations are the same, the refresh sites move, the mirror still agrees."""
     params, *_ = synthetic(L=2, seed=3)
-    _m, fork = run_arm(params, diag_hint=1)
+    _m, ref_arm = run_arm(params)
     _m, up = run_arm(params, diag_hint=2)
-    for (g1, c1, m1, _, _), (g2, c2, m2, _, _) in zip(fork, up):
+    for (g1, c1, m1, _, _), (g2, c2, m2, _, _) in zip(ref_arm, up):
         assert ref.rel_err_rms(g1, m1) < 1e-9
         assert ref.rel_err_rms(g2, m2) < 1e-9
-        assert census(c1) == census(c2)  # the products and rotations are the same; only refreshes move
-    assert fork[1][4] != up[1][4]
+        assert census(c1) == census(c2)
+        assert c1 != c2
+    ids = np.random.default_rng(8).integers(0, params.vocab, size=(2, 64))
+    rep = run_fake.run(params, ids, logn=11, log=lambda _s: None, diag_hint=2)
+    for t in rep["ticks"]:
+        assert (t["bootstraps"], t["reactive"], t["hints"]) == (ON_REFRESHES, 158, 11)
+        assert t["bootstraps_by_step"] == ON_BY_STEP
+        assert t["out_level"] == 44
     with pytest.raises(ValueError, match="diag_hint"):
         make(params, diag_hint=3)
 
@@ -318,6 +351,28 @@ def test_lane_mix_model_matches_the_mirror_and_counts():
         FheSsmModel(inf, on, core=fake.core, unit=2, payload="real")
     with pytest.raises(AttributeError):
         on.lane_mix = "off"  # type: ignore[misc]  # the blocks are cached for one setting
+
+
+@pytest.mark.parametrize("n", [1, 10, T + 1])
+def test_lane_mix_parked_lanes_match_the_mirror(n):
+    """Fewer conversations than the capacity: the fake parks the rest (copies of conversation 0) and the live
+    lanes read the parked ones below them; the mirror parks its rows the same way."""
+    _p, w, seeds, cfg = synthetic(L=2, seed=3)
+    on = ModelParams(w, seeds, cfg, lane_mix="random")
+    fhe, model = make(on)
+    mirror = ref.MirrorModel(on, n)
+    model.start()
+    rng = np.random.default_rng(n)
+    for pos in range(2):
+        rows = on.emb[rng.integers(0, on.vocab, n)].astype(np.float64)
+        got, _ = tick(model, fhe, rows, pos)
+        assert got.shape == (n, D)
+        assert ref.rel_err_rms(got, mirror.step(rows)) < 1e-9
+    lm = on.block(0).lanemix
+    assert lm is not None
+    kern = geometry.PlainGeometry.lane_mix_kernel(*lm)
+    with pytest.raises(ValueError, match="conversations"):
+        kern.rows(np.zeros((2 * T + 1, D)))
 
 
 # ── the levels setting ─────────────────────────────────────────────────────────────────────────

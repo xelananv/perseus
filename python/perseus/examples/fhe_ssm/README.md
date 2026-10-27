@@ -80,7 +80,7 @@ weights, seeds, config and scales. The times are the fake's own and say nothing 
 | `--pack-stats` | `off`, `halves` | one Newton chain for a split pair's two halves at every norm site (`norm.rmsnorm_packed`): residue masks merge the two statistics, one rotation per half scatters `y` back |
 | `--linear` | `diagonal`, `pcmm-trunk`, `pcmm` | every matrix through `prefill.DiagLinear`; `W_in`, `W_out`, `W_v` through `impl.pcmm` with `W_k`, `W_r` diagonal; every matrix through PCMM |
 | `--pcmm-wbits` | `16`, `24` | PCMM's integer weight width (2 or 3 int8 digit planes) |
-| `--diag-hint` | `2`, `1` | headroom of the diagonal linear's input hint: 2 = upstream's `diag_apply` rule, 1 = the fork's reference circuit |
+| `--diag-hint` | `1`, `2` | headroom (product units) of the diagonal linear's input hint: 1 = the reference circuit (the fork's: a `headroom(1)` hint, the linear's one product fits under the ceiling); 2 = upstream's `diag_apply` headroom rule (the input refreshed one level earlier) |
 | `--lane-mix` | `off`, `random` | the cost-only lane-mixing term per block (`lanemix.py`); no trained kernel, so count only |
 | `--levels` | `fork`, `preset` | ceiling / landing: 46 / 34 (the fork's session, whose fake counts its C++ GPU runs reproduced), or the n32 GPT-2 preset's 44 / 32 (this runtime's); `--limit`, `--bts-out` override |
 | `--rules` | `runtime`, `stock` | the fake's level rules: the runtime's (the Shadow's `fakecap` mode) or `perseus.impl.fake` as shipped (a rescale charged at once: refreshes one product earlier) |
@@ -123,8 +123,9 @@ vector — 1.07 GB for one `1024 x 4096` matrix, 3.75 GB per block — so `encod
 `filling.LazyDiagonals`, a table that expands one giant group (8 MB) on `pts[m, g]`, the only access
 `DiagLinear._sum` makes (`prefill.py:1191-1199`; `tests/test_filling_fake.py` holds the table to
 `slot_vectors`). `apply_diag` is `prefill.diag_apply` (`prefill.py:1222-1247`) with the input hint's headroom
-as a parameter: at 2 it records `diag_apply`'s op stream exactly (tested); at 1 it is the fork's circuit (a
-hint of `headroom(1)` before each linear, the linear's one product fitting under the ceiling). The call to
+as a parameter: the default, 1, is the reference circuit (the fork's: a `headroom(1)` hint before each
+linear, the linear's one product fitting under the ceiling); 2 is upstream's rule (the input refreshed one
+level earlier), and at 2 the copy records `diag_apply`'s op stream exactly (tested). The call to
 `DiagLinear._sum` is the port's one use of an upstream private; the identity test guards it. Weights are
 streamed (unkeyed `mult_pt_sum`: nothing cached on the fake; on a device `DiagLinear.encode(pinned=…)` and
 `mult_coeff_sum` encode them there).
@@ -207,63 +208,64 @@ The landing. The fork's fake landed every refresh at 34 with the rescale pending
 fork's GPU runs on its C++ runtime counted the fake's 1,968 refreshes per tick (research record
 `MEASURE_NIGHT_20261012.md`), so `--levels fork` (46 / 34) is the session validated for this model on that
 runtime, and it reproduces the fork's counts here (below). This branch's n32 preset says ceiling 44 and
-`fakecap_landings` "0:32" (effective 34): `--levels preset`. The two give identical counts (the whole chain
-shifts by one level; out level 42 vs 38, state 32 vs 34). A GPU session on this runtime must measure its
-own landing (agent B's reading of `crates/pc-program` route.rs: dense shipped-order refreshes realize at
-34 here, i.e. the preset's convention) before any count here is quoted as the device's.
+`fakecap_landings` "0:32" (effective 34): `--levels preset`. That is the convention of this branch's own
+route table (`crates/pc-shadow/src/route.rs:89-99`: a dense refresh in the shipped order lands at 34,
+entry 46, ceiling 44); the fork's 36 is the C++ runtime's. The two settings give identical counts (the whole
+chain shifts by one level: out level 38 under `fork`, 36 under `preset`, state 34 vs 32). A
+GPU session on this runtime must measure its own landing before any count here is quoted as the device's.
 
 ## Measured on the fake (published weights)
 
 24 blocks, ring 2^16, 64 split pairs, shipped scales, the runtime's rules, 2 ticks each (every count
 identical on both ticks), one process per arm under a 3 GB guard on a 16 GB Mac (`model_shape_runs.sh`;
-reports in the research record `speedrun_port_20261027/runs_A/`). Counts per tick:
+reports in the research record `speedrun_port_20261027/runs_A/`). Counts per tick. First the axes against
+the default, which is the reference circuit:
 
 | arm | refreshes | reactive / hints / carry / PCMM | by step | ct×ct | ct×pt | rotations | conj | vs mirror | vs exact (worst conv.) | out lvl | s/tick | RSS GB |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| **reference** (`--diag-hint 1`, the fork's circuit) | **1,968** | 1,832 / 88 / 48 / 0 | tm.norm 808, cm.norm 808, tm.gate 142, cm.gate 40, cm.v 88, carry 48, tail 34 | 4,294 | 345,265 | 14,372 | 265 | 6.0e-15 | 5.9e-15 (1.3e-14) | 38 | 25.9 | 0.83 |
-| `--rules stock` | 1,973 | 1,837 / 88 / 48 / 0 | tm.norm 812, tm.gate 143, rest as above | 4,294 | 345,265 | 14,372 | 265 | 6.0e-15 | 5.9e-15 | 38 | 24.8 | 0.88 |
-| default (`--diag-hint 2`) | 1,713 | 1,522 / 143 / 48 / 0 | tm.norm 720, cm.norm 720, tm.gate 52, cm.kr 24, cm.v 96, tm.in 23, tail 30, carry 48 | 4,294 | 345,265 | 14,372 | 265 | 6.0e-15 | 5.9e-15 (1.3e-14) | 44 | 26.3 | 0.81 |
-| `--levels preset` (44 / 32) | 1,713 | as default | as default | 4,294 | 345,265 | 14,372 | 265 | 6.0e-15 | 5.9e-15 | 42 | 24.9 | 0.84 |
-| `--newton-form depth2` | 1,804 | 1,660 / 96 / 48 / 0 | tm.norm 764, cm.norm 768, tm.gate 96, cm.v 96, tail 32 | 4,294 | 345,265 | 14,372 | 265 | 5.9e-15 | 5.8e-15 | 36 | 24.1 | 0.91 |
-| `--newton-sites per-site` | 2,071 | 2,000 / 23 / 48 / 0 | tm.norm 574, cm.norm 576, cm.gate 768, tm.gate 52, tm.in 23, tail 30 | 3,430 | 345,265 | 14,372 | 265 | 5.8e-15 | 5.9e-15 | 44 | 23.9 | 0.87 |
-| `--pack-stats halves` | **1,172** | 1,028 / 96 / 48 / 0 | tm.norm 454, cm.norm 456, tm.gate 99, cm.v 96, tail 19 | 2,677 | 345,461 | 14,470 | 265 | 6.0e-15 | 5.8e-15 (1.1e-14) | 36 | 23.9 | 0.85 |
-| `--linear pcmm-trunk --pcmm-wbits 24` | 1,710 | 1,470 / 120 / 48 / 72 | tm.norm 720, cm.norm 720, tm.out 24, cm.v 96, tail 30 | 4,294 | 197,809 | 7,892 | 265 | 4.1e-15 | 2.1e-6 (6.2e-6) | 38 | 17.0 | 0.99 |
-| `--linear pcmm` (16 bits) | 1,806 | 1,470 / 24 / 48 / 264 | tm.norm 720, cm.norm 720, tm.out 24, tail 30 | 4,294 | 1,201 | 1,436 | 265 | 3.6e-15 | 6.3e-4 (2.1e-3) | 38 | 6.0 | 0.97 |
-| `--lane-mix random` | 1,713 | as default | as default | 4,294 | 346,801 | 14,780 | 289 | 5.3e-15 | 0.12 (meaningless) | 44 | 25.5 | 0.76 |
+| **default** (every axis off: the fork's reference circuit) | **1,968** | 1,832 / 88 / 48 / 0 | tm.norm 808, cm.norm 808, tm.gate 142, cm.gate 40, cm.v 88, carry 48, tail 34 | 4,294 | 345,265 | 14,372 | 265 | 6.0e-15 | 5.9e-15 (1.3e-14) | 38 | 25.9 | 0.83 |
+| `--rules stock` | 1,973 | 1,837 / 88 / 48 / 0 | tm.norm 812, tm.gate 143, rest as the default | 4,294 | 345,265 | 14,372 | 265 | 6.0e-15 | 5.9e-15 | 38 | 24.8 | 0.88 |
+| `--levels preset` (44 / 32) | 1,968 | 1,832 / 88 / 48 / 0 | as the default | 4,294 | 345,265 | 14,372 | 265 | 6.0e-15 | 5.9e-15 (1.3e-14) | 36 | 29.1 | 0.76 |
+| `--newton-form depth2` | **1,708** (−260, −13 %) | 1,660 / 0 / 48 / 0 | tm.norm 764, cm.norm 768, tm.gate 96, tail 32 | 4,294 | 345,265 | 14,372 | 265 | 5.9e-15 | 5.8e-15 | 36 | 33.9 | 0.73 |
+| `--newton-sites per-site` | 2,071 (+103) | 2,000 / 23 / 48 / 0 | tm.norm 574, cm.norm 576, cm.gate 768, tm.gate 52, tm.out 23, tail 30 | 3,430 | 345,265 | 14,372 | 265 | 5.8e-15 | 5.9e-15 | 44 | 36.1 | 0.82 |
+| `--pack-stats halves` | **1,423** (−545, −28 %) | 1,375 / 0 / 48 / 0 | tm.norm 500, cm.norm 502, tm.gate 168, cm.gate 184, tail 21 | 2,677 | 345,461 | 14,470 | 265 | 6.0e-15 | 5.8e-15 (1.1e-14) | 40 | 30.4 | 0.83 |
+| `--linear pcmm-trunk --pcmm-wbits 24` | 1,710 (72 external) | 1,470 / 120 / 48 / 72 | tm.norm 720, cm.norm 720, tm.out 24, cm.v 96, tail 30 | 4,294 | 197,809 | 7,892 | 265 | 4.1e-15 | 2.1e-6 (6.2e-6) | 38 | 25.2 | 1.01 |
+| `--linear pcmm` (16 bits) | 1,806 (264 external) | 1,470 / 24 / 48 / 264 | tm.norm 720, cm.norm 720, tm.out 24, tail 30 | 4,294 | 1,201 | 1,436 | 265 | 3.6e-15 | 6.3e-4 (2.1e-3) | 38 | 8.6 | 0.90 |
+| `--lane-mix random` | 1,968 (+0) | as the default | as the default | 4,294 | 346,801 | 14,780 | 289 | 5.3e-15 | 0.12 (meaningless) | 38 | 33.7 | 0.86 |
 
-The same axes under the fork's hint rule (`--diag-hint 1`), against the 1,968 reference:
+The same arms with `--diag-hint 2` on (upstream's `diag_apply` headroom rule), the default's own levels:
 
-| arm | refreshes | reactive / hints / carry / PCMM | by step | ct×ct | ct×pt | rotations | conj | vs mirror | vs exact | out lvl |
+| arm (`--diag-hint 2`) | refreshes | reactive / hints / carry / PCMM | by step | ct×ct | ct×pt | rotations | conj | vs mirror | vs exact | out lvl |
 |---|---|---|---|---|---|---|---|---|---|---|
-| `--newton-form depth2 --diag-hint 1` | **1,708** (−260, −13 %) | 1,660 / 0 / 48 / 0 | tm.norm 764, cm.norm 768, tm.gate 96, tail 32 | 4,294 | 345,265 | 14,372 | 265 | 5.9e-15 | 5.8e-15 | 36 |
-| `--newton-sites per-site --diag-hint 1` | 2,071 (+103) | 2,000 / 23 / 48 / 0 | tm.norm 574, cm.norm 576, cm.gate 768, tm.gate 52, tm.out 23, tail 30 | 3,430 | 345,265 | 14,372 | 265 | 5.8e-15 | 5.9e-15 | 44 |
-| `--pack-stats halves --diag-hint 1` | **1,423** (−545, −28 %) | 1,375 / 0 / 48 / 0 | tm.norm 500, cm.norm 502, tm.gate 168, cm.gate 184, tail 21 | 2,677 | 345,461 | 14,470 | 265 | 6.0e-15 | 5.8e-15 | 40 |
-| `--linear pcmm-trunk --pcmm-wbits 24 --diag-hint 1` | 1,710 | 1,470 / 120 / 48 / 72 | as with hint 2 | 4,294 | 197,809 | 7,892 | 265 | 4.1e-15 | 2.1e-6 | 38 |
-| `--linear pcmm --diag-hint 1` | 1,806 | 1,470 / 24 / 48 / 264 | as with hint 2 | 4,294 | 1,201 | 1,436 | 265 | 3.6e-15 | 6.3e-4 | 38 |
-| `--lane-mix random --diag-hint 1` | 1,968 (+0) | as the reference | as the reference | 4,294 | 346,801 | 14,780 | 289 | 5.3e-15 | 0.12 (meaningless) | 38 |
+| `--diag-hint 2` alone | 1,713 (−255) | 1,522 / 143 / 48 / 0 | tm.norm 720, cm.norm 720, tm.gate 52, cm.kr 24, cm.v 96, tm.in 23, tail 30, carry 48 | 4,294 | 345,265 | 14,372 | 265 | 6.0e-15 | 5.9e-15 | 44 |
+| + `--levels preset` | 1,713 | as above | as above | 4,294 | 345,265 | 14,372 | 265 | 6.0e-15 | 5.9e-15 | 42 |
+| + depth2 | 1,804 | 1,660 / 96 / 48 / 0 | tm.norm 764, cm.norm 768, tm.gate 96, cm.v 96, tail 32 | 4,294 | 345,265 | 14,372 | 265 | 5.9e-15 | 5.8e-15 | 36 |
+| + per-site | 2,071 | 2,000 / 23 / 48 / 0 | tm.norm 574, cm.norm 576, cm.gate 768, tm.gate 52, tm.in 23, tail 30 | 3,430 | 345,265 | 14,372 | 265 | 5.8e-15 | 5.9e-15 | 44 |
+| + pack-stats | **1,172** | 1,028 / 96 / 48 / 0 | tm.norm 454, cm.norm 456, tm.gate 99, cm.v 96, tail 19 | 2,677 | 345,461 | 14,470 | 265 | 6.0e-15 | 5.8e-15 | 36 |
+| + pcmm-trunk 24 | 1,710 | 1,470 / 120 / 48 / 72 | as at hint 1 | 4,294 | 197,809 | 7,892 | 265 | 4.1e-15 | 2.1e-6 | 38 |
+| + pcmm 16 | 1,806 | 1,470 / 24 / 48 / 264 | as at hint 1 | 4,294 | 1,201 | 1,436 | 265 | 3.6e-15 | 6.3e-4 | 38 |
+| + lane-mix | 1,713 | as `--diag-hint 2` alone | as `--diag-hint 2` alone | 4,294 | 346,801 | 14,780 | 289 | 5.3e-15 | 0.12 (meaningless) | 44 |
 
-The depth2 saving under the fork's circuit (−13 %) is the one the research record measured on the fork
-(ROUTE1 §4: "cuts the eager count 13 %"); the PCMM arms do not depend on the hint rule (PCMM hints its own
-inputs at the StC-first cap); the lane-mix term never adds a refresh.
-
-Arithmetic behind the deltas (all from the reports): the fork's formulas hold on the reference arm —
-rotations 24 × (558 linear + 40 norm) + 20 = 14,372, conjugations 24 × 11 + 1 = 265, products 336 blocks ×
-1,024 = 344,064 of the 345,265 (the rest: 24 × (6 + 2 × 22) + 1 = 1,201 per-channel constants); per-site
-saves 3 steps × 3 ct×ct at 96 chains (4,294 − 3,430 = 864); pack-stats saves 33 ct×ct at 49 chains
-(1,617), adds 4 masks (196) and 2 rotations (98) per site; pcmm-trunk removes 6 blocks × 1,024 × 24 =
-147,456 products and 24 × (62 + 62 + 155 − 9) = 6,480 rotations and adds 3 × 24 external refreshes; pcmm
-leaves the 1,201 constants and 24 × (40 + 19) + 20 rotations; the lane mix adds 24 × 64 products,
-24 × 17 rotations and 24 conjugations and no refresh.
+Arithmetic behind the deltas (all from the reports): the fork's formulas hold on the default — rotations
+24 × (558 linear + 40 norm) + 20 = 14,372, conjugations 24 × 11 + 1 = 265, products 336 blocks × 1,024 =
+344,064 of the 345,265 (the rest: 24 × (6 + 2 × 22) + 1 = 1,201 per-channel constants); per-site saves
+3 steps × 3 ct×ct at 96 chains (4,294 − 3,430 = 864); pack-stats saves 33 ct×ct at 49 chains (1,617), adds
+4 masks (196) and 2 rotations (98) per site; pcmm-trunk removes 6 blocks × 1,024 × 24 = 147,456 products and
+24 × (62 + 62 + 155 − 9) = 6,480 rotations and adds 3 × 24 external refreshes; pcmm leaves the 1,201
+constants and 24 × (40 + 19) + 20 rotations; the lane mix adds 24 × 64 products, 24 × 17 rotations and 24
+conjugations and no refresh.
 
 What the counts mean. The eager refresh count is the fake's reactive count under the runtime's rules,
-not what a plan places: upstream's hint rule alone moves it 1,968 → 1,713 by landing every linear's output
-one level lower, after which the channel-mix gate fits without its 40 reactive refreshes; the per-site
-Newton moves the channel-mix norm's output level and the gate then fires 32 reactive refreshes per block
-under either hint rule (the research record's ROUTE1 §5 saw the same sensitivity and predicts −31 %
-planned); depth2 saves 13 % under the fork's rule and loses 5 % under upstream's (the norm outputs land at
-36 instead of 44 and the gates refresh more). Pack-stats cuts the eager count under both rules (−28 %,
-−32 %), as the record's route-5 check measured per site (30 → 17). The planned count per setting needs one
-capture (`--capture`, below) and one plan.
+not what a plan places. The depth2 form saves 13 % on the reference circuit (the figure the research record
+measured on the fork, ROUTE1 §4) and loses 5 % under upstream's hint rule (the norm outputs land at 36
+instead of 44 and the gates refresh more); the per-site Newton saves 864 ct×ct but moves the channel-mix
+norm's output level, after which the gate fires 32 reactive refreshes per block under either rule (ROUTE1 §5
+saw the same sensitivity and predicts −31 % planned); pack-stats cuts the count under both rules (−28 %,
+−32 %), as the record's route-5 check measured per site (30 → 17); upstream's hint rule alone moves the
+count 1,968 → 1,713 by landing every linear's output one level lower, after which the channel-mix gate fits
+without its 40 reactive refreshes; PCMM's count does not depend on the hint rule (its own cap hints the
+inputs); the lane-mix term never adds a refresh. The planned count per setting needs one capture
+(`--capture`, below) and one plan.
 
 ## How each piece is verified
 
@@ -286,22 +288,30 @@ Two independent ways on edge cases (`tests/`; `VERIFICATION` of the fork, carrie
 | the driver | the four arms; the axes in the report; refusals | the errors it computes | its counts against independent tallies; the hashes | `test_run_fake.py` |
 | the scale folds | exponents 0, mid, 14; brute force | bit-for-bit factors | the whole model with folds vs the mirror and the unfolded closed form | `test_scales.py` |
 
-149 tests (136 at the synthetic shape, 13 marked `slow_shape` at ring 2^16). The fork's tests of its
+156 tests (140 at the synthetic shape, 16 marked `slow_shape` at ring 2^16). The fork's tests of its
 GPU runner, planner wrapper, Colab build, decode policy and tick meter are not carried over: those modules
-belong to the fork's C++ runtime; on this branch the device path is `impl.driver.PlannedRun` (below).
+belong to the fork's C++ runtime; on this branch the device path is `impl.driver.PlannedRun` (below). Two
+further checks run at the model's shape with the published checkpoint (`tests/test_model_shape.py`, skipped
+without `FHE_SSM_WEIGHTS` / `FHE_SSM_SEEDS` / `FHE_SSM_CONFIG`): the default's 1,968 split and op counts,
+pinned, and a PCMM capture whose every finish names its linear.
 
 ## What needs a GPU
 
 1. **Capture → plan.** `run_fake.py --capture DIR` writes `block_0..24/graph.json` (and `capture_env.json`,
    `capture_config.json`) at tick 1 on the capture recorder at the fake's levels; the planner then runs on
-   them (`tools/fhe_ssm/make_plan.sh` of this session, agent B). Nothing here has run on a device: the
-   magnitudes in a fake capture are the fake's float64 values, and the landing convention is the fake's.
+   them (`tools/fhe_ssm/make_plan.sh`). The reference capture at the default settings and `--levels preset`
+   (research record `runs_A/cap_ref_preset/`, 25 stages, 716,245 nodes) holds the fake's counts to the op:
+   1,968 refreshes (808/808/142/40/88/48/34), 345,265 ct×pt, 14,372 rotations, 265 conjugations, 4,294 ct×ct;
+   the recorder takes 538 s per tick against the fake's 29 s. Nothing here has run on a device: the magnitudes
+   in a fake capture are the fake's float64 values, and the landing convention is the fake's.
 2. **A planned run.** The device path on this branch is `impl.driver.PlannedRun` / `Recorder`
    (`driver.py:444-598`): every stage recorded once on the CPU twin, compiled with its plan, replayed;
    `FheSsmModel` supplies the stages (`token_stages`), its carried state is named for the planner
-   (`cache.<name>-lvl=<level>`), `rotation_audit` lists the keys the band must hold. Wiring the model into
-   `PlannedRun` (its `Recorder.token` contract, the client key bundle with the layout's rotation keys and,
-   for PCMM, the ring-switch keys) is the GPU session's first step.
+   (`cache.<name>-lvl=<level>`), `rotation_audit` lists the keys the band must hold. The planned driver is
+   the next batch's work: `stage_caches` returning the two carried ciphertexts with their keys, a
+   `PlannedRun` subclass with a pair-packing `input_ct` and a complex decode, the schedule passed through,
+   the PCMM linears declared and uploaded by name, a key bundle (the layout's rotation keys and, for
+   PCMM, the ring-switch keys) and a warm-up.
 3. **PCMM's landing, cap and band shift**, and the refresh landing of this runtime, are measured there;
    until then every level in the table is the fake's.
 4. **The planned refresh counts per axis** (the question the axes exist for) are plan outputs, not eager

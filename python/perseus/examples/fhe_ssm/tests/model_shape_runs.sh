@@ -25,6 +25,8 @@ flags_of() {  # arm name -> its flags (every other flag at its default: 24 block
     lane_mix) echo "--lane-mix random" ;;
     levels_preset) echo "--levels preset" ;;
     rules_stock) echo "--rules stock" ;;
+    capture_ref_preset) echo "--levels preset --capture $OUT/cap_ref_preset" ;;
+    diag_hint2) echo "--diag-hint 2" ;;
     depth2_hint1) echo "--newton-form depth2 --diag-hint 1" ;;
     per_site_hint1) echo "--newton-sites per-site --diag-hint 1" ;;
     pack_stats_hint1) echo "--pack-stats halves --diag-hint 1" ;;
@@ -34,7 +36,7 @@ flags_of() {  # arm name -> its flags (every other flag at its default: 24 block
     *) echo "unknown arm: $1" >&2; exit 2 ;;
   esac
 }
-ORDER="ref_fork_hint1 default depth2 per_site pack_stats pcmm_trunk24 pcmm16 lane_mix levels_preset rules_stock"
+ORDER="ref_fork_hint1 diag_hint2 depth2 per_site pack_stats pcmm_trunk24 pcmm16 lane_mix levels_preset rules_stock"
 [ $# -gt 0 ] && ORDER="$*"
 cd "$REPO"
 for arm in $ORDER; do

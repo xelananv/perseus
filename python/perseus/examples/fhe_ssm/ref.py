@@ -15,9 +15,9 @@ import numpy as np
 from perseus.impl.ops import NumpyOps
 
 from .block import BlockState, carry, ssm_block
-from .geometry import PlainGeometry
+from .geometry import PlainGeometry, park
 from .norm import rmsnorm
-from .weights import ModelParams, encode_block
+from .weights import LANE_MIX_T, ModelParams, encode_block
 
 
 def rmsnorm_exact(x, g, eps=1e-5):
@@ -84,7 +84,9 @@ class ExactModel:
 
 
 class MirrorModel:
-    """The port's kernels on NumpyOps: ``[B, d]`` arrays, every plaintext broadcast."""
+    """The port's kernels on NumpyOps: ``[B, d]`` arrays, every plaintext broadcast. With the lane mix on,
+    fewer than ``2t`` conversations are parked as the fake parks its lanes (copies of conversation 0 that
+    carry their own state across blocks and ticks, read by the live lanes above them) and dropped on output."""
 
     def __init__(
         self,
@@ -102,21 +104,26 @@ class MirrorModel:
         self.scales = scales
         self.ops = NumpyOps()
         self.geo = PlainGeometry(self.ops, linear=linear, pcmm_wbits=pcmm_wbits)
+        # the rows the kernels run on: the live conversations, parked up to 2t with the lane mix on
+        self.rows_held = 2 * LANE_MIX_T if params.lane_mix != "off" and lanes < 2 * LANE_MIX_T else lanes
         self.start()
 
     def start(self):
-        z = np.zeros((self.lanes, self.p.d))
+        z = np.zeros((self.rows_held, self.p.d))
         self.state = [BlockState(z.copy(), z.copy()) for _ in range(self.p.n_layers)]
 
     def step(self, rows):
-        h = np.array(rows, dtype=np.float64)
+        rows = np.asarray(rows, dtype=np.float64)
+        if rows.shape[0] != self.lanes:
+            raise ValueError(f"{rows.shape[0]} rows for a mirror of {self.lanes} conversations")
+        h = park(rows, self.rows_held).copy()
         for i, st in enumerate(self.state):
             sc = None if self.scales is None else self.scales[i]
             w = encode_block(self.p.block(i), self.geo, f"b{i}.", scales=sc)
             h = ssm_block(self.ops, self.geo, h, w, st, self.form)
             carry(self.ops, self.geo, st)
         n = rmsnorm(self.ops, self.geo, h, self.p.norm_out, "out.norm", self.form)
-        return n * self.geo.lane(self.p.g_out)
+        return (n * self.geo.lane(self.p.g_out))[: self.lanes]
 
 
 def rel_err_rms(got, want):
