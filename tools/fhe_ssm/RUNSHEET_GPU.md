@@ -52,6 +52,12 @@ planned GPU driver does not exist yet** (its contract is §4): steps 0-9 run wit
 
 ## 3. The axis matrix
 
+> Every `LANDING=high` arm (high, pair, sbk16, emfuse, pcmmtrunk24, pcmm24, best, lockstep*) is **BLOCKED** in
+> `run_gpu.sh` until the port's capture writes a `capture_config.json` carrying `bts.stc_first=2` and
+> `bts.raise_drop=512:1` (next work); `run_gpu.sh arms` shows the block, `matrix` skips them, and `HIGH_CAPTURE_OK=1`
+> lifts the block once that Config exists (the post-capture check still guards the file written).
+
+
 Columns: the capture flags (`run_fake.py`), the plan axes (`make_plan.sh`), the run flags (the driver), what the arm
 isolates, and its control. The counts are plans made on the CPU [S5, S6]; no time on this runtime is measured.
 

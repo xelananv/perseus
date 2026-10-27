@@ -73,6 +73,12 @@ arm() {   # sets CAP, PLANENV, RUNF, NOTE for arm $1
     esac
     case "$PLANENV" in *LANDING=high*) CAPENV="FIDESLIB_BTS_STC_FIRST=2 FIDESLIB_BTS_STC_FIRST_ROUTES=dense FIDESLIB_BTS_STC_FIRST_CF=13 FIDESLIB_BTS_RAISE_DROP=512:1 AUTO_BTS_LEVEL=44" ;;
                        *) CAPENV="FIDESLIB_BTS_STC_FIRST=0" ;; esac
+    # Every LANDING=high arm is blocked until the port's capture Config carries bts.stc_first=2 / raise_drop=512:1
+    # (header comment): without it the capture runs for 11 min and is then refused. HIGH_CAPTURE_OK=1 lifts the
+    # block once that Config exists (the post-capture check below still guards the file that was written).
+    case "$PLANENV" in *LANDING=high*)
+        [ "${HIGH_CAPTURE_OK:-0}" = 1 ] || NOTE="BLOCKED: LANDING=high needs a capture Config with stc_first=2 / raise_drop=512:1 (set HIGH_CAPTURE_OK=1 when the port writes it); $NOTE" ;;
+    esac
 }
 capname() {   # the capture an arm uses: arms that differ only at plan or run time share one
     arm "$1"
@@ -119,9 +125,13 @@ verify)
     [ "${PIPESTATUS[0]}" = 0 ] || die "_pc is not the full (CUDA) extension"
     nvidia-smi --query-gpu=index,name,memory.used,memory.free,memory.total --format=csv -i "$GPU" 2>&1 | tee -a "$OUT/session.log"
     ( cd "$W" && CUDA_VISIBLE_DEVICES="" "$PY" -m pytest -q -p no:cacheprovider -m 'not gpu' python/tests/test_fake_shadow.py \
-        python/tests/test_pairing_cpu.py python/tests/test_rmsnorm_example.py python/tests/test_prefill_cpu.py 2>&1 | tail -3 ) | tee -a "$OUT/session.log"
+        python/tests/test_pairing_cpu.py python/tests/test_rmsnorm_example.py python/tests/test_prefill_cpu.py > "$OUT/verify_upstream_tests.log" 2>&1 )
+    rc=$?; tail -3 "$OUT/verify_upstream_tests.log" | tee -a "$OUT/session.log"
+    [ "$rc" = 0 ] || die "upstream's CPU tests failed ($OUT/verify_upstream_tests.log)"
     if [ -d "$W/python/perseus/examples/fhe_ssm/tests" ]; then
-        ( cd "$W" && CUDA_VISIBLE_DEVICES="" "$PY" -m pytest -q -p no:cacheprovider python/perseus/examples/fhe_ssm/tests 2>&1 | tail -3 ) | tee -a "$OUT/session.log"
+        ( cd "$W" && CUDA_VISIBLE_DEVICES="" "$PY" -m pytest -q -p no:cacheprovider python/perseus/examples/fhe_ssm/tests > "$OUT/verify_port_tests.log" 2>&1 )
+        rc=$?; tail -3 "$OUT/verify_port_tests.log" | tee -a "$OUT/session.log"
+        [ "$rc" = 0 ] || die "the port's tests failed ($OUT/verify_port_tests.log)"
     fi
     bash "$HERE/check_additive.sh" | tee -a "$OUT/session.log"
     [ "${PIPESTATUS[0]}" = 0 ] || die "the branch changes an unlisted upstream file (tools/fhe_ssm/UPSTREAM_CHANGES.md)"
