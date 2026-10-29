@@ -136,7 +136,8 @@ def sha256_file(path) -> str:
 
 
 def build_id() -> dict:
-    """What the timings are a property of (CLAUDE.md R6): the commit, the extension's digest, the compiler, the arch."""
+    """What the timings are a property of (a wall-clock compares only inside one build): the commit, the extension's
+    digest, the compiler, the arch."""
     from perseus import _pc  # type: ignore[attr-defined]
 
     root = pathlib.Path(__file__).resolve().parents[4]
@@ -331,9 +332,9 @@ def keygen(a) -> int:
 
 def add_model_args(ap: argparse.ArgumentParser) -> None:
     """run_fake.py's model and axis flags (the same spellings, so run_gpu.sh repeats a capture's flags verbatim)."""
-    ap.add_argument("--weights", required=True)
-    ap.add_argument("--seeds", required=True)
-    ap.add_argument("--config", required=True)
+    ap.add_argument("--weights", default=None, help="required in every mode but --keygen")
+    ap.add_argument("--seeds", default=None, help="required in every mode but --keygen")
+    ap.add_argument("--config", default=None, help="required in every mode but --keygen")
     ap.add_argument("--blocks", type=int, default=None, help="blocks to run (default: the config's)")
     ap.add_argument("--logn", type=int, default=16, help="ring dimension log2 (N/2 slots)")
     ap.add_argument("--levels", default="preset", choices=fakes.LEVELS,
@@ -571,6 +572,9 @@ def main(argv=None) -> int:
     mode = run_mode(a)
     if mode == "keygen":
         return keygen(a)
+    for k in ("weights", "seeds", "config"):
+        if not getattr(a, k):
+            raise SystemExit(f"--{k} is required (every mode but the client role, --keygen, takes the model)")
     if not a.plan:
         raise SystemExit("--plan DIR is required")
     keys_mode, bundle = resolve_keys(a) if mode == "run" else (None, None)
@@ -608,7 +612,7 @@ def main(argv=None) -> int:
         )
     run = PlannedSsmRun(
         SsmRecorder(model, model.n_layers, lean=a.lean and mode != "run"), plan, cfg, labels, keys, model=model,
-        work_dir=work, schedule=a.schedule, bundle=None if bundle is None else bundle / "keys.pckb", client=client,
+        conversations=n, work_dir=work, schedule=a.schedule, bundle=None if bundle is None else bundle / "keys.pckb", client=client,
         pcmm_cf=a.pcmm_cf, profile=a.profile, profile_every=a.profile_every, ref_token=a.ref_token, probe=a.probe,
         pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool, log=log,
     )  # fmt: skip

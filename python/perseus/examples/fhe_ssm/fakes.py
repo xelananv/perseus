@@ -64,6 +64,13 @@ LANDING_SWITCHES = (
 STC_DROP = 6
 
 
+def landing_switches_set(env: Mapping[str, str] | None = None) -> dict[str, str]:
+    """The ``LANDING_SWITCHES`` (and ``AUTO_BTS_LEVEL``) set non-empty in ``env`` (default ``os.environ``): what
+    moves a session off the reference circuit's landing table, for reports to stamp and warn about."""
+    env = os.environ if env is None else env
+    return {k: env[k] for k in (*LANDING_SWITCHES, "AUTO_BTS_LEVEL") if env.get(k, "")}
+
+
 def runtime_config(limit: int, bts_out: int, unit: int, env: Mapping[str, str] | None = None):
     """The fake's Config (``fake.fake_config``) with the dense landing at ``bts_out``, plus every
     ``LANDING_SWITCHES`` variable set (non-empty) in ``env`` (default ``os.environ``), typed by
@@ -76,7 +83,7 @@ def runtime_config(limit: int, bts_out: int, unit: int, env: Mapping[str, str] |
         raise ValueError(f"AUTO_BTS_LEVEL={ceiling} in the environment, but the session's ceiling is {limit}")
     cfg = fake.fake_config(limit, bts_out, unit)
     cfg["quirks.fakecap_landings"] = landings(bts_out)
-    switches = {k: env[k] for k in LANDING_SWITCHES if env.get(k, "")}
+    switches = {k: v for k, v in landing_switches_set(env).items() if k in LANDING_SWITCHES}
     return cfg.with_env(switches) if switches else cfg
 
 

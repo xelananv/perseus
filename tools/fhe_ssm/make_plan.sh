@@ -7,10 +7,10 @@
 # GRAPH_DIR: a capture (block_<b>/graph.json for every stage, capture_config.json or capture_env.json), made by the
 # port's run_fake.py --capture UNDER THE SAME LANDING's runtime switches (the capture's own refreshes land where the
 # fake's landing table says; a plan binds only when capture, recipe and runtime agree — the compile check below catches
-# a mismatch). The port's capture does not take the StC-first switches yet (its Config holds the ceiling, the landing
-# and the unit only: python/perseus/examples/fhe_ssm/fakes.py:45-49, 139), so LANDING=high has no matching capture; on
-# a stock capture its block 1 is infeasible. Every block is planned in ONE planner pass, block b entered at block b-1's
-# planned exit
+# a mismatch). The port's capture takes the landing's runtime switches from the environment (fakes.runtime_config,
+# fakes.LANDING_SWITCHES in python/perseus/examples/fhe_ssm/fakes.py) and stamps them in capture_config.json, so a
+# LANDING=high plan needs a capture made under the high switches (run_gpu.sh capture exports them); on a stock capture
+# its block 1 is infeasible. Every block is planned in ONE planner pass, block b entered at block b-1's planned exit
 # (python/perseus/plan/run_bootstrap_all_blocks.sh -> python -m perseus.plan.placer).
 #
 # Axes (environment; default first):

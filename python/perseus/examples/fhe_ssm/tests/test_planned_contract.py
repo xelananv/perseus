@@ -253,6 +253,32 @@ def test_lockstep_and_streams_are_refused_before_anything_runs(tmp_path):
         )
 
 
+def test_the_reply_is_the_conversations_asked_for(tmp_path):
+    """``--conversations N`` runs N of the 64 pairs (the rest parked as copies): the reply decodes N rows, so it
+    compares with the exact forward's N; outside 1..capacity it is refused before anything is recorded."""
+    model = small_model()[3]
+    for bad in (0, model.capacity + 1):
+        with pytest.raises(ValueError, match="capacity"):
+            planned.PlannedSsmRun(
+                None, "x", None, [], None, model=model, work_dir=str(tmp_path), conversations=bad
+            )
+    d, t = model.geo.base.d, model.geo.base.t
+    vec = np.zeros(d * t, dtype=np.complex128)
+    for n in (1, 3, t, t + 1, 2 * t):
+        assert filling.unpack_pairs(vec, d, n).shape == (n, d)
+
+
+def test_keygen_is_the_client_role_and_takes_no_model(tmp_path):
+    from perseus import _pc  # type: ignore[attr-defined]
+
+    if hasattr(_pc, "Client"):
+        pytest.skip("the device build answers a key request for real")
+    with pytest.raises(SystemExit, match="device build"):
+        run_planned.main(["--keygen", str(tmp_path / "k"), "--keyspec-file", str(tmp_path / "ks.json")])
+    with pytest.raises(SystemExit, match="--weights is required"):
+        run_planned.main(["--plan", "x", "--ticks", "1"])
+
+
 def test_a_device_run_needs_its_keys(tmp_path):
     base = checkpoint(tmp_path)
     with pytest.raises(SystemExit, match="needs its keys"):

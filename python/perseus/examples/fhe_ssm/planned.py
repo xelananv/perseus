@@ -380,6 +380,7 @@ class PlannedSsmRun(PlannedRun):
         *,
         model: FheSsmModel,
         work_dir,
+        conversations: int | None = None,
         schedule="program",
         bundle=None,
         client=None,
@@ -406,6 +407,9 @@ class PlannedSsmRun(PlannedRun):
             raise ValueError(
                 f"the reference token must read a carried state (ref_token >= 1) and be probed: got {ref_token} / {probe}"
             )
+        n_conv = model.capacity if conversations is None else int(conversations)
+        if not 1 <= n_conv <= model.capacity:
+            raise ValueError(f"{n_conv} conversations for a capacity of {model.capacity}")
         super().__init__(
             recorder,
             plan_dir,
@@ -423,7 +427,8 @@ class PlannedSsmRun(PlannedRun):
         )
         self.model = model
         base = model.geo.base
-        self.d, self.t, self.n_conv = base.d, base.t, model.capacity
+        self.d, self.t = base.d, base.t
+        self.n_conv = n_conv  # reply() unpacks n_conv rows; the parked lanes are dropped
         self.schedule, self.bundle, self.client = schedule, bundle, client
         self.pcmm_cf, self.check_bin = int(pcmm_cf), check_bin
         self.profile, self.profile_every = bool(profile), max(1, int(profile_every))

@@ -312,6 +312,8 @@ def run(
         "hint": "bootstrap_hint(x, headroom(products), acct=True) before each linear",
         "n_layers": model.n_layers,
         "resident_weights": resident_weights,
+        "runtime_config": json.loads(fhe.config.to_json()),
+        "landing_switches": fakes.landing_switches_set(),
         "named_slot_encodes": model.rt.ops.n_encodes,
         "start_bootstraps": start_bootstraps,
         "rotation_steps": len(fhe.loaded_rot_steps),
@@ -405,6 +407,14 @@ def main(argv=None):
     ap.add_argument("--capture-tick", type=int, default=1, help="the tick whose stages are captured")
     ap.add_argument("--out", default=None, help="the report (JSON)")
     a = ap.parse_args(argv)
+    switches = fakes.landing_switches_set()
+    if switches:
+        print(
+            "run_fake: landing switches set in the environment ("
+            + ", ".join(f"{k}={v}" for k, v in switches.items())
+            + "): this session's refreshes land by them, not by the reference circuit's table; the report stamps them",
+            file=sys.stderr,
+        )
     if a.capture is not None and a.tokens <= a.capture_tick:
         raise SystemExit(f"--capture-tick {a.capture_tick} needs more than {a.capture_tick} ticks (--tokens)")
     norm_kw = {"k": a.ms_norm_k, "frac": a.newton_frac, "min_iters": a.newton_min_iters}

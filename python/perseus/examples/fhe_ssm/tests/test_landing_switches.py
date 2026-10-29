@@ -178,7 +178,7 @@ def test_a_capture_carries_the_switches_and_refreshes_in_their_order(tmp_path, m
         assert rep["capture"]["total"]["bootstraps"] == fk["ticks"][1]["bootstraps"]
         for t in rep["ticks"]:
             assert t["relErrRms_vs_mirror"] < 1e-9
-    # the synthetic shape's counts (2026-10-29): StC-first hands back 6 more levels per refresh
+    # the synthetic shape's counts: StC-first hands back 6 more levels per refresh
     assert [t["bootstraps"] for t in fs["ticks"]] == [208] * 3
     assert [t["bootstraps"] for t in fh["ticks"]] == [134] * 3
     assert [(t["reactive"], t["hints"], t["carry"]) for t in fh["ticks"]] == [(128, 2, 4)] * 3

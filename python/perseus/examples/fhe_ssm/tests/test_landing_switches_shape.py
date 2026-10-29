@@ -23,7 +23,7 @@ HIGH = {
     "FIDESLIB_BTS_RAISE_DROP": "512:1",
     "AUTO_BTS_LEVEL": "44",
 }
-#: the reference circuit under the switches at --levels preset, one tick: the 24-block capture's counts (2026-10-29)
+#: the reference circuit under the switches at --levels preset, one tick: the 24-block capture's counts
 REFERENCE_HIGH = {
     "bootstraps": 1344,
     "reactive": 1272,

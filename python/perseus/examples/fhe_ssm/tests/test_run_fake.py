@@ -10,7 +10,7 @@ import json
 import numpy as np
 import pytest
 
-from perseus.examples.fhe_ssm import run_fake
+from perseus.examples.fhe_ssm import fakes, run_fake
 from perseus.examples.fhe_ssm.fakes import make_runtime_fake
 from perseus.examples.fhe_ssm.synthetic import synthetic
 from perseus.impl.layout import Dims
@@ -116,6 +116,34 @@ def test_linears_are_named_whatever_the_residency():
     bw = weights.encode_block(params.block(0), model.geo, "b0.", named=False)
     assert bw.named is False
     assert bw.wv.name == "b0.wv"
+
+
+def test_landing_switches_are_stamped_and_warned(tmp_path, monkeypatch, capsys):
+    """The fake's Config takes the landing switches from the shell: a report must say which were set (the
+    counts move with them) and the run must warn, so a switched run cannot pass for the reference circuit."""
+    paths = checkpoint(tmp_path)
+    argv = [*base_argv(paths, tmp_path), "--levels", "preset"]
+    for k in (*fakes.LANDING_SWITCHES, "AUTO_BTS_LEVEL"):
+        monkeypatch.delenv(k, raising=False)
+    assert run_fake.main(argv) == 0
+    ref = json.loads((tmp_path / "report.json").read_text())
+    assert ref["landing_switches"] == {}
+    assert isinstance(ref["runtime_config"], dict)
+    assert "landing switches" not in capsys.readouterr().err
+    high = {
+        "FIDESLIB_BTS_STC_FIRST": "2", "FIDESLIB_BTS_STC_FIRST_ROUTES": "dense",
+        "FIDESLIB_BTS_STC_FIRST_CF": "13", "FIDESLIB_BTS_RAISE_DROP": "512:1",
+    }  # fmt: skip
+    for k, v in high.items():
+        monkeypatch.setenv(k, v)
+    assert run_fake.main(argv) == 0
+    rep = json.loads((tmp_path / "report.json").read_text())
+    assert rep["landing_switches"] == high
+    assert rep["runtime_config"] != ref["runtime_config"]
+    assert rep["ticks"][1]["bootstraps"] < ref["ticks"][1]["bootstraps"]  # StC-first hands back more levels
+    err = capsys.readouterr().err
+    assert "landing switches set in the environment" in err
+    assert "FIDESLIB_BTS_STC_FIRST=2" in err
 
 
 def test_too_many_conversations_are_refused(tmp_path):

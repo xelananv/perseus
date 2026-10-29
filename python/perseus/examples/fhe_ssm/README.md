@@ -340,7 +340,7 @@ python -m perseus.examples.fhe_ssm.run_planned <model flags> --plan PLAN --prepa
 # the key request (the model's needs; on the device build the session's exact pc_client KeySpec too)
 python -m perseus.examples.fhe_ssm.run_planned <model flags> --plan PLAN --keyspec keyspec.json
 # the client role (device build): a secret and the bundle DIR/keys.pckb; client_secret.bin stays beside it
-python -m perseus.examples.fhe_ssm.run_planned --weights w --seeds s --config c --keygen DIR --keyspec-file keyspec.json
+python -m perseus.examples.fhe_ssm.run_planned --keygen DIR --keyspec-file keyspec.json   # no model flags: the client role
 # a timing run with in-process keys (INSECURE: the session holds the secret), the published tokens
 python -m perseus.examples.fhe_ssm.run_planned <model flags> --linear pcmm --pcmm-wbits 24 --plan PLAN \
     --ticks 148 --tokens tokens.json [--free-run] --profile --insecure-test-keys --out record.json
@@ -357,7 +357,8 @@ conjugation and relinearization keys, and PCMM's ring-switch key set for `t = 32
 With `DIR/client_secret.bin` (written by `--keygen`) the reply is exported as a frame and decrypted by
 `_pc.Client` on the client's side of the process, so a bundle run is scored too; without it the frames
 land in `<out>.replies/` and the fidelity fields are absent. `--keys bundle` reads `DIR` from
-`$FHE_SSM_KEYS`. `--insecure-test-keys` (= `--keys inproc`, what `run_gpu.sh`'s `KEYS=inproc` passes)
+`$FHE_SSM_KEYS`. `--insecure-test-keys` (= `--keys inproc`, what `run_gpu.sh` passes for `KEYS=inproc`; `KEYS` has no
+default there, and its `keyspec` / `keygen` steps make a bundle)
 generates the keys in process and keeps the secret in the session: a timing run only, loudly marked in the
 log and the record (`keys.mode = "insecure-inproc"`). `--keyspec` writes the request: the model's own
 needs on every build, and on the device build the session's `Session.key_manifest` (the exact

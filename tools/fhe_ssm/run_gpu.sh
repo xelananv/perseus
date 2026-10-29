@@ -10,6 +10,10 @@
 #   bash tools/fhe_ssm/run_gpu.sh capture ARM      the CPU-twin capture of ARM (no GPU; reused when present)
 #   bash tools/fhe_ssm/run_gpu.sh plan ARM         tools/fhe_ssm/make_plan.sh on that capture (+ the compile check)
 #   bash tools/fhe_ssm/run_gpu.sh prepare ARM      the driver's CPU part (--prepare-only: record, compile check, report)
+#   bash tools/fhe_ssm/run_gpu.sh keyspec ARM      the key request of ARM's plan ($DRIVER --keyspec: the model's needs and,
+#                                                  on the device build, the session's) -> $OUT/keys_ARM/keyspec.json
+#   bash tools/fhe_ssm/run_gpu.sh keygen ARM       the client role for that request ($DRIVER --keygen: a fresh secret,
+#                                                  keys.pckb); then KEYS=bundle FHE_SSM_KEYS=$OUT/keys_ARM for run
 #   bash tools/fhe_ssm/run_gpu.sh run ARM          the planned run: $DRIVER --ticks $TICKS --profile, nvidia-smi sampled
 #                                                  (PCMM arms only: the driver refuses diagonal linears on a device)
 #   bash tools/fhe_ssm/run_gpu.sh smoke            capture + plan + run of `pcmm24` at BLOCKS=1 (the first device contact)
@@ -18,8 +22,9 @@
 # Environment: OUT (default <worktree>/.cache/fhe_ssm/gpu_<UTC date>; every product lands there, one dir per arm),
 # DATA (a directory holding the model's weights .npz, seeds .json and config .json; WEIGHTS / SEEDS / CONFIG override
 # each), DRIVER (the planned driver's python module, default perseus.examples.fhe_ssm.run_planned: its contract is in
-# RUNSHEET_GPU.md §4), TICKS (2), BLOCKS (all), GPU (0), KEYS (inproc: in-process keys, a timing run only | bundle: the
-# client's key directory in FHE_SSM_KEYS | that directory), PROFILE_EVERY (2: a stage fence on every 2nd tick, so one run
+# RUNSHEET_GPU.md §4), TICKS (2), BLOCKS (all), GPU (0), KEYS (NO DEFAULT; run, smoke and matrix refuse without it:
+# inproc = in-process keys, INSECURE, the server holds the secret, a timing run only | bundle = the client's key directory
+# in FHE_SSM_KEYS, made by keyspec + keygen | that directory), PROFILE_EVERY (2: a stage fence on every 2nd tick, so one run
 # holds fenced and unfenced ticks; 1 = every tick), PREPARE_EXTRA (more `prepare` flags, e.g. --lean on a small host),
 # PY (<worktree>/.venv/bin/python), PERSEUS_CORE_ARCH (build: default from nvidia-smi's compute capability),
 # PC_NVCC_JOBS (build: default 8). Nothing here edits a tracked file; captures, plans and records go under OUT.
@@ -29,7 +34,7 @@ W=$(git -C "$HERE" rev-parse --show-toplevel)
 PY=${PY:-$W/.venv/bin/python}
 OUT=${OUT:-$W/.cache/fhe_ssm/gpu_$(date -u +%Y%m%d)}
 DRIVER=${DRIVER:-perseus.examples.fhe_ssm.run_planned}
-TICKS=${TICKS:-2}; BLOCKS=${BLOCKS:-}; GPU=${GPU:-0}; KEYS=${KEYS:-inproc}; PROFILE_EVERY=${PROFILE_EVERY:-2}
+TICKS=${TICKS:-2}; BLOCKS=${BLOCKS:-}; GPU=${GPU:-0}; KEYS=${KEYS:-}; PROFILE_EVERY=${PROFILE_EVERY:-2}
 mkdir -p "$OUT"
 log() { echo "[run_gpu $(date -u +%H:%M:%S)] $*" | tee -a "$OUT/session.log"; }
 die() { log "STOP: $*"; exit 1; }
@@ -198,6 +203,7 @@ run)
     [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
     PYTHONPATH="$W/python" "$PY" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$DRIVER') else 1)" 2>/dev/null \
         || die "no driver module $DRIVER (RUNSHEET_GPU.md §4 is its contract)"
+    [ -n "$KEYS" ] || die "run $a: set KEYS. inproc = in-process keys (INSECURE: the server generates every key and holds the secret; a timing run only, recorded as insecure-inproc) | bundle = the client's key directory in FHE_SSM_KEYS (run_gpu.sh keyspec $a, then keygen $a) | <that directory>"
     [ "$KEYS" != bundle ] || [ -d "${FHE_SSM_KEYS:-}" ] || die "KEYS=bundle reads the client's key directory from FHE_SSM_KEYS: export it (or KEYS=<dir>)"
     gpu_free
     resolve_data
@@ -216,6 +222,28 @@ run)
     log "run $a: exit $rc in $(( $(date +%s) - t0 )) s; nvidia-smi peak ${peak} MiB; $r/record.json; $(build_id)"
     tail -15 "$r/run.log"
     [ $rc = 0 ] || die "run $a failed ($r/run.log)" ;;
+keyspec)
+    a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a"
+    [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
+    resolve_data
+    r="$OUT/keys_$a"; mkdir -p "$r"
+    log "keyspec $a: $DRIVER --plan $p --keyspec $r/keyspec.json $CAP $RUNF"
+    ( cd "$W" && env CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH="$W/python" $CAPENV "$PY" -m "$DRIVER" $MODEL_ARGS --plan "$p" \
+        --keyspec "$r/keyspec.json" $CAP $RUNF ) > "$r/keyspec.log" 2>&1
+    rc=$?
+    log "keyspec $a: exit $rc; $r/keyspec.json"
+    tail -5 "$r/keyspec.log"
+    [ $rc = 0 ] || die "keyspec $a failed ($r/keyspec.log)" ;;
+keygen)
+    a=${1:?arm}; r="$OUT/keys_$a"
+    [ -f "$r/keyspec.json" ] || die "no key request $r/keyspec.json: run_gpu.sh keyspec $a"
+    log "keygen $a (the client role, on this box for the test): $DRIVER --keygen $r --keyspec-file $r/keyspec.json"
+    ( cd "$W" && env CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH="$W/python" "$PY" -m "$DRIVER" --keygen "$r" \
+        --keyspec-file "$r/keyspec.json" --threads "${KEYGEN_THREADS:-8}" ) > "$r/keygen.log" 2>&1
+    rc=$?
+    log "keygen $a: exit $rc; bundle $r/keys.pckb ($(du -h "$r/keys.pckb" 2>/dev/null | cut -f1)); for run: KEYS=bundle FHE_SSM_KEYS=$r"
+    tail -5 "$r/keygen.log"
+    [ $rc = 0 ] || die "keygen $a failed ($r/keygen.log)" ;;
 smoke)
     export BLOCKS=1
     bash "$0" capture pcmm24 && bash "$0" plan pcmm24 && bash "$0" run pcmm24 ;;
@@ -227,5 +255,5 @@ matrix)
         bash "$0" capture "$a" && bash "$0" plan "$a" && bash "$0" "$last" "$a" || log "arm $a stopped (above); continuing"
     done ;;
 *)
-    sed -n '2,25p' "$0"; exit 2 ;;
+    sed -n '2,30p' "$0"; exit 2 ;;
 esac
