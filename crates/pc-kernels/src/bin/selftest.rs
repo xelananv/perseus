@@ -1739,6 +1739,125 @@ fn t_encode(st: &mut Setup) -> Vec<TestResult> {
     out
 }
 
+// ================================================================================================ encode_many
+/// encode_many over 3 jobs == 3 single encodes of the same buffers, word for word (limbs, coefficients, max |c|); the
+/// split counter counts exactly the jobs whose max |c| passes 2^61 (job 1's slots are 2^30 times larger).
+fn t_encode_many(st: &mut Setup) -> Vec<TestResult> {
+    let mut out = Vec::new();
+    let nl = if st.ctx.wb == 8 { 2 } else { 3 };
+    let nb = 3usize;
+    let scale = (1u64 << 40) as f64;
+    let mags = [1.0, (1u64 << 30) as f64, 0.5];
+    let mut vflat: Vec<f64> = Vec::with_capacity(nb * N);
+    for mag in mags {
+        for _ in 0..N {
+            vflat.push(mag * (2.0 * st.rng.f64() - 1.0));
+        }
+    }
+    let vd = st.ctx.up_f64(&vflat);
+    let df = st.ctx.up(&vec![1u64; nl]);
+    let (sa, sb) = (st.ctx.zeros_wb(nb * 2 * N, 8), st.ctx.zeros_wb(nb * 2 * N, 8));
+    let (sc, cm, ns) = (st.ctx.zeros_wb(nb * N, 8), st.ctx.zeros_wb(nb, 8), st.ctx.zeros_wb(1, 8));
+    let o = st.ctx.zeros(nb * nl * N);
+    let e = |v: *const c_void, a: *mut c_void, b: *mut c_void, c: *mut c_void, cmax: *mut c_void, o: *mut c_void, st: &Setup| EncodeArgs {
+        v,
+        a,
+        b,
+        c,
+        cmax: cmax as *mut u64,
+        out: o,
+        deg_factor: df.c(),
+        pr: st.pr(),
+        scale,
+        nl: nl as i32,
+        pad: 0,
+    };
+    let m = EncodeManyArgs {
+        e: e(vd.c(), sa.p(), sb.p(), sc.p(), cm.p(), o.p(), st),
+        v_stride: N as u64,
+        ab_stride: 2 * N as u64,
+        c_stride: N as u64,
+        out_stride: (nl * N) as u64,
+        nsplit: ns.p() as *mut u64,
+        batch: nb as i32,
+        pad: 0,
+    };
+    ck(unsafe { (st.t.encode_many)(&m, st.s()) });
+    let (limbs, coefs, cmaxs, nsplit) = (o.read(&st.ctx), sc.read(&st.ctx), cm.read(&st.ctx), ns.read(&st.ctx)[0]);
+    let (mut l1, mut c1, mut m1) = (Vec::new(), Vec::new(), Vec::new());
+    let (ta, tb, tc, tm, to) = (st.ctx.zeros_wb(2 * N, 8), st.ctx.zeros_wb(2 * N, 8), st.ctx.zeros_wb(N, 8), st.ctx.zeros_wb(1, 8), st.ctx.zeros(nl * N));
+    for j in 0..nb {
+        let a = e(vd.at(j * N) as *const c_void, ta.p(), tb.p(), tc.p(), tm.p(), to.p(), st);
+        ck(unsafe { (st.t.encode)(&a, st.s()) });
+        l1.extend(to.read(&st.ctx));
+        c1.extend(tc.read(&st.ctx));
+        m1.extend(tm.read(&st.ctx));
+    }
+    out.push(cmp("encode_many (3 jobs) limbs == 3 single encodes", &limbs, &l1));
+    out.push(cmp("encode_many (3 jobs) coefficients == 3 single encodes", &coefs, &c1));
+    out.push(cmp("encode_many (3 jobs) max |c| == 3 single encodes", &cmaxs, &m1));
+    let want = m1.iter().filter(|&&b| f64::from_bits(b) > (1u64 << 61) as f64).count() as u64;
+    out.push(TestResult {
+        name: "encode_many split counter == jobs past 2^61".into(),
+        bad: nsplit.abs_diff(want),
+        total: nb as u64,
+        note: format!("counted {nsplit}, expected {want}"),
+    });
+    out
+}
+
+// ================================================================================================ diag_gather
+/// A job-table row as the device reads it (args.cuh DiagJobRow), in u32 words (little-endian u64 address).
+fn job_words(r: &DiagJobRow) -> [u32; 10] {
+    [r.w as u32, (r.w >> 32) as u32, r.d_out, r.side, r.b, r.log_t, r.n, r.m, r.gg, r.jj]
+}
+
+/// diag_gather == the slot vectors by their definition (`np.roll(np.repeat(diag, t), gg b t)` of the (n, m) block's
+/// diagonal k = gg b + jj, imaginary part 0) for the corner jobs and random ones of a random tile, at two lane counts.
+fn t_diag_gather(st: &mut Setup) -> Vec<TestResult> {
+    let mut out = Vec::new();
+    let ns = N / 2;
+    for (t, n_in, n_out) in [(32usize, 2usize, 1usize), (256, 1, 3)] {
+        let side = ns / t;
+        let b = 1usize << ((usize::BITS - side.leading_zeros()) / 2);
+        let g = side / b;
+        let (d_in, d_out) = (n_in * side, n_out * side);
+        let w: Vec<f64> = (0..d_in * d_out).map(|_| 2.0 * st.rng.f64() - 1.0).collect();
+        let wd = st.ctx.up_f64(&w);
+        let mut jobs = vec![(0, 0, 0, 0), (n_in - 1, n_out - 1, g - 1, b - 1), (0, n_out - 1, g - 1, 0)];
+        while jobs.len() < 16 {
+            let r = |st: &mut Setup, k: usize| st.rng.below(k as u64) as usize;
+            jobs.push((r(st, n_in), r(st, n_out), r(st, g), r(st, b)));
+        }
+        let rows: Vec<u32> = jobs
+            .iter()
+            .flat_map(|&(n, m, gg, jj)| {
+                let row = DiagJobRow { w: wd.c() as u64, d_out: d_out as u32, side: side as u32, b: b as u32, log_t: t.trailing_zeros(), n: n as u32, m: m as u32, gg: gg as u32, jj: jj as u32 };
+                job_words(&row)
+            })
+            .collect();
+        let jd = st.ctx.up32(&rows);
+        let vd = st.ctx.zeros_wb(jobs.len() * N, 8);
+        let a = DiagGatherArgs { jobs: jd.c() as *const DiagJobRow, v: vd.p(), v_stride: N as u64, njobs: jobs.len() as i32, pad: 0 };
+        ck(unsafe { (st.t.diag_gather)(&a, st.s()) });
+        let got = vd.read(&st.ctx);
+        let mut want = Vec::with_capacity(jobs.len() * N);
+        for &(n, m, gg, jj) in &jobs {
+            let k = gg * b + jj;
+            let diag: Vec<f64> = (0..side).map(|i| w[(n * side + (i + k) % side) * d_out + m * side + i]).collect();
+            let shift = gg * b * t;
+            for v in 0..ns {
+                // np.roll(x, shift)[v] = x[(v - shift) mod n_slots]; np.repeat(diag, t)[e] = diag[e / t]
+                let e = (v + ns - shift) % ns;
+                want.push(diag[e / t].to_bits());
+                want.push(0.0f64.to_bits());
+            }
+        }
+        out.push(cmp(&format!("diag_gather (t = {t}, {d_in} x {d_out} tile, {} jobs) == roll(repeat(diagonal))", jobs.len()), &got, &want));
+    }
+    out
+}
+
 // ================================================================================================ encrypt
 fn t_encrypt(st: &mut Setup) -> Vec<TestResult> {
     let mut out = Vec::new();
@@ -1868,7 +1987,9 @@ fn run_instance(dev: &Device, inst: Instance, do_bench: bool) -> (u64, Vec<Strin
     tests.extend([t_bconv as Test, t_ew, t_pt_dot, t_em, t_mul_range, t_ks, t_regen, t_cts, t_keytab, t_rescale, t_automorph]);
     if has_ntt {
         tests.push(t_encode);
+        tests.push(t_encode_many);
     }
+    tests.push(t_diag_gather);
     tests.push(t_encrypt);
     let (mut total, mut nchecks) = (0, 0);
     for t in tests {

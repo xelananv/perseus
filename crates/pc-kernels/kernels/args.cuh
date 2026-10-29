@@ -9,7 +9,7 @@
 #include <cstdint>
 #include <cuda_runtime.h>
 
-#define PC_KERNELS_ABI 16u
+#define PC_KERNELS_ABI 17u
 #define PC_RING_ABI 7u
 // the ring tables (RingTable) are compiled once per ring size with -DPC_LOGN; everything else is N = 2^16
 #ifndef PC_LOGN
@@ -755,6 +755,46 @@ struct CoeffArgs {
 };
 static_assert(sizeof(CoeffArgs) == 80 + 16 * PC_COEFF_MAXT, "CoeffArgs layout");
 
+// ------------------------------------------------------------------------------------------------ diag_gather (ABI 17)
+// The device diagonal encoder's gather (diag.cuh): job j (grid.y) writes the N/2 slots of one generated diagonal,
+// (re, im) = (W[at(v)], 0), at v + j v_stride doubles, reading its tile W through its row of the job table. A row holds
+// the tile's device address and geometry and the diagonal (n, m, gg, jj) of a DiagLinear over n_slots = N/2 slots,
+// B = side = n_slots / t, k = gg b + jj; slot v reads
+//   i = ((v - gg b t) mod n_slots) >> log_t,  row = n B + ((i + k) mod B),  col = m B + i,  at = row d_out + col
+// (64-bit; the first mod a mask, the second one conditional subtract: i + k < 2B). The rows are written on the host at
+// bind (pc-gpu diag_gen.rs), one per term of a bound diagonal sum, so a launch passes a pointer, not the rows.
+// v_stride >= N and even (double2 alignment); 1 <= njobs <= 65535.
+struct DiagJobRow {
+    uint64_t w;      // the tile: a row-major (d_in, d_out) float64 matrix, device address
+    uint32_t d_out;  // its row length (elements)
+    uint32_t side;   // B
+    uint32_t b;      // baby steps
+    uint32_t log_t;  // log2 t (lanes)
+    uint32_t n, m, gg, jj;
+};
+static_assert(sizeof(DiagJobRow) == 40, "DiagJobRow layout");
+struct DiagGatherArgs {
+    const DiagJobRow* jobs;  // njobs rows of the job table (the chunk's first)
+    void* v;                 // job j's N/2 double2 slots at v + j * v_stride doubles
+    uint64_t v_stride;
+    int32_t njobs, pad;
+};
+static_assert(sizeof(DiagGatherArgs) == 32, "DiagGatherArgs layout");
+
+// ------------------------------------------------------------------------------------------------ encode_many (ABI 17)
+// `batch` encodes (EncodeArgs semantics) in one set of launches: job j = grid.y reads e.v + j v_stride doubles, works
+// in e.a / e.b + j ab_stride and e.c + j c_stride doubles and e.cmax[j], and writes limb l at e.out + j out_stride +
+// l N words; e.deg_factor, e.pr, e.scale and e.nl are shared. The kernels are encode's (encode = encode_many at batch
+// 1), so job j's limbs equal one encode of its buffers word for word. v_stride and ab_stride even (double2 alignment).
+// nsplit non-null: +1 (atomic) per job whose 2^61 split is nonzero.
+struct EncodeManyArgs {
+    EncodeArgs e;
+    uint64_t v_stride, ab_stride, c_stride, out_stride;
+    unsigned long long* nsplit;
+    int32_t batch, pad;
+};
+static_assert(sizeof(EncodeManyArgs) == 128, "EncodeManyArgs layout");
+
 // ------------------------------------------------------------------------------------------------ KernelTable
 // One table per (W, MM) instantiation, exported as `extern "C" const KernelTable* pc_table_<w>_<mm>()`.
 // Every launcher: (args, stream) -> cudaError_t of the launch (0 = ok; -1/-2 = argument out of the kernel's range).
@@ -803,8 +843,10 @@ struct KernelTable {
     int (*coeff_sum)(const CoeffArgs*, cudaStream_t);
     int (*mul_add)(const MulAddArgs*, cudaStream_t);
     int (*rescale_fwd)(const RescaleNttArgs*, cudaStream_t);
+    int (*diag_gather)(const DiagGatherArgs*, cudaStream_t);
+    int (*encode_many)(const EncodeManyArgs*, cudaStream_t);
 };
-static_assert(sizeof(KernelTable) == 16 + 40 * 8, "KernelTable layout");
+static_assert(sizeof(KernelTable) == 16 + 42 * 8, "KernelTable layout");
 
 // ------------------------------------------------------------------------------------------------ ring tables
 // One table per (W, MM, log_n), exported as `extern "C" const RingTable* pc_ring_<w>_<log_n>()`: the transforms

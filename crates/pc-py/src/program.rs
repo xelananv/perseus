@@ -365,13 +365,22 @@ impl PyProgram {
         }
         let scalars = pc_program::bind::ScalarTable::new();
         let stage = ex.ks.stage_ptrs();
-        let b = {
-            // diag: the session's declared tiles (Session(diag_tiles=...)) once the device diagonal encoder is built; None
-            // until then, so a program with generated diagonals is refused here by name
-            let env = BindEnv { arena: dev.arena_static(), stream: &ex.compute, lay: dev.ctx.lay, keys: &*keys, stage, scalars: &scalars, streams: Some(&pl.streams), diag: None };
+        let mut b = {
+            // diag: the session's declared tiles (Session(diag_tiles=...)); None refuses a program with generated
+            // diagonals here, by name
+            let env = BindEnv { arena: dev.arena_static(), stream: &ex.compute, lay: dev.ctx.lay, keys: &*keys, stage, scalars: &scalars, streams: Some(&pl.streams), diag: pl.diag.as_ref().map(|d| &d.src) };
             let routes = pl.routes();
             pc_program::bind::Bound::new_shared(&self.prog, &env, &routes, &dr).map_err(perr)?
         };
+        // every diagonal sum's jobs into the encoder's device job table (rows a captured graph reads at fixed addresses)
+        if let Some(d) = pl.diag.as_mut() {
+            for cs in b.coeff_sums.iter_mut() {
+                if let pc_program::compile::diag::SumSrc::Diag { jobs } = &cs.src {
+                    let rows = jobs.iter().map(|j| d.dg.job_row(j.tile as usize, j.n, j.m, j.gg, j.jj)).collect::<pc_gpu::Result<Vec<_>>>().map_err(gerr)?;
+                    cs.jobs_at = d.dg.register(&ex.compute, &rows).map_err(gerr)?.at;
+                }
+            }
+        }
         // the weight frame's content id: blocks of different program classes streaming the same linears share it (a
         // block whose sums are all generated diagonals streams nothing: no tag, no Session.stream_order entry)
         let tag = if !b.coeff_sums.iter().any(|c| matches!(c.src, pc_program::compile::diag::SumSrc::Stream { .. })) {
@@ -585,7 +594,7 @@ fn run_block(dev: &Dev, idx: usize, ins: &[In<'_>], outputs: &[(usize, usize)], 
     let mut st = dev.st.borrow_mut();
     let State { planned, ex, ops, plans, pts, .. } = &mut *st;
     let pl = planned.as_mut().ok_or_else(|| PyRuntimeError::new_err("not a planned session"))?;
-    let crate::session::Planned { bounds, shadows, replayer, slab, regs, work, dense, plain, sparse, classic, spru, stats, pcmm, ccmm, side, coeff, ring, streams, stream_tag, tag_layouts, stream_order, kv, .. } = pl;
+    let crate::session::Planned { bounds, shadows, replayer, slab, regs, work, dense, plain, sparse, classic, spru, stats, pcmm, ccmm, side, coeff, diag, ring, streams, stream_tag, tag_layouts, stream_order, kv, .. } = pl;
     // the block's weight frame: staged while the block before ran (else now), joined into compute
     let spos = match stream_tag.get(idx).copied().flatten() {
         Some(tag) => {
@@ -643,6 +652,14 @@ fn run_block(dev: &Dev, idx: usize, ins: &[In<'_>], outputs: &[(usize, usize)], 
     if ins.len() != b.inputs.len() {
         return Err(PyValueError::new_err(format!("{}: {} inputs for {} program inputs", b.label, ins.len(), b.inputs.len())));
     }
+    // generated diagonals: every tile the block reads uploaded (and every declared one, on the session's first run)
+    if let Some(d) = diag.as_ref() {
+        let need: Vec<usize> = if stats.runs == 0 { (0..d.src.tiles.len()).collect() } else { b.diag.tiles.iter().map(|&t| t as usize).collect() };
+        let missing: Vec<&str> = need.iter().filter(|&&t| !d.dg.uploaded(t)).map(|&t| d.src.tiles[t].0.as_str()).collect();
+        if !missing.is_empty() {
+            return Err(PyRuntimeError::new_err(format!("{}: {} declared diagonal tile(s) never uploaded (Session.register_tile): {}", b.label, missing.len(), missing.join(", "))));
+        }
+    }
     b.resolve_pts(pts).map_err(perr)?;
     let ctx = &dev.ctx;
     let sh = &shadows[idx];
@@ -686,7 +703,7 @@ fn run_block(dev: &Dev, idx: usize, ins: &[In<'_>], outputs: &[(usize, usize)], 
                     _ => None,
                 };
                 let finish = fx.as_mut().map(|f| f as &mut dyn pc_program::replay::FinishExec<'static, W, crate::session::M>);
-                let mut rt = Rt { ctx, ex: &mut *ex, sh, ks: &*plans, ops: &mut *ops, work: &mut *work, routes: &routes, source: dev.source, locks: &locks, finish, side: side.as_mut(), coeff: coeff.as_mut() };
+                let mut rt = Rt { ctx, ex: &mut *ex, sh, ks: &*plans, ops: &mut *ops, work: &mut *work, routes: &routes, source: dev.source, locks: &locks, finish, side: side.as_mut(), coeff: coeff.as_mut(), diag: diag.as_mut().map(|d| &mut d.dg) };
                 replayer.run(b, &mut rt)?
             };
             for &(j, r) in outputs {

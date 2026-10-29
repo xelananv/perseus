@@ -39,11 +39,15 @@ pub enum PtForm {
     Coeff,
 }
 
-/// What to encode: slot values (`HostFft`, `DeviceFft`) or coefficient values (`CoeffRows`).
+/// What to encode: slot values (`HostFft`, `DeviceFft`) or coefficient values (`CoeffRows`). `DeviceSlots`: N/2 slot
+/// values already on the device (`ptr`: N/2 (re, im) double pairs; `DeviceFft` only), taken as they are: the host
+/// path's periodic extension and `im = 0` for a real payload do not run, so `slots` must be N/2 and a real payload's
+/// imaginary parts must already be 0 (the diagonal gather writes them so, `diag_gen`).
 #[derive(Clone, Copy, Debug)]
 pub enum Payload2<'v> {
     Slots { values: &'v [Complex], slots: usize, payload: Payload },
     Coeffs(&'v [f64]),
+    DeviceSlots { ptr: *const c_void, slots: usize, payload: Payload },
 }
 
 /// Encoding parameters: rows `0..=top`, `scale` (the level's scaling factor for degree 1), degree (degree 2 rows
@@ -144,6 +148,7 @@ impl<'a, W: DevWord> DevEncoder<'a, W> {
         self.check(&at, out)?;
         match (kind, what) {
             (EncoderKind::DeviceFft, Payload2::Slots { values, slots, payload }) => self.device_fft(ctx, s, ring, values, slots, payload, &at, out)?,
+            (EncoderKind::DeviceFft, Payload2::DeviceSlots { ptr, slots, .. }) => self.device_fft_at(ctx, s, ring, ptr, slots, &at, out)?,
             (EncoderKind::HostFft, Payload2::Slots { .. }) | (EncoderKind::CoeffRows, Payload2::Coeffs(_)) => {
                 let rows = self.host_rows(what, &at)?;
                 self.upload_rows(s, &rows, at.top, out)?;
@@ -221,13 +226,38 @@ impl<'a, W: DevWord> DevEncoder<'a, W> {
         unsafe { self.v.upload_pinned_async(s, 0, &self.pin)? };
         self.pin_ev.record(s)?;
         self.pin_used = true;
+        let v = self.v.vptr();
+        self.launch_encode(ctx, s, ring, v, at, out)
+    }
+
+    /// `device_fft` of N/2 slot values already on the device (`Payload2::DeviceSlots`).
+    #[allow(clippy::too_many_arguments)]
+    fn device_fft_at<M: DevStrategy<W>>(
+        &mut self,
+        ctx: &Context<'_, W, M>,
+        s: &Stream<Compute>,
+        ring: &mut ConstRing<'_, W>,
+        ptr: *const c_void,
+        slots: usize,
+        at: &EncodeAt,
+        out: &mut DBuf<'_, Compute, W>,
+    ) -> Result<()> {
+        let nh = self.lay.n / 2;
+        if slots != nh || ptr.is_null() {
+            return Err(shape("encode", format!("device slots: {slots} values at {ptr:?}; the device payload is all N/2 = {nh} slots, non-null")));
+        }
+        self.launch_encode(ctx, s, ring, ptr, at, out)
+    }
+
+    /// The `encode` launch on slot values at `v` (N/2 double2, device): deg_factor through the ring, rows 0..=top.
+    fn launch_encode<M: DevStrategy<W>>(&mut self, ctx: &Context<'_, W, M>, s: &Stream<Compute>, ring: &mut ConstRing<'_, W>, v: *const c_void, at: &EncodeAt, out: &mut DBuf<'_, Compute, W>) -> Result<()> {
         let df: Vec<u64> = self.primes[..=at.top]
             .iter()
             .map(|&p| if at.deg == 2 { (at.scale.round() as u128 % p as u128) as u64 } else { 1 % p })
             .collect();
         let deg_factor = ring.push_plain(s, &df)?;
         let args = EncodeArgs {
-            v: self.v.vptr(),
+            v,
             a: self.a.vptr_mut(),
             b: self.b.vptr_mut(),
             c: self.c.vptr_mut(),
@@ -239,8 +269,8 @@ impl<'a, W: DevWord> DevEncoder<'a, W> {
             nl: (at.top + 1) as i32,
             pad: 0,
         };
-        // SAFETY: workspaces sized by `bytes` (v N doubles, a/b 2N doubles = N double2, c >= N doubles, cmax 1);
-        // out holds rows 0..=top (checked)
+        // SAFETY: workspaces sized by `bytes` (a/b 2N doubles = N double2, c >= N doubles, cmax 1); v holds N/2
+        // double2 (this encoder's pinned upload, or the caller's device slots); out holds rows 0..=top (checked)
         launch_result("encode", unsafe { (ctx.table.encode)(&args, s.raw()) })?;
         Ok(())
     }
@@ -251,6 +281,7 @@ pub fn host_rows(enc: &Encoder, primes: &[u64], what: Payload2<'_>, at: &EncodeA
     let mut rows = match what {
         Payload2::Slots { values, slots, payload } => enc.encode_slots(values, slots, at.top, payload, at.scale)?,
         Payload2::Coeffs(c) => enc.encode_coeff_rows(c, at.top, at.scale)?,
+        Payload2::DeviceSlots { .. } => return Err(shape("encode", "device slot values have no host encoding (DeviceFft only)")),
     };
     if at.deg == 2 {
         for (l, r) in rows.iter_mut().enumerate() {

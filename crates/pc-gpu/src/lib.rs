@@ -21,6 +21,7 @@ pub mod ops;      // leaf ops (add/sub/negate/scalar/pt mult, tensor) executing 
 pub mod rescale;  // Rescaler (composite one-pass), DropTo
 pub mod pt_store; // plaintext cache + staging worker (PtStorePolicy)
 pub mod encode_dev; // device encode (Encoder seam: host FFT / device FFT / coefficient rows)
+pub mod diag_gen;   // device diagonal encoder (fused sums of diagonals generated from resident tiles)
 pub mod ks;       // KeySwitch (ModUp, KS dot, ModDown)
 pub mod rotate;   // Rotator (plain / hoisted / rotate-and-sum)
 pub mod relin;    // relinearization

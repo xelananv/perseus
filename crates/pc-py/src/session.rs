@@ -14,6 +14,7 @@ use pc_core::modmul::Barrett64;
 use pc_core::params::Chain;
 use pc_cuda::{Arena, Device, Event, EventPool};
 use pc_gpu::decrypt::Decryptor;
+use pc_gpu::diag_gen::{DiagGen, DiagShape, TileGeom, DIAG_MAXB};
 use pc_gpu::encrypt::Encryptor;
 use pc_gpu::keygen::KeyGen;
 use pc_gpu::keys::{DevSecret, KeyRole, KeySet, KeySetSpec, KskLayout, RotSpec};
@@ -29,6 +30,7 @@ use pc_gpu::bts::{BtsKeyRing, BtsSetup, BtsWork, BtsWorkShape, RouteKind};
 use pc_gpu::keys::KskShape;
 use pc_gpu::{Context, Ct, CtPool, Executor, MemCfg, MemPlan, PoolClass};
 use pc_program::bind::{Bound as PBound, Slab};
+use pc_program::compile::diag::{DiagSource, SumKind};
 use pc_program::replay::{CaptureLock, ReplayCfg, Replayer, Routes, SideLane};
 use pc_program::{Kind, Program};
 use pc_shadow::route::Landing;
@@ -159,6 +161,19 @@ pub(crate) struct PlanSpec {
     pub stream_frames: usize,
     /// pinned KV units: (units, live rows per unit, device pages); None = KV through the registers
     pub kv: Option<(usize, usize, usize)>,
+    /// declared diagonal tiles (`Session(diag_tiles={name: (d_in, d_out, t)})`): the float64 matrices the programs'
+    /// generated-diagonal sums read, in declaration (name) order; None = none declared
+    pub diag: Option<DiagSource>,
+}
+
+/// `Session.diag_probe`'s device results: generated rows, gathered slots, single-encode rows, oracle rows.
+type ProbeOut = (Vec<u32>, Vec<f64>, Vec<u32>, Option<Vec<u32>>);
+
+/// The device diagonal encoder of a planned session: the declared tiles (the bind's `DiagSource`) and the encoder
+/// (tiles, scratch, job table, row lists; uploads by `Session.register_tile`, job rows by `Program.bind`).
+pub(crate) struct DiagRt {
+    pub src: DiagSource,
+    pub dg: DiagGen<'static, W>,
 }
 
 /// The streamed linears: row counts (bind's frame layout) and, once `Session.stream_weights` uploaded them, their
@@ -212,6 +227,8 @@ pub(crate) struct Planned {
     pub side: Option<SideLane<'static, W>>,
     /// streamed weights: the device expander, the weight frames, the pinned rows, the blocks' run order
     pub coeff: Option<pc_gpu::encode_dev::CoeffRowsDevice<'static, W>>,
+    /// generated diagonals: the declared tiles and the device diagonal encoder
+    pub diag: Option<DiagRt>,
     pub ring: Option<pc_program::residency::StreamRing<'static, 'static>>,
     pub streams: StreamReg,
     /// per bound block: the id of its weight frame content (equal linears = equal id, whatever the program class)
@@ -596,6 +613,33 @@ fn stream_needs(ps: &PlanSpec) -> PyResult<(usize, usize)> {
         return Err(crate::ConfigError::new_err(format!("Session(stream_frames={}): >= 2 weight frames", ps.stream_frames)));
     }
     Ok((rows, frame))
+}
+
+/// What the device diagonal encoder is carved for: the declared tiles, the limbs of the deepest-reaching diagonal sum,
+/// one job-table row per diagonal term of every program, chunks of `host.diag_batch` jobs (default 32; at most
+/// `DIAG_MAXB` = 128 and the longest sum). Every tile a program reads must be declared (the bind's refusal, early).
+fn diag_shape(ps: &PlanSpec, ds: &DiagSource, cfg: &pc_config::Config) -> PyResult<DiagShape> {
+    let shape = ps.shadows.first().map(|c| c.chain).ok_or_else(|| PyValueError::new_err("Session(programs=[]): no program"))?;
+    let want = knob(cfg.host.diag_batch, 32, "host.diag_batch")? as usize;
+    if want == 0 {
+        return Err(crate::ConfigError::new_err("host.diag_batch = 0: a chunk holds at least one generated diagonal"));
+    }
+    let (mut rows, mut jobs, mut longest) = (0usize, 0usize, 0usize);
+    for p in &ps.programs {
+        rows = rows.max(pc_program::bind::diag_rows_needed(p, shape));
+        for m in p.ops.iter().flat_map(|o| o.members()) {
+            if let Kind::CoeffSum { pts, .. } = &m.kind {
+                if pc_program::compile::diag::sum_kind(p, pts) == Ok(SumKind::Diag) {
+                    jobs += pts.len();
+                    longest = longest.max(pts.len());
+                }
+            }
+        }
+        pc_program::compile::diag::diag_layout(p, ds).map_err(|m| PyValueError::new_err(format!("{}: diagonal tile(s) not declared in Session(diag_tiles=...): {}", p.block, m.join(", "))))?;
+    }
+    let batch = if rows == 0 { 0 } else { want.min(DIAG_MAXB).min(longest).max(1) };
+    let tiles = ds.tiles.iter().map(|(_, t)| TileGeom { d_in: t.d_in, d_out: t.d_out, side: t.side, b: t.b, t: t.t }).collect();
+    Ok(DiagShape { tiles, batch, max_rows: if batch == 0 { 0 } else { rows }, jobs })
 }
 
 #[allow(clippy::too_many_lines)]
@@ -1008,6 +1052,7 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
     }
     // planned: route tables + work, the shared slab, the registers, the programs' key groups
     let mut wshape: Option<BtsWorkShape> = None;
+    let mut dshape: Option<DiagShape> = None;
     let mut group_bytes = 0;
     if let Some(ps) = &plan {
         if let Some(sp) = &splan {
@@ -1065,6 +1110,12 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
         }
         if let Some((_, _, pages)) = ps.kv {
             mp.reserve("kv", pc_program::kv::PinnedKv::<W>::bytes(&lay, pages));
+        }
+        // generated diagonals: the declared tiles, the encoder's scratch, its job table and NTT row lists
+        if let Some(ds) = &ps.diag {
+            let sh = diag_shape(ps, ds, cfg)?;
+            sh.reserve::<W>(mp);
+            dshape = Some(sh);
         }
         // the side lane: a second executor's workspaces and op layer
         let side_bytes = mp.ks_work + mp.bconv_work + mp.scratch + KsWork::<W>::regen_bytes(&lay, chain.dnum());
@@ -1286,6 +1337,10 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
                 Some((units, rows, pages)) => Some(pc_program::kv::PinnedKv::new(a, &device, lay, units, rows, pages, sev).map_err(|x| PyRuntimeError::new_err(x.to_string()))?),
                 None => None,
             };
+            let diag = match (dshape.take(), &ps.diag) {
+                (Some(sh), Some(src)) => Some(DiagRt { src: src.clone(), dg: DiagGen::new(a, &ex.compute, lay, sh).map_err(e)? }),
+                _ => None,
+            };
             let streams = StreamReg { rows: ps.streams.clone(), pinned: HashMap::new() };
             let side = {
                 let mut sx = Executor::<W>::new(&device, a, &mplan).map_err(e)?;
@@ -1298,7 +1353,7 @@ fn setup(cfg: &pc_config::Config, ks: &PyKeySource, origin: &Origin, sizes: Size
                 sx.compute.sync().map_err(|x| e(x.into()))?;
                 Some(SideLane { ex: sx, ops: sops, ev, fork, join })
             };
-            Some(Planned { bounds: vec![], pcmm: pc, ccmm: cc, shadows: vec![], replayer, slab, regs, work, dense, plain, sparse, classic, spru, spru_secret, spec: ps, group_bytes, stats: PlannedStats::default(), side, coeff, ring, streams, stream_tag: vec![], tag_layouts: vec![], stream_order: vec![], kv, stream_events })
+            Some(Planned { bounds: vec![], pcmm: pc, ccmm: cc, shadows: vec![], replayer, slab, regs, work, dense, plain, sparse, classic, spru, spru_secret, spec: ps, group_bytes, stats: PlannedStats::default(), side, coeff, diag, ring, streams, stream_tag: vec![], tag_layouts: vec![], stream_order: vec![], kv, stream_events })
         }
     };
     ex.compute.sync().map_err(|x| e(x.into()))?;
@@ -1353,7 +1408,7 @@ pub(crate) struct Args {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn args(config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>) -> PyResult<Args> {
+fn args(config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, diag_tiles: Option<BTreeMap<String, (u32, u32, u32)>>) -> PyResult<Args> {
     let s = size.unwrap_or_default();
     let g = |k: &str, d: usize| s.get(k).copied().unwrap_or(d);
     let geometry = Geometry {
@@ -1368,6 +1423,18 @@ fn args(config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usiz
     let sizes = Sizes { pool, pt_slots, encode_threads };
     let cfg = config.0.clone();
     let ks = keys.clone();
+    // the declared tiles over this chain's N/2 slots (a tile index = its position in name order)
+    let diag = match diag_tiles {
+        Some(t) if !t.is_empty() => {
+            if programs.is_none() {
+                return Err(PyValueError::new_err("Session(diag_tiles=...) serves planned programs: pass programs=[...]"));
+            }
+            let n_slots = (crate::shadow::chain_of(&cfg)?.n / 2) as u32;
+            let decl: Vec<(String, u32, u32, u32)> = t.into_iter().map(|(k, (d_in, d_out, lanes))| (k, d_in, d_out, lanes)).collect();
+            Some(DiagSource::new(n_slots, &decl).map_err(|x| PyValueError::new_err(format!("Session(diag_tiles=...): {x}")))?)
+        }
+        _ => None,
+    };
     let plan = match programs {
         None => None,
         Some(ps) => {
@@ -1389,6 +1456,7 @@ fn args(config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usiz
                 streams: streams.unwrap_or_default(),
                 stream_frames,
                 kv,
+                diag,
             })
         }
     };
@@ -1442,10 +1510,15 @@ impl PySession {
     /// (float32 coefficient rows, uploaded with `stream_weights`); `stream_frames` device weight frames rotate over
     /// the blocks in `stream_order`. `kv` (units, rows, device pages): the K/V states in pinned host pages
     /// (`Program.run(kv_in=, kv_out=)`), `pages` device pages (unit u in page u % pages).
-    #[pyo3(signature = (config, keys, size=None, pool=256, pt_slots=256, encode_threads=4, debug_refresh=false, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new()))]
+    ///
+    /// Generated diagonals: `diag_tiles` {linear: (d_in, d_out, t)} declares the float64 matrices (tiles) the programs'
+    /// diagonal `CoeffSum`s read (`<linear>#<n>.<m>.<gg>.<jj>`, `B = N/2 / t`): setup carves them, the encoder's
+    /// scratch (`host.diag_batch` jobs per chunk), its job table and row lists (`mem_report`: `diag.*`); `Program.bind`
+    /// writes the jobs, `register_tile` uploads each matrix, and a run refuses a tile never uploaded.
+    #[pyo3(signature = (config, keys, size=None, pool=256, pt_slots=256, encode_threads=4, debug_refresh=false, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new(), diag_tiles=None))]
     #[allow(clippy::too_many_arguments)]
-    fn new(py: Python<'_>, config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, debug_refresh: bool, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>) -> PyResult<Self> {
-        let x = args(config, keys, size, pool, pt_slots, encode_threads, programs, regs, pt_rows, dyn_rot, stc_cache, pcmm, pcmm_cf, check_meta, ccmm, streams, stream_frames, kv, reg_levels, pt_levels)?;
+    fn new(py: Python<'_>, config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, debug_refresh: bool, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, diag_tiles: Option<BTreeMap<String, (u32, u32, u32)>>) -> PyResult<Self> {
+        let x = args(config, keys, size, pool, pt_slots, encode_threads, programs, regs, pt_rows, dyn_rot, stc_cache, pcmm, pcmm_cf, check_meta, ccmm, streams, stream_frames, kv, reg_levels, pt_levels, diag_tiles)?;
         let dev = nogil(py, || setup(&x.cfg, &x.ks, &Origin::Generate, x.sizes, x.geometry, debug_refresh, x.plan, x.pp, x.cp))?;
         Ok(PySession { dev: Rc::new(dev), fhe: None })
     }
@@ -1456,10 +1529,10 @@ impl PySession {
     /// decryption raises. The bundle must answer this session's `key_manifest` (same keys, chain, plan contract).
     /// `debug_secret` (tests only): the client's secret, making a debug session that can also decrypt.
     #[staticmethod]
-    #[pyo3(signature = (config, keys, bundle, size=None, pool=256, pt_slots=256, encode_threads=4, debug_refresh=false, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new(), debug_secret=None))]
+    #[pyo3(signature = (config, keys, bundle, size=None, pool=256, pt_slots=256, encode_threads=4, debug_refresh=false, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new(), debug_secret=None, diag_tiles=None))]
     #[allow(clippy::too_many_arguments)]
-    fn from_bundle(py: Python<'_>, config: &PyConfig, keys: &PyKeySource, bundle: std::path::PathBuf, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, debug_refresh: bool, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, debug_secret: Option<Vec<u8>>) -> PyResult<Self> {
-        let x = args(config, keys, size, pool, pt_slots, encode_threads, programs, regs, pt_rows, dyn_rot, stc_cache, pcmm, pcmm_cf, check_meta, ccmm, streams, stream_frames, kv, reg_levels, pt_levels)?;
+    fn from_bundle(py: Python<'_>, config: &PyConfig, keys: &PyKeySource, bundle: std::path::PathBuf, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, debug_refresh: bool, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, debug_secret: Option<Vec<u8>>, diag_tiles: Option<BTreeMap<String, (u32, u32, u32)>>) -> PyResult<Self> {
+        let x = args(config, keys, size, pool, pt_slots, encode_threads, programs, regs, pt_rows, dyn_rot, stc_cache, pcmm, pcmm_cf, check_meta, ccmm, streams, stream_frames, kv, reg_levels, pt_levels, diag_tiles)?;
         let origin = match debug_secret {
             Some(sec) => Origin::DebugBundle(bundle, sec),
             None => Origin::Bundle(bundle),
@@ -1478,10 +1551,10 @@ impl PySession {
     /// switching key (role + rows), the SPRU material, the PCMM shapes, CCMM, a public key; the chain's params hash
     /// and the plan contract. No device.
     #[staticmethod]
-    #[pyo3(signature = (config, keys, size=None, pool=256, pt_slots=256, encode_threads=4, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new()))]
+    #[pyo3(signature = (config, keys, size=None, pool=256, pt_slots=256, encode_threads=4, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new(), diag_tiles=None))]
     #[allow(clippy::too_many_arguments)]
-    fn key_manifest(config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>) -> PyResult<String> {
-        let x = args(config, keys, size, pool, pt_slots, encode_threads, programs, regs, pt_rows, dyn_rot, stc_cache, pcmm, pcmm_cf, check_meta, ccmm, streams, stream_frames, kv, reg_levels, pt_levels)?;
+    fn key_manifest(config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, diag_tiles: Option<BTreeMap<String, (u32, u32, u32)>>) -> PyResult<String> {
+        let x = args(config, keys, size, pool, pt_slots, encode_threads, programs, regs, pt_rows, dyn_rot, stc_cache, pcmm, pcmm_cf, check_meta, ccmm, streams, stream_frames, kv, reg_levels, pt_levels, diag_tiles)?;
         let chain = crate::shadow::chain_of(&x.cfg)?;
         let nd = key_needs(&x.cfg, &x.ks, &chain, &x.plan, &x.pp, &x.cp)?;
         manifest(&x.cfg, &chain, &nd, &x.pp, x.cp.is_some())?.to_json().map_err(cerr)
@@ -1698,6 +1771,135 @@ impl PySession {
             d.set_item("overflows", nogil(py, || c.overflows(&st.ex.compute)).map_err(gerr)?)?;
         }
         Ok(d.unbind())
+    }
+
+    /// Upload declared tile `name`'s matrix (`Session(diag_tiles={name: (d_in, d_out, t)})`): a C-contiguous float64
+    /// ndarray of shape (d_in, d_out), the matrix the linear's diagonals are read from (every fold applied). Only an
+    /// upload into the buffer carved at setup, so legal after `complete_setup` (again = replace in place);
+    /// synchronous. Any other dtype, shape or memory order is refused.
+    fn register_tile(&self, py: Python<'_>, name: &str, w: Bound<'_, PyAny>) -> PyResult<()> {
+        let buf = pyo3::buffer::PyBuffer::<f64>::get(&w).map_err(|x| PyValueError::new_err(format!("register_tile {name}: not a float64 array ({x})")))?;
+        let mut st = self.dev.st.borrow_mut();
+        let State { planned, ex, .. } = &mut *st;
+        let d = planned.as_mut().and_then(|p| p.diag.as_mut()).ok_or_else(|| PyRuntimeError::new_err("register_tile: the Session declares no diagonal tiles (Session(diag_tiles=...))"))?;
+        let i = d.src.index(name).ok_or_else(|| PyValueError::new_err(format!("register_tile: {name} is not declared in Session(diag_tiles=...)")))?;
+        let t = d.src.tiles[i].1;
+        if buf.shape() != [t.d_in as usize, t.d_out as usize] || !buf.is_c_contiguous() {
+            return Err(PyValueError::new_err(format!(
+                "register_tile {name}: shape {:?}, C-contiguous {}; declared a C-contiguous float64 ({}, {})",
+                buf.shape(),
+                buf.is_c_contiguous(),
+                t.d_in,
+                t.d_out
+            )));
+        }
+        let v = buf.to_vec(py)?;
+        let dg = &mut d.dg;
+        nogil(py, || dg.upload_tile(&ex.compute, i, &v)).map_err(gerr)
+    }
+
+    /// Device diagonal encoder counters: {tiles (declared), uploaded, missing (names never uploaded), tile_bytes,
+    /// batch (jobs per chunk), max_rows, jobs (rows registered, capacity), sums, terms, chunks (issued by the host
+    /// since setup: eager runs and graph captures; a replayed graph adds none), splits (jobs whose 2^61 split was
+    /// nonzero, every run, replays included: a device read; nonzero = a coefficient past 2^61)}.
+    fn diag_stats(&self, py: Python<'_>) -> PyResult<Py<pyo3::types::PyDict>> {
+        let st = self.dev.st.borrow();
+        let d = st.planned.as_ref().and_then(|p| p.diag.as_ref()).ok_or_else(|| PyRuntimeError::new_err("diag_stats: the Session declares no diagonal tiles (Session(diag_tiles=...))"))?;
+        let g = &d.dg;
+        let out = pyo3::types::PyDict::new(py);
+        out.set_item("tiles", d.src.tiles.len())?;
+        out.set_item("uploaded", d.src.tiles.len() - g.missing().len())?;
+        out.set_item("missing", g.missing().iter().map(|&i| d.src.tiles[i].0.clone()).collect::<Vec<_>>())?;
+        out.set_item("tile_bytes", g.shape().tile_bytes())?;
+        out.set_item("batch", g.batch())?;
+        out.set_item("max_rows", g.max_rows())?;
+        out.set_item("jobs", (g.filled(), g.shape().jobs))?;
+        out.set_item("sums", g.stats.sums)?;
+        out.set_item("terms", g.stats.terms)?;
+        out.set_item("chunks", g.stats.chunks)?;
+        out.set_item("splits", nogil(py, || g.splits(&st.ex.compute)).map_err(gerr)?)?;
+        Ok(out.unbind())
+    }
+
+    /// TEST: the generated plaintexts `names` (`<linear>#<n>.<m>.<gg>.<jj>` of declared tiles, at most the batch) at
+    /// `level`, as the encoder makes them inside a sum (gather, encode_many, NTT): {"generated": uint32 (len, L, N) rows,
+    /// "slots": complex128 (len, N/2) gathered slots, "single": each gathered vector through one `encode` launch
+    /// (`Payload2::DeviceSlots`), "oracle": with `values` (float64 (len, N/2)) each row through the store's eager
+    /// `DeviceFft` encoder (`encode_with`, real payload), else None}. After `complete_setup`; synchronous.
+    #[pyo3(signature = (names, level, values=None))]
+    fn diag_probe<'py>(&self, py: Python<'py>, names: Vec<String>, level: u32, values: Option<Bound<'py, PyAny>>) -> PyResult<Bound<'py, pyo3::types::PyDict>> {
+        self.dev.check_frozen()?;
+        let dev = &*self.dev;
+        let (n, nh) = (dev.n(), dev.n() / 2);
+        let vals: Option<Vec<f64>> = match &values {
+            Some(v) => {
+                let b = pyo3::buffer::PyBuffer::<f64>::get(v)?;
+                if b.shape() != [names.len(), nh] || !b.is_c_contiguous() {
+                    return Err(PyValueError::new_err(format!("diag_probe values: shape {:?}, want C-contiguous float64 ({}, {nh})", b.shape(), names.len())));
+                }
+                Some(b.to_vec(py)?)
+            }
+            None => None,
+        };
+        let top = pc_shadow::meta::top_limb(dev.ctx.shape, level).map_err(crate::level_err)? as usize;
+        let scale = dev.ctx.scale.sf(top as i32).map_err(|x| PyValueError::new_err(x.to_string()))?;
+        let l = top + 1;
+        let mut st = dev.st.borrow_mut();
+        let State { planned, ex, ops, pts, .. } = &mut *st;
+        let d = planned.as_mut().and_then(|p| p.diag.as_mut()).ok_or_else(|| PyRuntimeError::new_err("diag_probe: the Session declares no diagonal tiles"))?;
+        let rows = names
+            .iter()
+            .map(|nm| {
+                let j = d.src.job(nm).map_err(PyValueError::new_err)?;
+                d.dg.job_row(j.tile as usize, j.n, j.m, j.gg, j.jj).map_err(gerr)
+            })
+            .collect::<PyResult<Vec<_>>>()?;
+        let k = rows.len();
+        let payload = pc_core::encode::Payload::Real;
+        let (gen_rows, slots, single, oracle) = nogil(py, || -> pc_gpu::Result<ProbeOut> {
+            let g = &mut d.dg;
+            g.probe(&dev.ctx, &ex.compute, &rows, top, scale)?;
+            let (mut gr, mut sl) = (Vec::with_capacity(k * l * n), Vec::with_capacity(k * n));
+            for j in 0..k {
+                gr.extend(g.download_rows(&ex.compute, j, top)?);
+                sl.extend(g.download_slots(&ex.compute, j)?);
+            }
+            let mut one = Vec::with_capacity(k * l * n);
+            for j in 0..k {
+                let what = pc_gpu::encode_dev::Payload2::DeviceSlots { ptr: g.slots_ptr(j), slots: nh, payload };
+                one.extend(g.encode_with(&dev.ctx, &ex.compute, &mut pts.enc, &mut ops.ring, what, top, scale)?);
+            }
+            let orc = match &vals {
+                Some(v) => {
+                    let mut o = Vec::with_capacity(k * l * n);
+                    for j in 0..k {
+                        let c: Vec<pc_core::encode::Complex> = v[j * nh..(j + 1) * nh].iter().map(|&x| pc_core::encode::Complex::new(x, 0.0)).collect();
+                        let what = pc_gpu::encode_dev::Payload2::Slots { values: &c, slots: nh, payload };
+                        o.extend(g.encode_with(&dev.ctx, &ex.compute, &mut pts.enc, &mut ops.ring, what, top, scale)?);
+                    }
+                    Some(o)
+                }
+                None => None,
+            };
+            Ok((gr, sl, one, orc))
+        })
+        .map_err(gerr)?;
+        let np = py.import("numpy")?;
+        let arr_u32 = |v: &[u32]| -> PyResult<Bound<'py, PyAny>> {
+            let a = np.call_method1("empty", ((k, l, n), "uint32"))?;
+            pyo3::buffer::PyBuffer::<u32>::get(&a)?.copy_from_slice(py, v)?;
+            Ok(a)
+        };
+        let out = pyo3::types::PyDict::new(py);
+        out.set_item("generated", arr_u32(&gen_rows)?)?;
+        out.set_item("single", arr_u32(&single)?)?;
+        out.set_item("oracle", match &oracle { Some(o) => Some(arr_u32(o)?), None => None })?;
+        let sa = np.call_method1("empty", ((k, nh), "complex128"))?;
+        pyo3::buffer::PyBuffer::<f64>::get(&sa.call_method1("view", ("float64",))?)?.copy_from_slice(py, &slots)?;
+        out.set_item("slots", sa)?;
+        out.set_item("level", level)?;
+        out.set_item("scale", scale)?;
+        Ok(out)
     }
 
     /// Write `ct` into pinned KV unit `u` (setup: a cache state the programs read, e.g. the BOS prefix): device page,

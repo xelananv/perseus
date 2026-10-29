@@ -38,9 +38,10 @@ fn field_table() {
     let cf = Config::fields();
     let pf = PlanConfig::fields();
     println!("[config] Config {} fields, PlanConfig {} fields", cf.len(), pf.len());
-    // inventory sections 1-2, 5a/5b, 6a/6b + exec.use_graphs, exec.trace_alloc, host.n_in_flight, bts.em_fuse_rescale,
-    // bts.lt_tails, bts.pair, bts.sparse_b_k, model.prefill.{last_query,qkv_pack,attn_bsgs,sm_hpack}, chain.preset
-    assert_eq!(cf.len(), 259);
+    // inventory sections 1-2, 5a/5b, 6a/6b + exec.use_graphs, exec.trace_alloc, host.n_in_flight, host.diag_batch,
+    // bts.em_fuse_rescale, bts.lt_tails, bts.pair, bts.sparse_b_k, model.prefill.{last_query,qkv_pack,attn_bsgs,sm_hpack},
+    // chain.preset
+    assert_eq!(cf.len(), 260);
     // + section 7a: plan.kv_entry_level, plan.kv_entry_deg, plan.keep_placements; 8a: plan.stc_first_reroute, plan.site_cf;
     // plan.fallback_cf, plan.argmax_mincut, plan.ilp_tiebreak, plan.raise_drop_base, plan.raise_drop_search, plan.pack_cf,
     // plan.keep_placements_exact, plan.mag_safety_steps, plan.resume

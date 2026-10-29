@@ -173,8 +173,11 @@ section! {
 }
 
 section! {
-    /// `host` (11 legacy env names).
+    /// `host` (12 legacy env names).
     HostSection "host" {
+        #[doc = "Generated diagonals per chunk of the device diagonal encoder (pc-gpu `DiagGen`: gathered, encoded and NTT'd together; default 32, capped at 128)."]
+        #[doc = "No legacy env name."]
+        diag_batch: Int = "", "(unset)";
         #[doc = "`HF_HOME`. Default '.' / None / os.path.expanduser('~/.cache/huggingface'). Read at examples/gpt2/prefill.py::Gpt2Prefill.diag_weights; examples/gpt2/prefill.py::Gpt2Prefill.prefill_weights; examples/gpt2/slotcache.py::_cache_dir; examples/llama/run_decode.py::main; examples/llama/run_handoff.py::main; examples/llama/run_prefill.py::main; examples/llama/weights.py::LlamaWeights.__init__."]
         #[doc = "Shipped plans: none."]
         hf_home: Str = "HF_HOME", "'.' / None / os.path.expanduser('~/.cache/huggingface')";

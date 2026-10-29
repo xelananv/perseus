@@ -6,7 +6,7 @@ use std::ffi::c_void;
 /// `cudaStream_t`
 pub type CudaStream = *mut c_void;
 
-pub const ABI: u32 = 16;
+pub const ABI: u32 = 17;
 pub const LOG_N: u32 = 16;
 pub const N: usize = 1 << LOG_N;
 
@@ -751,11 +751,60 @@ pub struct CcmmArgs {
     pub s: [i64; 4],
 }
 
+/// One row of the device diagonal encoder's job table (args.cuh DiagJobRow, ABI 17): the tile's device address and
+/// geometry and the diagonal `(n, m, gg, jj)`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct DiagJobRow {
+    /// The tile, a row-major `(d_in, d_out)` float64 matrix: its device address.
+    pub w: u64,
+    pub d_out: u32,
+    /// B, the block side.
+    pub side: u32,
+    pub b: u32,
+    pub log_t: u32,
+    pub n: u32,
+    pub m: u32,
+    pub gg: u32,
+    pub jj: u32,
+}
+// SAFETY: integers only, no padding (8 + 8 x 4 = 40 bytes, asserted below), no host pointer (`w` is a device address):
+// every bit pattern is a valid value, so the table travels by memcpy into an arena buffer
+unsafe impl pc_cuda::Pod for DiagJobRow {}
+
+/// The device diagonal encoder's gather (args.cuh DiagGatherArgs, ABI 17).
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct DiagGatherArgs {
+    pub jobs: *const DiagJobRow,
+    pub v: *mut c_void,
+    /// Doubles between two jobs' slot vectors (>= N, even).
+    pub v_stride: u64,
+    pub njobs: i32,
+    pub pad: i32,
+}
+
+/// `batch` encodes in one set of launches (args.cuh EncodeManyArgs, ABI 17): job j's buffers at the strides (doubles
+/// for v, a / b, c; words for out), the rest of `e` shared.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+pub struct EncodeManyArgs {
+    pub e: EncodeArgs,
+    pub v_stride: u64,
+    pub ab_stride: u64,
+    pub c_stride: u64,
+    pub out_stride: u64,
+    /// Non-null: +1 per job whose 2^61 split is nonzero.
+    pub nsplit: *mut u64,
+    pub batch: i32,
+    pub pad: i32,
+}
+
 zeroed_default!(
     SpruFftArgs, SpruScatterArgs, SpruExtractArgs, NttArgs, BconvArgs, EwArgs, PtDotArgs, KsArgs, EpiArgs, KsRegenArgs, KskExpandArgs, CtsArgs, TensorArgs, MdEpiArgs,
     WsumArgs, AddConstArgs, MulTableArgs, RescaleArgs, RescaleCombineArgs, AutomorphArgs, EncodeArgs, EncryptArgs, KskGenArgs, KskUnpackArgs, ModRaiseArgs, SmallIntTab, SmallIntArgs,
     KeyTab, CtsRegenArgs, KsKeyArgs, PcmmArgs, CcmmArgs, WsumKArgs, RescaleCombineToArgs, MdEpiToArgs, SmallInt1Args, CoeffArgs, MulAddArgs,
-    RescaleNttArgs
+    RescaleNttArgs, DiagGatherArgs, EncodeManyArgs
 );
 
 /// A launcher: (args, stream) -> cudaError_t of the launch (0 ok; negative = argument outside the kernel's range).
@@ -808,6 +857,8 @@ pub struct KernelTable {
     pub coeff_sum: Launch<CoeffArgs>,
     pub mul_add: Launch<MulAddArgs>,
     pub rescale_fwd: Launch<RescaleNttArgs>,
+    pub diag_gather: Launch<DiagGatherArgs>,
+    pub encode_many: Launch<EncodeManyArgs>,
 }
 
 // Sizes must equal the static_asserts in args.cuh.
@@ -852,11 +903,14 @@ const _: () = {
     assert!(size_of::<PcmmArgs>() == 168);
     assert!(size_of::<CcmmArgs>() == 280);
     assert!(size_of::<SmallInt1Args>() == 56);
-    assert!(size_of::<KernelTable>() == 16 + 40 * 8);
+    assert!(size_of::<KernelTable>() == 16 + 42 * 8);
     assert!(size_of::<MulAddArgs>() == 104);
     assert!(size_of::<CoeffArgs>() == 80 + 16 * COEFF_MAXT);
     assert!(size_of::<MdEpiToArgs>() == 152);
     assert!(size_of::<RescaleCombineToArgs>() == 104);
+    assert!(size_of::<DiagJobRow>() == 40);
+    assert!(size_of::<DiagGatherArgs>() == 32);
+    assert!(size_of::<EncodeManyArgs>() == 128);
 };
 
 #[cfg(test)]

@@ -22,6 +22,7 @@ namespace {
 #include "../pcmm.cuh"
 #include "../ccmm.cuh"
 #include "../coeffrows.cuh"
+#include "../diag.cuh"
 
 using W = PC_W;
 using MM = pc::PC_MM<W>;
@@ -73,6 +74,8 @@ extern "C" const KernelTable* PC_TABLE() {
         &pc::coeffrows::launch<W, MM>,
         &pc::em::mul_add_l<W, MM>,
         &pc::rescale::fwd_l<W, MM>,
+        &pc::diag::launch,
+        &pc::encode::launch_many<W, MM>,
     };
     return &T;
 }

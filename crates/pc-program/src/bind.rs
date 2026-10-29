@@ -60,11 +60,14 @@ pub enum StepOp {
 }
 
 /// A `Kind::CoeffSum` as bound: the term ciphertexts' slots and where the terms' plaintexts come from: their rows'
-/// offsets in the weight frame (rows of N floats), or their gather jobs (`compile::diag::SumSrc`).
+/// offsets in the weight frame (rows of N floats), or their gather jobs (`compile::diag::SumSrc`). `jobs_at`: the
+/// first row of a diagonal sum's jobs in the runtime's device job table (pc-gpu `DiagGen::register`, called by the
+/// runtime after `bind`), NONE until then and for a streamed sum.
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoeffSumStep {
     pub ins: Vec<u32>,
     pub src: SumSrc,
+    pub jobs_at: u32,
 }
 
 /// The weight frame of a bound block: every linear it streams (first-use order) at a row offset, whole (`rows` =
@@ -567,7 +570,7 @@ impl<'a, W: DevWord> Bound<'a, W> {
                             SumSrc::Diag { jobs }
                         }
                     };
-                    coeff_sums.push(CoeffSumStep { ins: ins.clone(), src });
+                    coeff_sums.push(CoeffSumStep { ins: ins.clone(), src, jobs_at: NONE });
                     let vm = |k: usize| m.ins.get(k).map(|&v| p.vars[v as usize].meta);
                     steps.push(Step { op: StepOp::CoeffSum { c: coeff_sums.len() as u32 - 1 }, out, a: ins[0], b: NONE, inplace: false, var, meta: p.vars[var as usize].meta, a_meta: vm(0), b_meta: None });
                     continue;

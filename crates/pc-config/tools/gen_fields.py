@@ -74,6 +74,8 @@ EXTRA = [
      "'0 allocations after setup' check; default off)."),
     ("host", "n_in_flight", "Int", "Weight-ring frames staged ahead of the running block (pc-program `RingCfg::"
      "n_in_flight`; default 2)."),
+    ("host", "diag_batch", "Int", "Generated diagonals per chunk of the device diagonal encoder (pc-gpu `DiagGen`: "
+     "gathered, encoded and NTT'd together; default 32, capped at 128)."),
 ]
 SUBS = {"model": [("prefill", "PrefillSection"), ("vit", "VitSection")], "exec": [("debug", "DebugSection")]}
 

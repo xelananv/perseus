@@ -16,6 +16,7 @@ use pc_core::encode::Complex;
 use pc_cuda::{launch_result, Compute, Event, GraphExec, Stream};
 use pc_gpu::bts::stc_first::nf_key;
 use pc_gpu::bts::{batch, BtsCx, BtsRoute, BtsWork, RouteKind};
+use pc_gpu::diag_gen::{DiagGen, JobRange};
 use pc_gpu::encode_dev::CoeffRowsDevice;
 use pc_gpu::ks::{KeyGroup, KsPlans, KskSource};
 use pc_gpu::ops::{Ops, Pt};
@@ -95,6 +96,9 @@ pub struct Rt<'r, 'a, W: DevWord, M: DevStrategy<W>> {
     pub side: Option<&'r mut SideLane<'a, W>>,
     /// The streamed-weight expander (`StepOp::CoeffSum`, compute lane); None = a program with one refuses to run.
     pub coeff: Option<&'r mut CoeffRowsDevice<'a, W>>,
+    /// The device diagonal encoder (a `CoeffSum` of generated diagonals, compute lane); None = such a program refuses
+    /// to run.
+    pub diag: Option<&'r mut DiagGen<'a, W>>,
 }
 
 /// The side lane: its own executor (stream + key-switching / scratch workspaces) and op layer (constant
@@ -266,9 +270,16 @@ fn exec_step<'a, W: DevWord, M: DevStrategy<W>>(block: &str, rt: &mut Rt<'_, 'a,
                 let rows: Vec<*const f32> = rows.iter().map(|&r| unsafe { t.stream_base.add(r as usize * n) }).collect();
                 crd.sum(ctx, &rt.ex.compute, sh, o, &cts, &rows)?;
             }
-            // the device diagonal encoder (pc-gpu DiagGen over the session's declared tiles) runs here once built
             SumSrc::Diag { jobs } => {
-                return Err(rerr(block, format!("coeff_sum {c}: {} generated diagonals, and this runtime has no device diagonal encoder", jobs.len())));
+                let dg = rt.diag.as_deref_mut().ok_or_else(|| rerr(block, format!("coeff_sum {c}: {} generated diagonals, and the runtime has no device diagonal encoder (Rt::diag)", jobs.len())))?;
+                if cs.jobs_at == NONE {
+                    return Err(rerr(block, format!("coeff_sum {c}: its {} jobs are not in the device job table (DiagGen::register after bind)", jobs.len())));
+                }
+                // SAFETY: as the streamed arm: bind checked the slots (< n_slots, output not a term); the output is the
+                // only mutable reference
+                let o: &mut Ct<'a, W> = unsafe { &mut *slots.add(st.out as usize) };
+                let cts: Vec<&Ct<'a, W>> = cs.ins.iter().map(|&s| unsafe { &*slots.add(s as usize) }).collect();
+                dg.sum(ctx, &mut *rt.ex, &mut *rt.ops, sh, o, &cts, JobRange { at: cs.jobs_at, len: jobs.len() as u32 })?;
             }
         }
         return Ok(());
