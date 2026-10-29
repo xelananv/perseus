@@ -16,9 +16,9 @@
 #   5. rebuild the CPU-only perseus._pc (tag, meta, shadow, config over pc-core / pc-shadow / pc-config) with the
 #      CPU_PC_BUILD script, when the .so is missing, when no stamp says which commit it was built from, or when the
 #      crates it compiles differ between that commit and HEAD (the stamp, <the .so>.base, is written after each build
-#      and is gitignored with the .so; a rebase made by hand or a fetch made earlier does not hide a change)
-#      (FORCE_BUILD=1 always; SKIP_BUILD=1 never, e.g. on a GPU box where `maturin develop --release` builds the real
-#      one) (exit 5)
+#      and is gitignored with the .so; a rebase made by hand or a fetch made earlier does not hide a change). A .so
+#      that has the device classes (`Session`: `maturin develop --release` built it on a GPU box) is never replaced by
+#      the CPU-only build; the script names it and goes on (FORCE_BUILD=1 always builds; SKIP_BUILD=1 never) (exit 5)
 #   6. python -m pytest -q python/perseus/examples/fhe_ssm/tests, skipped with a note while the package does not exist
 #      (exit 6 on a failure)
 #
@@ -101,15 +101,25 @@ if [ "$need_build" = 0 ]; then
     if [ -z "$built" ] || ! g cat-file -e "$built^{commit}" 2>/dev/null; then need_build=1
     elif ! g diff --quiet "$built" HEAD -- $pc_src; then need_build=1; fi
 fi
+device_so() {   # the .so at hand is the GPU build (it has Session)
+    [ -f "$so" ] && CUDA_VISIBLE_DEVICES="" PYTHONPATH="$W/python" "$PY" -c \
+        'import sys; from perseus import _pc; sys.exit(0 if hasattr(_pc, "Session") else 1)' >/dev/null 2>&1
+}
 if [ "${SKIP_BUILD:-0}" = 1 ]; then
     say "CPU _pc: skipped (SKIP_BUILD=1)"
+elif [ "$need_build" = 1 ] && [ "${FORCE_BUILD:-0}" != 1 ] && device_so; then
+    say "CPU _pc: the .so is a device build (it has Session): not replaced by the CPU-only one; rebuild it with" \
+        "maturin develop --release (FORCE_BUILD=1 replaces it with the CPU-only build)"
 elif [ "$need_build" = 1 ]; then
     [ -f "$CPU_PC_BUILD" ] || { say "CPU _pc: no build script at $CPU_PC_BUILD (CPU_PC_BUILD=...)"; exit 5; }
     t0=$(date +%s)
-    if bash "$CPU_PC_BUILD" "$W" "$PY"; then g rev-parse HEAD > "$stamp"; say "CPU _pc: rebuilt in $(( $(date +%s) - t0 )) s (stamp ${stamp##*/}: $(g rev-parse --short HEAD))"
+    if bash "$CPU_PC_BUILD" "$W" "$PY"; then
+        g rev-parse HEAD > "$stamp"
+        say "CPU _pc: rebuilt in $(( $(date +%s) - t0 )) s (stamp ${stamp##*/}: $(g rev-parse --short HEAD))"
     else say "CPU _pc: build FAILED"; exit 5; fi
 else
-    say "CPU _pc: up to date (built from ${built:0:7}, no change under the crates it compiles since; FORCE_BUILD=1 to rebuild)"
+    say "CPU _pc: up to date (built from ${built:0:7}, no change under the crates it compiles since;" \
+        "FORCE_BUILD=1 to rebuild)"
 fi
 
 # 6. the port's tests
