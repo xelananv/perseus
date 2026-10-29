@@ -118,11 +118,11 @@ slot `i t`), through `impl.linear` (the GPT-2 decode linear).
 `filling.EncodedTile` to the letter: `B = N / t = d`, `DiagLinear.split(1024) = (b 32, g 32)` baby and giant
 steps, plaintext `(g, j) = repeat(W[(i + g b + j) mod B, i], t)` rolled by `g b t`, input rotations by `j t`
 from one hoisted decomposition, one giant rotation per group, `b g = 1,024` products per block, the babies
-realized once (`prefill.py:1127-1259`). `DiagLinear.slot_vectors` materializes every plaintext as a full slot
+realized once (`prefill.py:1128-1260`). `DiagLinear.slot_vectors` materializes every plaintext as a full slot
 vector — 1.07 GB for one `1024 x 4096` matrix, 3.75 GB per block — so `encode_diag` hands it
 `filling.LazyDiagonals`, a table that expands one giant group (8 MB) on `pts[m, g]`, the only access
-`DiagLinear._sum` makes (`prefill.py:1191-1199`; `tests/test_filling_fake.py` holds the table to
-`slot_vectors`). `apply_diag` is `prefill.diag_apply` (`prefill.py:1222-1247`) with the input hint's headroom
+`DiagLinear._sum` makes (`prefill.py:1192-1200`; `tests/test_filling_fake.py` holds the table to
+`slot_vectors`). `apply_diag` is `prefill.diag_apply` (`prefill.py:1223-1248`) with the input hint's headroom
 as a parameter: the default, 1, is the reference circuit (the fork's: a `headroom(1)` hint before each
 linear, the linear's one product fitting under the ceiling); 2 is upstream's rule (the input refreshed one
 level earlier), and at 2 the copy records `diag_apply`'s op stream exactly (tested). The call to
@@ -148,8 +148,8 @@ PCMM outputs at (26, deg 1) where the capture recorder's default `pcmm_landing` 
 **The key rule.** On this branch a device PCMM runs planned only: the recorded external refresh (graph v2
 `args.external`, `fakecap.py:358-383`) is executed by the Rust runtime's PCMM service
 (`crates/pc-py/src/matmul.rs:303` refuses "this session has no PCMM service"), whose ring-switch keys come
-from the client's key bundle (`crates/pc-py/src/session.rs:745-764`: the key manifest's `pcmm_t`;
-`:862` `Entry::Pcmm`; `crates/pc-client/src/client.rs:190-200`: the client generates them). The
+from the client's key bundle (`crates/pc-py/src/session.rs:751-770`: the key manifest's `pcmm_t`;
+`:868` `Entry::Pcmm`; `crates/pc-client/src/client.rs:190-200`: the client generates them). The
 in-process key generation of `pcmm.py` (`KeyRng`, `make_keys`, `pcmm.py:156-254`: from the secret key on the
 evaluating side, the legacy `core.bts` path) must never run for this model: `geometry.pcmm_guard` refuses a
 core that carries `bts` when a PCMM linear is on (`tests/test_axes.py::test_pcmm_is_refused_on_a_core_with_in_process_keys`).
@@ -209,7 +209,7 @@ fork's GPU runs on its C++ runtime counted the fake's 1,968 refreshes per tick (
 `MEASURE_NIGHT_20261012.md`), so `--levels fork` (46 / 34) is the session validated for this model on that
 runtime, and it reproduces the fork's counts here (below). This branch's n32 preset says ceiling 44 and
 `fakecap_landings` "0:32" (effective 34): `--levels preset`. That is the convention of this branch's own
-route table (`crates/pc-shadow/src/route.rs:89-99`: a dense refresh in the shipped order lands at 34,
+route table (`crates/pc-shadow/src/route.rs:93-103`: a dense refresh in the shipped order lands at 34,
 entry 46, ceiling 44); the fork's 36 is the C++ runtime's. The two settings give identical counts (the whole
 chain shifts by one level: out level 38 under `fork`, 36 under `preset`, state 34 vs 32). A
 GPU session on this runtime must measure its own landing before any count here is quoted as the device's.
@@ -415,11 +415,11 @@ capture's node count), 637 refresh sites, 0 check errors, 0 dynamic steps, 73 re
 footprint. A PCMM arm records with values on every path (`impl.pcmm`'s fake computes its products on the
 slot vectors).
 
-## Upstream APIs this package depends on (at a3dff85)
+## Upstream APIs this package depends on (at d97a6f7)
 
 | what | where |
 |---|---|
-| the diagonal linear | `perseus/impl/prefill.py:1127-1199` `DiagLinear` (`split` :1136, `slot_vectors` :1141, `_sum` :1191), `diag_apply` :1222-1247, `diag_rot_steps` :1262 |
+| the diagonal linear | `perseus/impl/prefill.py:1128-1200` `DiagLinear` (`split` :1137, `slot_vectors` :1142, `_sum` :1192), `diag_apply` :1223-1248, `diag_rot_steps` :1263 |
 | PCMM | `perseus/impl/pcmm.py:29` `Shape`, :262-297 `PcmmLinear.encode`, :414 `run`, :432 `Pcmm` (`apply` :481, `desc` :508, `_fake` :514), :773-774 the fake's cap / landing, :777 `rot_steps`; the legacy in-process keys :156-254 (refused) |
 | the fake | `perseus/impl/fake.py:22` `FakeCt`, :65 `fake_config`, :75 `FakeFhe` (`MODE` :76, `_product` :105, `bootstrap` :204, `maybe_bootstrap` :244, `bootstrap_hint` :248, `record_external_bootstrap` :259), :264 `FakeInf` (`set_slot_pt` :322, `tag_reduce` :334), :420 `pack_tokens`, :475 `make_fake` |
 | the capture recorder | `perseus/impl/fakecap.py:132` `CapFhe` (`MODE` :134, `inner_bootstrap` :291, `bootstrap_hint` :336, `record_external_bootstrap` :358), :617 `CapInf` (`name_ct` :639), :754 `CapCore` (`begin_subgraph_capture` :783, `end_subgraph_capture` :799), :841 `make_session` |
@@ -429,7 +429,7 @@ slot vectors).
 | the decode layout | `perseus/impl/layout.py:23` `Dims`, :104 `linear_rot_steps`, :236 `encode_bias_vector`, :280 `lane_vec`, :289 `stride_mask`, :458 `ladder_radix_bits`; `perseus/impl/linear.py:15` `EncodedLinear`, :142 `linear`, :147 `linear_multi` |
 | the session bundle | `perseus/impl/rt.py:22` `Rt` (`mult_mask` :97, `step` :194) |
 | the capture contract, the presets | `perseus/plan/contract.py:72` `capture_contract`; `perseus/config/__init__.py:29` `preset` (`_pc.Config.preset("n32_gpt2_decode")`) |
-| the PCMM key path on a device | `crates/pc-py/src/session.rs:189, 745-764, 862`; `crates/pc-py/src/matmul.rs:303`; `crates/pc-client/src/client.rs:190-200` |
+| the PCMM key path on a device | `crates/pc-py/src/session.rs:189, 751-770, 868`; `crates/pc-py/src/matmul.rs:303`; `crates/pc-client/src/client.rs:190-200` |
 
 The port adds files under `python/perseus/examples/fhe_ssm/` and `tools/fhe_ssm/`; the upstream files it
 changes as fixes to the base are listed with their reasons in `tools/fhe_ssm/UPSTREAM_CHANGES.md` (among

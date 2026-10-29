@@ -18,7 +18,7 @@
 #                             fresh, 50 = the top of the n32 chain; a refresh landing at L leaves 50 - L primes of work):
 #       stock  this runtime without StC-first: dense refreshes in the shipped order land at 34, SparseB 512-slot at 24,
 #              SPRU 1-slot at 16 (the landings of bootstrap_placements/gpt2_decode_python_n32_shipped, whose recipe
-#              this reproduces; crates/pc-shadow/src/route.rs:88-105 and crates/pc-program/src/compile/mod.rs:236-281
+#              this reproduces; crates/pc-shadow/src/route.rs:92-110 and crates/pc-program/src/compile/mod.rs:246-293
 #              are the runtime's own table). runtime: FIDESLIB_BTS_STC_FIRST=0, BTS_MAX_INPUT_LEVEL=50.
 #       high   the GPT-2 speedrun recipe (speedrun/make_prefill_plan.sh RECIPE, :39-41): dense refreshes StC-first at 28
 #              (an input deeper than 46 falls back to the shipped order at 34), SparseB 512-slot at 26 (raise drop 1),
@@ -31,7 +31,7 @@
 #              on the same capture, the planner placing refreshes for levels the runtime hands back anyway. Kept to
 #              compare refresh COUNTS with the fork's records (953 per tick), not as a speed arm.
 #   PAIR=0|1                  1: PC_BTS_PAIR=1 on the runtime= line: two sibling real-payload dense StC-first refreshes
-#                             of one level and degree run as one complex refresh (crates/pc-program/src/program.rs:264-269).
+#                             of one level and degree run as one complex refresh (crates/pc-program/src/program.rs:269-275).
 #                             Needs LANDING=high (no StC-first, no pairs) and a compile schedule that brings the mates
 #                             together: SCHEDULE=siblings for the check (the speedrun's PlannedPrefill default).
 #   PLACER=mincut|ilp         ilp: PLAN_PLACER=ilp with the speedrun's PLAN_ILP_TIME_LIMIT=3600 PLAN_ILP_TIEBREAK=1
@@ -41,7 +41,7 @@
 #                             origin/main README.md:109: dense 20.3, StC-first 17.1, sparse-512 17.4, one slot 10.0 ms;
 #                             a 32-slot route is priced at the 256-slot figure 16.4, which is unmeasured for 32).
 #   SPARSE_SLOTS=512,1|512,32,1  the sparse routes the planner may use. 32 needs a landing in the runtime's table, which
-#                             a3dff85 does not have (compile/mod.rs:240 lists 1024/512/256 at 24): expect the compile
+#                             d97a6f7 does not have (compile/mod.rs:250 lists 1024/512/256 at 24): expect the compile
 #                             check to refuse "no landing for route slots=32" until upstream adds one.
 #   HARD_ENV_CAP=1|0|''       PLAN_HARD_ENV_CAP: 1 = the refresh envelope is absolute (the fork's plans needed it on a
 #                             residual stream that crosses blocks unrefreshed: without it the envelope relaxes and the
@@ -123,7 +123,7 @@ if [ "$PLACER" = ilp ]; then
     fi
 fi
 [ "$PAIR" = 1 ] && RUNTIME="$RUNTIME PC_BTS_PAIR=1"
-[ "$PAIR" = 1 ] && [ "$LANDING" != high ] && echo "make_plan: PAIR=1 without LANDING=high forms no pair (pairs need StC-first: crates/pc-program/src/compile/mod.rs:497-499)" >&2
+[ "$PAIR" = 1 ] && [ "$LANDING" != high ] && echo "make_plan: PAIR=1 without LANDING=high forms no pair (pairs need StC-first: crates/pc-program/src/compile/mod.rs:509-514)" >&2
 [ -n "$SPARSE_B_K" ] && RUNTIME="$RUNTIME FIDESLIB_BTS_SPARSE_B_K=$SPARSE_B_K"
 [ -n "${RUNTIME_EXTRA:-}" ] && RUNTIME="$RUNTIME $RUNTIME_EXTRA"
 SCHEDULE=${SCHEDULE:-$([ "$PAIR" = 1 ] && echo siblings || echo program)}
