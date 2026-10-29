@@ -1,17 +1,13 @@
 //! Generated plaintexts, the CUDA-free half: what the compiler, the bind and the runtime agree on about the
-//! plaintexts a fused sum makes on the device (`Kind::CoeffSum`) instead of reading them from the `PtStore`.
+//! plaintexts a fused sum (`Kind::CoeffSum`) makes on the device instead of reading them from the `PtStore`: streamed
+//! weight rows (`PtForm::CoeffStream`, `<linear>#<row>`) and generated diagonals (`PtForm::DiagGen`,
+//! `<linear>#<n>.<m>.<gg>.<jj>`: gathered from a resident float64 matrix, the tile, then encoded). One source per sum
+//! (`sum_kind`); a generated plaintext outside a sum has no runtime path (`form_errors`).
 //!
-//! Two sources: streamed weight rows (`PtForm::CoeffStream`, `<linear>#<row>`: float32 coefficient rows in a weight
-//! frame) and generated diagonals (`PtForm::DiagGen`, `<linear>#<n>.<m>.<gg>.<jj>`: the slot vector gathered from a
-//! resident float64 matrix, the tile, then encoded). A sum takes its terms from one source (`sum_kind`); a generated
-//! plaintext outside a sum has no runtime path (`form_errors`).
-//!
-//! The diagonal of a generated plaintext (a `DiagLinear` of `B x B` blocks over `n_slots = B t` slots, `b x g` baby x
-//! giant steps, `perseus.impl.prefill.DiagLinear.slot_vectors`): plaintext `(n, m, gg, jj)`, `k = gg b + jj`, holds at
-//! slot `v`
-//!     W[n B + ((i + k) mod B)][m B + i],   i = ((v - gg b t) mod n_slots) / t
-//! (`np.roll(np.repeat(blk[(i + k) % B, i], t), gg b t)`: the roll moves elements to higher indices, so slot `v` reads
-//! element `v - gg b t` of the repeated diagonal). `TileInfo::slot` and `TileInfo::addr` are that arithmetic.
+//! Plaintext `(n, m, gg, jj)` of a `DiagLinear` (`B x B` blocks over `n_slots = B t` slots, `b x g` steps,
+//! `k = gg b + jj`) holds at slot `v`: `W[n B + ((i + k) mod B)][m B + i]`, `i = ((v - gg b t) mod n_slots) / t`
+//! (`np.roll(np.repeat(blk[(i + k) % B, i], t), gg b t)`: the roll moves elements to higher indices).
+//! `TileInfo::slot` / `TileInfo::addr` are that arithmetic.
 use crate::program::{Kind, Program, PtForm, PtId};
 use std::collections::BTreeMap;
 
@@ -148,7 +144,7 @@ impl TileInfo {
         }
         let side = n_slots / t;
         let (b, g) = split(side);
-        if d_in == 0 || d_out == 0 || d_in % side != 0 || d_out % side != 0 {
+        if d_in == 0 || d_out == 0 || !d_in.is_multiple_of(side) || !d_out.is_multiple_of(side) {
             return Err(format!("a ({d_in}, {d_out}) matrix does not tile into {side} x {side} blocks (n_slots {n_slots} / t {t})"));
         }
         Ok(TileInfo { d_in, d_out, n_in: d_in / side, n_out: d_out / side, side, b, g, t })

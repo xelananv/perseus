@@ -5,14 +5,10 @@
 //!
 //! The call is the one `_pc.Program.compile` makes (crates/pc-py/src/program.rs:78-87), so the Config is the plan's
 //! own (stamp + PLAN_CMD.txt `runtime=`, PlanConfig from `recipe=`: crates/pc-program/src/plan.rs:226-259); without
-//! the driver's `live_out` / `input_metas`, carried inputs take the compiler's seeds. Per block: refresh sites by kind
-//! and route, launches, refresh launches, pairs, the level check's pins and errors, and the fused-sum census
-//! (`pc_program::compile::diag::census`: `CoeffSum` ops by source with their term-count histograms, the vars folded
-//! into them, the plaintext references by form, the ones the PtStore would hold and how many of those carry a
-//! generated name `<linear>#...`). A diagonal arm's capture recorded with `--diag-source generated` must show its
-//! sums here: compiled without them it also passes with 0 errors (every diagonal an at-use store plaintext). Exit 0
-//! when every block compiles with 0 check errors, 1 otherwise, 2 on usage. Not checked: the contract against a live
-//! session, anything on device.
+//! the driver's `live_out` / `input_metas`, carried inputs take the compiler's seeds. Per block: refresh sites, routes,
+//! launches, pairs, the level check, and the fused-sum census (`compile::diag::census`: sums by source and terms, the
+//! fused vars, plaintexts by form, store references named `<linear>#...`; 0 errors alone does not show the diagonals
+//! fused). Exit 0 when every block compiles with 0 check errors, 1 otherwise, 2 on usage. Not checked: anything on device.
 use pc_config::Config;
 use pc_program::compile::batch::Schedule;
 use pc_program::compile::diag::census;

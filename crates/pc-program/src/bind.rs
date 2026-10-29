@@ -6,8 +6,6 @@
 //! * every rotation step list / conjugation / relinearization -> a setup-built `KeyGroup`;
 //! * every refresh site -> its `Route`; every scalar -> an exact `f64`;
 //! * every streamed weight row (`PtForm::CoeffStream`) -> its row in the block's weight frame (`StreamLayout`);
-//! * every generated diagonal (`PtForm::DiagGen`) -> its gather job on a tile the runtime declares (`DiagLayout`,
-//!   `compile::diag`);
 //! * the per-op argument table (`Step`): kind, slot indices, the compiled output metadata;
 //! * the steps issued together (`Unit`): rotation grids and chains (`Program::rotation_grids` / `rotation_chains`),
 //!   K-batches, refresh pairs, plaintext products with their add (`mult_pt_adds`); other batches member by member.
