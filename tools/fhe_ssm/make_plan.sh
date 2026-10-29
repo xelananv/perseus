@@ -20,10 +20,12 @@
 #              SPRU 1-slot at 16 (the landings of bootstrap_placements/gpt2_decode_python_n32_shipped, whose recipe
 #              this reproduces; crates/pc-shadow/src/route.rs:92-110 and crates/pc-program/src/compile/mod.rs:246-293
 #              are the runtime's own table). runtime: FIDESLIB_BTS_STC_FIRST=0, BTS_MAX_INPUT_LEVEL=50.
-#       high   the GPT-2 speedrun recipe (speedrun/make_prefill_plan.sh RECIPE, :39-41): dense refreshes StC-first at 28
-#              (an input deeper than 46 falls back to the shipped order at 34), SparseB 512-slot at 26 (raise drop 1),
-#              SPRU 1-slot at 16. runtime: FIDESLIB_BTS_STC_FIRST=2 (dense), STC_FIRST_CF=13,
-#              FIDESLIB_BTS_RAISE_DROP=512:1, AUTO_BTS_LEVEL=44, BTS_MAX_INPUT_LEVEL=48 (the Decode-8 record's line).
+#       high   the GPT-2 speedrun recipe (speedrun/make_prefill_plan.sh RECIPE, :56-58, at its PRESET=n32): dense
+#              refreshes StC-first at 28 (an input deeper than 46 falls back to the shipped order at 34), SparseB
+#              512-slot at 26 (raise drop 1), SPRU 1-slot at 16. runtime: FIDESLIB_BTS_STC_FIRST=2 (dense),
+#              STC_FIRST_CF=13, FIDESLIB_BTS_RAISE_DROP=512:1, AUTO_BTS_LEVEL=44, BTS_MAX_INPUT_LEVEL=48 (the n32
+#              Decode-8 plan's line, bootstrap_placements/gpt2_decode_python_n32_kc16_cm; Decode-8 record 4's plan,
+#              gpt2_decode_python_n32a4_kc16r_cm, adds CHAIN_PRESET=n32a4, the lean chain, which this port refuses).
 #       fork   the fork's examples/fhe_ssm_from_primitives/plan.py RECIPE literally (dense and 512-slot land at 36,
 #              1-slot at 26, MAX_LEVEL 50, PLAN_HARD_ENV_CAP=1): FIDESlib-C++ landings, which this runtime does not
 #              realize. On a capture of this branch's fake such a plan still binds (GPT-2 decode blocks 0-12: 0 check
