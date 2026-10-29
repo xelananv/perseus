@@ -6,10 +6,16 @@
 //! The call is the one `_pc.Program.compile` makes (crates/pc-py/src/program.rs:78-87), so the Config is the plan's
 //! own (stamp + PLAN_CMD.txt `runtime=`, PlanConfig from `recipe=`: crates/pc-program/src/plan.rs:226-259); without
 //! the driver's `live_out` / `input_metas`, carried inputs take the compiler's seeds. Per block: refresh sites by kind
-//! and route, launches, refresh launches, pairs, the level check's pins and errors. Exit 0 when every block compiles
-//! with 0 check errors, 1 otherwise, 2 on usage. Not checked: the contract against a live session, anything on device.
+//! and route, launches, refresh launches, pairs, the level check's pins and errors, and the fused-sum census
+//! (`pc_program::compile::diag::census`: `CoeffSum` ops by source with their term-count histograms, the vars folded
+//! into them, the plaintext references by form, the ones the PtStore would hold and how many of those carry a
+//! generated name `<linear>#...`). A diagonal arm's capture recorded with `--diag-source generated` must show its
+//! sums here: compiled without them it also passes with 0 errors (every diagonal an at-use store plaintext). Exit 0
+//! when every block compiles with 0 check errors, 1 otherwise, 2 on usage. Not checked: the contract against a live
+//! session, anything on device.
 use pc_config::Config;
 use pc_program::compile::batch::Schedule;
+use pc_program::compile::diag::census;
 use pc_program::compile::{compile_dir, CompileOpts};
 use pc_program::plan::PlanDir;
 use pc_program::program::SiteKind;
@@ -99,6 +105,8 @@ fn main() {
     println!("  block | sites placed/hint/delib | routes | launches bts_launches pairs k_max | pins exact richer | arena MB | errors");
     let mut tot: BTreeMap<&str, usize> = BTreeMap::new();
     let mut routes_tot: BTreeMap<String, usize> = BTreeMap::new();
+    let mut terms_tot: BTreeMap<String, BTreeMap<usize, usize>> = BTreeMap::new();
+    let mut forms_tot: BTreeMap<&str, usize> = BTreeMap::new();
     let mut rows = vec![];
     let mut failed = false;
     for (label, r) in &dc.programs {
@@ -135,14 +143,32 @@ fn main() {
             p.bts_sites.len(), placed, hint, delib, rs.join(" "), b.launches, b.bootstrap_launches, b.pairs, b.k_max,
             c.pinned, c.level_exact, c.level_richer, p.mem.bytes as f64 / 1e6, c.errors.len()
         );
+        let sc = census(p);
+        let hist = |h: &BTreeMap<usize, usize>| h.iter().map(|(k, v)| format!("{k}x{v}")).collect::<Vec<_>>().join(" ");
+        let forms: Vec<String> = sc.pt_forms.iter().map(|(k, v)| format!("{k}:{v}")).collect();
+        println!(
+            "      sums diag {} [{}] stream {} [{}] fused vars {} | pt refs {} | store refs {} named <linear># {} | form errors {}",
+            sc.diag_sums, hist(&sc.diag_terms), sc.stream_sums, hist(&sc.stream_terms), sc.fused_vars, forms.join(" "),
+            sc.store_refs, sc.store_named_generated, sc.form_errors
+        );
         for e in c.errors.iter().take(4) {
             println!("      {e}");
         }
         failed |= !c.errors.is_empty();
         for (k, v) in [("sites", p.bts_sites.len()), ("placed", placed), ("hint", hint), ("delib", delib), ("launches", b.launches),
                        ("bts_launches", b.bootstrap_launches), ("pairs", b.pairs), ("errors", c.errors.len()),
-                       ("richer", c.level_richer), ("finishes", p.accounting.finishes)] {
+                       ("richer", c.level_richer), ("finishes", p.accounting.finishes), ("diag_sums", sc.diag_sums),
+                       ("stream_sums", sc.stream_sums), ("fused_vars", sc.fused_vars), ("store_refs", sc.store_refs),
+                       ("store_named_generated", sc.store_named_generated), ("form_errors", sc.form_errors)] {
             *tot.entry(k).or_default() += v;
+        }
+        for (src, h) in [("diag", &sc.diag_terms), ("stream", &sc.stream_terms)] {
+            for (k, v) in h {
+                *terms_tot.entry(src.to_string()).or_default().entry(*k).or_default() += v;
+            }
+        }
+        for (k, v) in &sc.pt_forms {
+            *forms_tot.entry(k).or_default() += v;
         }
         rows.push(serde_json::json!({
             "block": label, "sites": p.bts_sites.len(), "placed": placed, "hint": hint, "deliberate": delib,
@@ -150,9 +176,18 @@ fn main() {
             "k_max": b.k_max, "bootstrap_hist": b.bootstrap_hist, "pins": c.pinned, "level_exact": c.level_exact,
             "level_richer": c.level_richer, "arena_bytes": p.mem.bytes, "live_peak_bytes": p.mem.live_peak,
             "finishes": p.accounting.finishes, "errors": c.errors,
+            "sums": {"diag": sc.diag_sums, "stream": sc.stream_sums, "diag_terms": sc.diag_terms, "stream_terms": sc.stream_terms,
+                     "fused_vars": sc.fused_vars, "pt_forms": sc.pt_forms, "store_refs": sc.store_refs,
+                     "store_named_generated": sc.store_named_generated, "form_errors": sc.form_errors},
         }));
     }
     let rs: Vec<String> = routes_tot.iter().map(|(k, v)| format!("{k}:{v}")).collect();
+    let th = |s: &str| terms_tot.get(s).map(|h| h.iter().map(|(k, v)| format!("{k}x{v}")).collect::<Vec<_>>().join(" ")).unwrap_or_default();
+    let fs: Vec<String> = forms_tot.iter().map(|(k, v)| format!("{k}:{v}")).collect();
+    // the census line comes before TOTAL: the planned driver logs the second-to-last line (TOTAL)
+    println!("SUMS diag {} [{}] stream {} [{}] fused vars {}; pt refs {}; store refs {}, named <linear># {}; form errors {}",
+        tot.get("diag_sums").unwrap_or(&0), th("diag"), tot.get("stream_sums").unwrap_or(&0), th("stream"), tot.get("fused_vars").unwrap_or(&0),
+        fs.join(" "), tot.get("store_refs").unwrap_or(&0), tot.get("store_named_generated").unwrap_or(&0), tot.get("form_errors").unwrap_or(&0));
     println!("TOTAL refresh sites {} (placed {}, fired hints {}, deliberate {}), PCMM finishes {}; launches {}, refresh launches {}, refresh pairs {}; level richer {}; check errors {}; {:.1} s",
         tot.get("sites").unwrap_or(&0), tot.get("placed").unwrap_or(&0), tot.get("hint").unwrap_or(&0), tot.get("delib").unwrap_or(&0),
         tot.get("finishes").unwrap_or(&0), tot.get("launches").unwrap_or(&0), tot.get("bts_launches").unwrap_or(&0), tot.get("pairs").unwrap_or(&0),
@@ -160,7 +195,8 @@ fn main() {
     println!("ROUTES (route@landing level: sites) {}", rs.join(" "));
     if let Some(out) = json_out {
         let doc = serde_json::json!({"plan_dir": pos[0], "graph_dir": pos[1], "schedule": format!("{schedule:?}"),
-                                     "no_batch": no_batch, "blocks": rows, "routes": routes_tot, "totals": tot});
+                                     "no_batch": no_batch, "blocks": rows, "routes": routes_tot, "totals": tot,
+                                     "sum_terms": terms_tot, "pt_forms": forms_tot});
         std::fs::write(&out, serde_json::to_string_pretty(&doc).unwrap()).expect("write --json");
     }
     std::process::exit(if failed { 1 } else { 0 })

@@ -6,13 +6,16 @@
 //! * every rotation step list / conjugation / relinearization -> a setup-built `KeyGroup`;
 //! * every refresh site -> its `Route`; every scalar -> an exact `f64`;
 //! * every streamed weight row (`PtForm::CoeffStream`) -> its row in the block's weight frame (`StreamLayout`);
+//! * every generated diagonal (`PtForm::DiagGen`) -> its gather job on a tile the runtime declares (`DiagLayout`,
+//!   `compile::diag`);
 //! * the per-op argument table (`Step`): kind, slot indices, the compiled output metadata;
 //! * the steps issued together (`Unit`): rotation grids and chains (`Program::rotation_grids` / `rotation_chains`),
 //!   K-batches, refresh pairs, plaintext products with their add (`mult_pt_adds`); other batches member by member.
 //! Details in docs/ARCHITECTURE.md "pc-program bind".
 use crate::compile::batch::{paired, PAIR_K};
+use crate::compile::diag::{self, DiagLayout, DiagSource, SumKind, SumSrc};
 use crate::error::{Error, Result};
-use crate::program::{Kind, Op, Origin, Program, Scalar, GRID_INPUTS};
+use crate::program::{Kind, Op, Origin, Program, PtForm, Scalar, GRID_INPUTS};
 use crate::replay::Routes;
 use pc_cuda::{Arena, Compute, Stream};
 use pc_gpu::bts::{BtsKeyRing, RouteKind};
@@ -52,17 +55,18 @@ pub enum StepOp {
     /// External finish `f` (`Bound::finishes`): a PCMM / CCMM op with several inputs and outputs, run by the
     /// runtime's `replay::FinishExec`.
     Finish { f: u32 },
-    /// Streamed-weight sum `c` (`Bound::coeff_sums`), run by the runtime's `CoeffRowsDevice` on the rows of the
-    /// block's weight frame (`Bound::stream_base`).
+    /// Fused sum `c` (`Bound::coeff_sums`): streamed weights, run by the runtime's `CoeffRowsDevice` on the rows of
+    /// the block's weight frame (`Bound::stream_base`), or generated diagonals, run by the device diagonal encoder on
+    /// the declared tiles (`CoeffSumStep::src`).
     CoeffSum { c: u32 },
 }
 
-/// A `Kind::CoeffSum` as bound: the term ciphertexts' slots and their rows' offsets in the weight frame (rows of N
-/// floats).
+/// A `Kind::CoeffSum` as bound: the term ciphertexts' slots and where the terms' plaintexts come from: their rows'
+/// offsets in the weight frame (rows of N floats), or their gather jobs (`compile::diag::SumSrc`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct CoeffSumStep {
     pub ins: Vec<u32>,
-    pub rows: Vec<u32>,
+    pub src: SumSrc,
 }
 
 /// The weight frame of a bound block: every linear it streams (first-use order) at a row offset, whole (`rows` =
@@ -92,7 +96,7 @@ pub fn stream_layout(p: &Program, src: &dyn StreamSource) -> std::result::Result
         for m in op.members() {
             let Kind::CoeffSum { pts, .. } = &m.kind else { continue };
             for &id in pts {
-                let Some((lin, _)) = p.pt_refs.get(id as usize).and_then(|r| split_stream(&r.name)) else { continue };
+                let Some((lin, _)) = p.pt_refs.get(id as usize).filter(|r| r.form == PtForm::CoeffStream).and_then(|r| split_stream(&r.name)) else { continue };
                 if out.linears.iter().any(|x| x.0 == lin) || missing.iter().any(|x| x == lin) {
                     continue;
                 }
@@ -113,21 +117,16 @@ pub fn stream_layout(p: &Program, src: &dyn StreamSource) -> std::result::Result
     }
 }
 
-/// Limbs (top + 1) of the deepest-reaching streamed-weight sum of `p` (the expander's scratch rows), 0 = none.
+/// Limbs (top + 1) of the deepest-reaching streamed-weight sum of `p` (the expander's scratch rows), 0 = none
+/// (a generated-diagonal sum streams nothing: `diag_rows_needed`).
 pub fn coeff_rows_needed(p: &Program, shape: pc_shadow::ChainShape) -> usize {
-    let mut r = 0;
-    for op in &p.ops {
-        for m in op.members() {
-            if let Kind::CoeffSum { .. } = m.kind {
-                if let Some(&v) = m.ins.first() {
-                    if let Ok(t) = pc_shadow::meta::top_limb(shape, p.vars[v as usize].meta.level) {
-                        r = r.max(t as usize + 1);
-                    }
-                }
-            }
-        }
-    }
-    r
+    diag::rows_needed(p, shape, SumKind::Stream)
+}
+
+/// Limbs (top + 1) of the deepest-reaching generated-diagonal sum of `p` (the diagonal encoder's scratch rows per
+/// job), 0 = none.
+pub fn diag_rows_needed(p: &Program, shape: pc_shadow::ChainShape) -> usize {
+    diag::rows_needed(p, shape, SumKind::Diag)
 }
 
 /// What a unit runs.
@@ -259,8 +258,8 @@ pub struct BoundPt {
     pub key: PtKey,
     pub meta: Option<PtMeta>,
     pub rows: *const c_void,
-    /// A streamed weight row (read through the weight frame by a `CoeffSum`, never from the PtStore).
-    pub stream: bool,
+    /// Generated inside a `CoeffSum` (a streamed weight row or a generated diagonal), never read from the PtStore.
+    pub in_sum: bool,
 }
 
 /// Exact scalars for the program's inexact (v1, 6-digit) literals, by graph node index (`Origin::Node`).
@@ -275,8 +274,10 @@ pub struct BindEnv<'e, 'a> {
     /// `Executor::ks.stage_ptrs()` (staging buffers for keys that need them).
     pub stage: Option<(*const c_void, *const c_void)>,
     pub scalars: &'e ScalarTable,
-    /// The streamed linears' row counts (a program with a `CoeffSum` needs it).
+    /// The streamed linears' row counts (a program with a streamed-weight `CoeffSum` needs it).
     pub streams: Option<&'e dyn StreamSource>,
+    /// The tiles the runtime declares (a program with a generated-diagonal `CoeffSum` needs every tile it reads).
+    pub diag: Option<&'e DiagSource>,
 }
 
 /// A program bound to one runtime: ciphertext slots, plaintext keys, key groups, routes, the step table, and its
@@ -313,9 +314,10 @@ pub struct Bound<'a, W: DevWord> {
     pub pts: Vec<BoundPt>,
     /// External finishes (`StepOp::Finish`).
     pub finishes: Vec<FinishStep>,
-    /// Streamed-weight sums (`StepOp::CoeffSum`) and the weight frame they read.
+    /// Fused sums (`StepOp::CoeffSum`), the weight frame the streamed ones read, the tiles the diagonal ones read.
     pub coeff_sums: Vec<CoeffSumStep>,
     pub streams: StreamLayout,
+    pub diag: DiagLayout,
     /// Device address of the frame holding this block's rows (`residency::StreamRing::adopt`), null until staged.
     pub stream_base: *const f32,
     /// (graph name, slot, metadata) of the block inputs, in `Program.inputs` order (the driver writes them).
@@ -476,10 +478,11 @@ impl<'a, W: DevWord> Bound<'a, W> {
             .pt_refs
             .iter()
             .map(|r| {
-                // a graph's `pt_N` is numbered per block whatever its form (v2 names cached masks `pt_N` too)
-                let stream = r.form == crate::program::PtForm::CoeffStream;
-                let name = if !stream && (r.form == crate::program::PtForm::AtUse || r.name.starts_with("pt_")) { format!("{block}/{}", r.name) } else { r.name.clone() };
-                BoundPt { key: PtKey::new(name, r.level, DevForm::Eval), meta: None, rows: std::ptr::null(), stream }
+                // a graph's `pt_N` is numbered per block whatever its form (v2 names cached masks `pt_N` too); a generated
+                // plaintext keeps its own name and never reaches the store
+                let in_sum = diag::is_generated(r.form);
+                let name = if !in_sum && (r.form == PtForm::AtUse || r.name.starts_with("pt_")) { format!("{block}/{}", r.name) } else { r.name.clone() };
+                BoundPt { key: PtKey::new(name, r.level, DevForm::Eval), meta: None, rows: std::ptr::null(), in_sum }
             })
             .collect();
         // steps
@@ -489,12 +492,20 @@ impl<'a, W: DevWord> Bound<'a, W> {
         let mut alias: Vec<String> = vec![];
         let mut finishes: Vec<FinishStep> = vec![];
         let mut coeff_sums: Vec<CoeffSumStep> = vec![];
+        let has_sum = |k: SumKind| p.ops.iter().any(|o| o.members().iter().any(|m| matches!(&m.kind, Kind::CoeffSum { pts, .. } if diag::sum_kind(p, pts) == Ok(k))));
         let streams = match env.streams {
             Some(src) => stream_layout(p, src).map_err(|missing| berr(block, format!("{} streamed linear(s) the runtime does not hold (StreamSource): {}", missing.len(), list(&missing))))?,
-            None if p.ops.iter().any(|o| o.members().iter().any(|m| matches!(m.kind, Kind::CoeffSum { .. }))) => {
+            None if has_sum(SumKind::Stream) => {
                 return Err(berr(block, "the program streams weights (coeff_sum) and the runtime has no StreamSource"));
             }
             None => StreamLayout::default(),
+        };
+        let diag_tiles = match env.diag {
+            Some(src) => diag::diag_layout(p, src).map_err(|missing| berr(block, format!("{} diagonal tile(s) the runtime does not declare (Session(diag_tiles=...)): {}", missing.len(), list(&missing))))?,
+            None if has_sum(SumKind::Diag) => {
+                return Err(berr(block, "the program generates diagonals (coeff_sum of diag plaintexts) and the runtime declares no tiles (Session(diag_tiles=...))"));
+            }
+            None => DiagLayout::default(),
         };
         let scalar = |m: &Op, c: &Scalar, no_scalar: &mut Vec<String>| -> f64 {
             if c.exact {
@@ -537,17 +548,28 @@ impl<'a, W: DevWord> Bound<'a, W> {
                     if ins.contains(&out) {
                         alias.push(format!("{:?}: coeff_sum output slot {out} is one of its terms", m.origin));
                     }
-                    let mut rows = Vec::with_capacity(ids.len());
-                    for &id in ids {
-                        let r = p.pt_refs.get(id as usize).ok_or_else(|| berr(block, format!("plaintext {id} out of range")))?;
-                        let (lin, row) = split_stream(&r.name).ok_or_else(|| berr(block, format!("stream plaintext {:?} is not <linear>#<row>", r.name)))?;
-                        let (_, off, n) = streams.linears.iter().find(|x| x.0 == lin).ok_or_else(|| berr(block, format!("{lin} missing from the weight frame")))?;
-                        if row >= *n {
-                            return Err(berr(block, format!("{}: row {row} of a {n}-row streamed linear", r.name)));
+                    let src = match diag::sum_kind(p, ids).map_err(|e| berr(block, format!("coeff_sum {:?}: {e}", m.origin)))? {
+                        SumKind::Stream => {
+                            let mut rows = Vec::with_capacity(ids.len());
+                            for &id in ids {
+                                let r = p.pt_refs.get(id as usize).ok_or_else(|| berr(block, format!("plaintext {id} out of range")))?;
+                                let (lin, row) = split_stream(&r.name).ok_or_else(|| berr(block, format!("stream plaintext {:?} is not <linear>#<row>", r.name)))?;
+                                let (_, off, n) = streams.linears.iter().find(|x| x.0 == lin).ok_or_else(|| berr(block, format!("{lin} missing from the weight frame")))?;
+                                if row >= *n {
+                                    return Err(berr(block, format!("{}: row {row} of a {n}-row streamed linear", r.name)));
+                                }
+                                rows.push(off + row);
+                            }
+                            SumSrc::Stream { rows }
                         }
-                        rows.push(off + row);
-                    }
-                    coeff_sums.push(CoeffSumStep { ins: ins.clone(), rows });
+                        SumKind::Diag => {
+                            // diag_tiles above refused a program without declared tiles
+                            let ds = env.diag.ok_or_else(|| berr(block, "a diag coeff_sum without Session(diag_tiles=...)"))?;
+                            let jobs = ids.iter().map(|&id| ds.job(&p.pt_refs[id as usize].name).map_err(|e| berr(block, e))).collect::<Result<Vec<_>>>()?;
+                            SumSrc::Diag { jobs }
+                        }
+                    };
+                    coeff_sums.push(CoeffSumStep { ins: ins.clone(), src });
                     let vm = |k: usize| m.ins.get(k).map(|&v| p.vars[v as usize].meta);
                     steps.push(Step { op: StepOp::CoeffSum { c: coeff_sums.len() as u32 - 1 }, out, a: ins[0], b: NONE, inplace: false, var, meta: p.vars[var as usize].meta, a_meta: vm(0), b_meta: None });
                     continue;
@@ -769,6 +791,7 @@ impl<'a, W: DevWord> Bound<'a, W> {
             finishes,
             coeff_sums,
             streams,
+            diag: diag_tiles,
             stream_base: std::ptr::null(),
             inputs: io(&p.inputs)?,
             outputs: io(&p.outputs)?,
@@ -783,7 +806,7 @@ impl<'a, W: DevWord> Bound<'a, W> {
     pub fn resolve_pts(&mut self, store: &PtStore<'_, '_, W>) -> Result<bool> {
         let mut missing: Vec<String> = vec![];
         let mut moved = false;
-        for bp in self.pts.iter_mut().filter(|p| !p.stream) {
+        for bp in self.pts.iter_mut().filter(|p| !p.in_sum) {
             match store.view(&bp.key) {
                 Ok(pt) => {
                     moved |= pt.rows != bp.rows;
@@ -804,7 +827,7 @@ impl<'a, W: DevWord> Bound<'a, W> {
     /// The distinct plaintext keys of the block (staging list for the weight ring).
     pub fn pt_keys(&self) -> Vec<PtKey> {
         let mut v: Vec<PtKey> = vec![];
-        for p in self.pts.iter().filter(|p| !p.stream) {
+        for p in self.pts.iter().filter(|p| !p.in_sum) {
             if !v.contains(&p.key) {
                 v.push(p.key.clone());
             }

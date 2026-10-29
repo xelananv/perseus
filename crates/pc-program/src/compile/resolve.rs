@@ -106,6 +106,8 @@ fn pt_form(name: &str, args: Option<&Value>) -> (PtForm, Option<(u32, u8)>) {
             "cached" => (PtForm::Cached, None),
             // a streamed weight row: `pt.name` = `<linear>#<row>`
             "stream" => (PtForm::CoeffStream, None),
+            // a generated diagonal: `pt.name` = `<linear>#<n>.<m>.<gg>.<jj>`
+            "diag" => (PtForm::DiagGen, None),
             _ => (PtForm::AtUse, None),
         };
     }
@@ -163,6 +165,13 @@ pub fn resolve(bg: &BlockGraph, pcmm_calib: &BTreeMap<String, f64>) -> Result<Re
                         .and_then(Value::as_str)
                         .filter(|s| s.contains('#'))
                         .ok_or_else(|| gerr(block, n, "a stream plaintext without args.pt.name = <linear>#<row>"))?
+                        .to_string(),
+                    PtForm::DiagGen => args
+                        .and_then(|a| a.get("pt"))
+                        .and_then(|p| p.get("name"))
+                        .and_then(Value::as_str)
+                        .filter(|s| super::diag::parse_diag_name(s).is_some())
+                        .ok_or_else(|| gerr(block, n, "a diag plaintext without args.pt.name = <linear>#<n>.<m>.<gg>.<jj>"))?
                         .to_string(),
                     _ => x.clone(),
                 };

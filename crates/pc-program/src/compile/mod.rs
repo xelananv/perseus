@@ -11,6 +11,7 @@ pub mod alloc;
 pub mod apply_plan;
 pub mod batch;
 pub mod check;
+pub mod diag;
 pub mod resolve;
 pub mod stream;
 

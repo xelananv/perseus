@@ -40,6 +40,20 @@ impl PyProgram {
     fn dev(&self) -> PyResult<std::rc::Rc<Dev>> {
         self.bound.as_ref().map(|b| b.0.clone()).ok_or_else(|| PyRuntimeError::new_err(format!("{}: not bound (Program.bind)", self.prog.block)))
     }
+    /// Term counts of the fused sums of one source, op order.
+    fn sum_terms(&self, kind: pc_program::compile::diag::SumKind) -> Vec<usize> {
+        let mut v = vec![];
+        for op in &self.prog.ops {
+            for m in op.members() {
+                if let Kind::CoeffSum { pts, .. } = &m.kind {
+                    if pc_program::compile::diag::sum_kind(&self.prog, pts) == Ok(kind) {
+                        v.push(pts.len());
+                    }
+                }
+            }
+        }
+        v
+    }
 }
 
 /// One input of `Program.run`.
@@ -211,18 +225,15 @@ impl PyProgram {
         }
         n
     }
-    /// Term counts of the streamed-weight sums (`CoeffSum` ops), op order.
+    /// Term counts of the streamed-weight sums (`CoeffSum` ops over `<linear>#<row>` rows), op order.
     #[getter]
     fn coeff_sums(&self) -> Vec<usize> {
-        let mut v = vec![];
-        for op in &self.prog.ops {
-            for m in op.members() {
-                if let Kind::CoeffSum { pts, .. } = &m.kind {
-                    v.push(pts.len());
-                }
-            }
-        }
-        v
+        self.sum_terms(pc_program::compile::diag::SumKind::Stream)
+    }
+    /// Term counts of the generated-diagonal sums (`CoeffSum` ops over `<linear>#<n>.<m>.<gg>.<jj>` diagonals), op order.
+    #[getter]
+    fn diag_sums(&self) -> Vec<usize> {
+        self.sum_terms(pc_program::compile::diag::SumKind::Diag)
     }
     /// [(graph name, level, deg, nf)] of the block inputs (first-use order: the driver's write order).
     #[getter]
@@ -256,6 +267,7 @@ impl PyProgram {
             PtForm::Slot => "slot",
             PtForm::Cached => "cached",
             PtForm::CoeffStream => "stream",
+            PtForm::DiagGen => "diag",
         })).collect()
     }
     /// [(var, kind, slots, cf, real, raise_drop, stc_first)] of the refresh sites.
@@ -354,12 +366,15 @@ impl PyProgram {
         let scalars = pc_program::bind::ScalarTable::new();
         let stage = ex.ks.stage_ptrs();
         let b = {
-            let env = BindEnv { arena: dev.arena_static(), stream: &ex.compute, lay: dev.ctx.lay, keys: &*keys, stage, scalars: &scalars, streams: Some(&pl.streams) };
+            // diag: the session's declared tiles (Session(diag_tiles=...)) once the device diagonal encoder is built; None
+            // until then, so a program with generated diagonals is refused here by name
+            let env = BindEnv { arena: dev.arena_static(), stream: &ex.compute, lay: dev.ctx.lay, keys: &*keys, stage, scalars: &scalars, streams: Some(&pl.streams), diag: None };
             let routes = pl.routes();
             pc_program::bind::Bound::new_shared(&self.prog, &env, &routes, &dr).map_err(perr)?
         };
-        // the weight frame's content id: blocks of different program classes streaming the same linears share it
-        let tag = if b.coeff_sums.is_empty() {
+        // the weight frame's content id: blocks of different program classes streaming the same linears share it (a
+        // block whose sums are all generated diagonals streams nothing: no tag, no Session.stream_order entry)
+        let tag = if !b.coeff_sums.iter().any(|c| matches!(c.src, pc_program::compile::diag::SumSrc::Stream { .. })) {
             None
         } else {
             Some(match pl.tag_layouts.iter().position(|l| *l == b.streams) {
@@ -426,8 +441,8 @@ impl PyProgram {
         let mut k = 0;
         for (i, name) in pairs {
             let p = b.pts.get_mut(i).ok_or_else(|| PyValueError::new_err(format!("plaintext {i} of {n}")))?;
-            if p.stream {
-                return Err(PyValueError::new_err(format!("plaintext {i} is a streamed weight row")));
+            if p.in_sum {
+                return Err(PyValueError::new_err(format!("plaintext {i} is generated inside a fused sum (a streamed weight row or a diagonal)")));
             }
             if p.key.name != name {
                 p.key.name = name;

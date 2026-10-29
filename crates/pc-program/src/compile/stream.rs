@@ -1,6 +1,8 @@
-//! Streamed-weight sums. A streamed linear's baby-step inner sum is recorded as the loop it stands for (`mult` of
-//! each term's plaintext, `add_inplace` into the first: the stream perseus `mult_coeff_sum` records); the
-//! plaintexts are float32 coefficient rows the runtime expands inside the sum (`PtForm::CoeffStream`). This pass,
+//! Streamed-weight and generated-diagonal sums. A streamed linear's baby-step inner sum is recorded as the loop it
+//! stands for (`mult` of each term's plaintext, `add_inplace` into the first: the stream perseus `mult_coeff_sum`
+//! records); the plaintexts are float32 coefficient rows the runtime expands inside the sum (`PtForm::CoeffStream`),
+//! or diagonals it gathers from a resident matrix and encodes there (`PtForm::DiagGen`, `compile::diag`); a sum
+//! merges terms of one form only. This pass,
 //! after the lowering (plan decisions applied), realizes once every term the products read at degree 2 (their
 //! Rescale prelude, hoisted), turns every product with a streamed plaintext into a `Kind::CoeffSum` of one term and
 //! merges `Add(sum_a, sum_b)` into one sum wherever both partial sums are read only by that add, every term sits at
@@ -9,13 +11,14 @@
 //! path refused that case too: `mult_pt_sum_usable`). The merged-away vars stay in `fused` with their lowered
 //! metadata for the check (the plan pins every name).
 use super::apply_plan::Lowered;
-use crate::program::{Kind, Op, PtForm, Var, VarId};
+use super::diag::is_generated;
+use crate::program::{Kind, Op, Var, VarId};
 use pc_shadow::{Operand, Prelude, Shadow};
 use std::collections::HashMap;
 
 /// Fuse in place (`keep`: vars that must stay materialized, e.g. live-out names); returns the ops folded away.
 pub fn fuse(lw: &mut Lowered, sh: &Shadow, keep: &[VarId]) -> usize {
-    let streamed = |k: &Kind| matches!(k, Kind::MultPt(p) if lw.pt_refs.get(*p as usize).is_some_and(|r| r.form == PtForm::CoeffStream));
+    let streamed = |k: &Kind| matches!(k, Kind::MultPt(p) if lw.pt_refs.get(*p as usize).is_some_and(|r| is_generated(r.form)));
     let ops: Vec<Option<Op>> = std::mem::take(&mut lw.ops).into_iter().map(Some).collect();
     // a term read at degree 2 (the loop's product realizes it first: a Rescale prelude on the copy): realize the
     // input once, before its first streamed product, and let the products read the realized var (same words: the
@@ -88,6 +91,11 @@ pub fn fuse(lw: &mut Lowered, sh: &Shadow, keep: &[VarId]) -> usize {
             continue;
         }
         let (Kind::CoeffSum { pts: pa, fused: fa }, Kind::CoeffSum { pts: pb, fused: fb }) = (&oa.kind, &ob.kind) else { continue };
+        // one source per sum: a streamed and a generated-diagonal partial stay apart (every sum starts as one term)
+        let form = |ids: &Vec<u32>| ids.first().and_then(|&i| lw.pt_refs.get(i as usize)).map(|r| r.form);
+        if form(pa).is_none() || form(pa) != form(pb) {
+            continue;
+        }
         let mut pts = pa.clone();
         pts.extend(pb);
         let mut fused = fa.clone();

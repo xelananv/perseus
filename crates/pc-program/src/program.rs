@@ -73,10 +73,12 @@ pub enum Kind {
     },
     /// K sibling ops with identical (kind, metas, route, const shape), mutually independent: one launch.
     Batched(Vec<Op>),
-    /// `sum_i ins[i] * pt_refs[pts[i]]` over streamed weight rows (`PtForm::CoeffStream`): a streamed linear's
-    /// baby-step inner sum, the loop of `MultPt` + `Add` the graph records fused into one op (perseus
-    /// `mult_coeff_sum`). `fused`: the loop's intermediate vars (products, partial sums), never materialized; the
-    /// check gives them their lowered metadata so the plan's pins on those names still bind.
+    /// `sum_i ins[i] * pt_refs[pts[i]]` over plaintexts the runtime generates inside the op, all of one source
+    /// (`compile::diag::sum_kind`): streamed weight rows (`PtForm::CoeffStream`, perseus `mult_coeff_sum`) or
+    /// generated diagonals (`PtForm::DiagGen`, the device diagonal encoder): a linear's baby-step inner sum, the loop
+    /// of `MultPt` + `Add` the graph records fused into one op. `fused`: the loop's intermediate vars (products,
+    /// partial sums), never materialized; the check gives them their lowered metadata so the plan's pins on those
+    /// names still bind.
     CoeffSum {
         pts: Vec<PtId>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -164,6 +166,10 @@ pub enum PtForm {
     /// A streamed weight row (v2 `pt.kind = stream`, name `<linear>#<row>`): float32 coefficient rows on the host,
     /// expanded on the device inside a `Kind::CoeffSum`, at the ciphertext's level (like `AtUse`).
     CoeffStream,
+    /// A generated diagonal (v2 `pt.kind = diag`, name `<linear>#<n>.<m>.<gg>.<jj>`): the slot vector gathered on the
+    /// device from the linear's resident float64 matrix (`compile::diag`), encoded inside a `Kind::CoeffSum`, at the
+    /// ciphertext's level (like `AtUse`).
+    DiagGen,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

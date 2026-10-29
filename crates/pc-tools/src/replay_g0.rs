@@ -726,7 +726,7 @@ fn run(o: &Opts) -> Res<bool> {
     }
     // bind
     let scalars = scalar_table(o, &prog, &plan_cfg)?;
-    let env = BindEnv { arena: &arena, stream: &ex.compute, lay, keys: &keys, stage, scalars: &scalars, streams: None };
+    let env = BindEnv { arena: &arena, stream: &ex.compute, lay, keys: &keys, stage, scalars: &scalars, streams: None, diag: None };
     // the oracle runtime refreshed the KV push with `bootstrap_real` (the real-payload chain under FIDESLIB_BTS_REAL=1);
     // the graph does not record it (deliberate_bootstrap args carry slots / stc_first only), so the driver says it
     let fix_routes = |b: &mut Bound<'_, W>, say: bool| -> Res<()> {

@@ -272,5 +272,7 @@ pub fn verify(sh: &Shadow, p: &Program) -> CheckReport {
             None => rep.errors.push(format!("pinned {name} is not a name of this block")),
         }
     }
+    // generated plaintexts: one source per fused sum, none outside a sum (super::diag::form_errors)
+    rep.errors.extend(super::diag::form_errors(p));
     rep
 }

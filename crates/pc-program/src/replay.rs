@@ -10,6 +10,7 @@
 //! each is held: docs/ARCHITECTURE.md "pc-program replay". Inputs / outputs are written and read outside the graph.
 use crate::bind::{BoundPt, Bound, CoeffSumStep, FinishStep, Gather, Held, Step, StepOp, Unit, UnitKind, NONE};
 use crate::schedule::{self, Sched};
+use crate::compile::diag::SumSrc;
 use crate::error::{Error, Result};
 use pc_core::encode::Complex;
 use pc_cuda::{launch_result, Compute, Event, GraphExec, Stream};
@@ -251,17 +252,25 @@ fn exec_step<'a, W: DevWord, M: DevStrategy<W>>(block: &str, rt: &mut Rt<'_, 'a,
         if cs.ins.iter().chain(std::iter::once(&st.out)).any(|&s| s as usize >= n_slots) || cs.ins.contains(&st.out) {
             return Err(rerr(block, format!("coeff_sum {c}: slots outside the {n_slots} bound slots, or the output among the terms")));
         }
-        if t.stream_base.is_null() {
-            return Err(rerr(block, "coeff_sum before the block's weight frame was staged (residency::StreamRing::adopt)"));
+        match &cs.src {
+            SumSrc::Stream { rows } => {
+                if t.stream_base.is_null() {
+                    return Err(rerr(block, "coeff_sum before the block's weight frame was staged (residency::StreamRing::adopt)"));
+                }
+                let crd = rt.coeff.as_deref_mut().ok_or_else(|| rerr(block, format!("coeff_sum {c}: the runtime has no CoeffRowsDevice (Rt::coeff)")))?;
+                let n = ctx.lay.n;
+                // SAFETY: bind checked the slots (< n_slots, output not a term); the output is the only mutable reference
+                let o: &mut Ct<'a, W> = unsafe { &mut *slots.add(st.out as usize) };
+                let cts: Vec<&Ct<'a, W>> = cs.ins.iter().map(|&s| unsafe { &*slots.add(s as usize) }).collect();
+                // SAFETY: the frame holds `Bound::streams.total` rows of N floats (StreamRing sized it); bind checked rows
+                let rows: Vec<*const f32> = rows.iter().map(|&r| unsafe { t.stream_base.add(r as usize * n) }).collect();
+                crd.sum(ctx, &rt.ex.compute, sh, o, &cts, &rows)?;
+            }
+            // the device diagonal encoder (pc-gpu DiagGen over the session's declared tiles) runs here once built
+            SumSrc::Diag { jobs } => {
+                return Err(rerr(block, format!("coeff_sum {c}: {} generated diagonals, and this runtime has no device diagonal encoder", jobs.len())));
+            }
         }
-        let crd = rt.coeff.as_deref_mut().ok_or_else(|| rerr(block, format!("coeff_sum {c}: the runtime has no CoeffRowsDevice (Rt::coeff)")))?;
-        let n = ctx.lay.n;
-        // SAFETY: bind checked the slots (< n_slots, output not a term); the output is the only mutable reference
-        let o: &mut Ct<'a, W> = unsafe { &mut *slots.add(st.out as usize) };
-        let cts: Vec<&Ct<'a, W>> = cs.ins.iter().map(|&s| unsafe { &*slots.add(s as usize) }).collect();
-        // SAFETY: the frame holds `Bound::streams.total` rows of N floats (StreamRing sized it); bind checked rows
-        let rows: Vec<*const f32> = cs.rows.iter().map(|&r| unsafe { t.stream_base.add(r as usize * n) }).collect();
-        crd.sum(ctx, &rt.ex.compute, sh, o, &cts, &rows)?;
         return Ok(());
     }
     // SAFETY: indices checked at bind (< slots.len()); `o` is the only mutable reference, and inputs are taken as
@@ -841,7 +850,7 @@ impl Replayer {
     pub fn run<'a, W: DevWord, M: DevStrategy<W>>(&mut self, b: &mut Bound<'a, W>, rt: &mut Rt<'_, 'a, W, M>) -> Result<RunInfo> {
         let t0 = Instant::now();
         let mut info = RunInfo { served: Served::Eager, host_us: 0.0, launch_us: 0.0, meta_mismatches: 0, first_mismatches: vec![], pairs: [0; 2], fused: 0 };
-        if b.pts.iter().any(|p| !p.stream && p.meta.is_none()) {
+        if b.pts.iter().any(|p| !p.in_sum && p.meta.is_none()) {
             return Err(rerr(&b.label, "plaintexts not resolved (Bound::resolve_pts after staging)"));
         }
         let sched = self.schedule(b, rt);
