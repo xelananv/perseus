@@ -507,8 +507,9 @@ cannot pass with no test run); `FHE_SSM_WEIGHTS` / `FHE_SSM_SEEDS` / `FHE_SSM_CO
 model's files and its whole-model stock plan) select the model-shape test (e), which writes its record to
 `FHE_SSM_E_OUT` (default: pytest's temporary directory); `FHE_SSM_COMPILE_CHECK` points the CPU build of the driver
 at a `compile_check` binary other than the one `tools/fhe_ssm/compile_check/build.sh` builds (`planned.py`
-`default_check_bin`). `run_gpu.sh` sets all of them from `DATA` / `OUT`; by hand they are set as `run_gpu.sh`'s
-`diag-tests` step shows.
+`default_check_bin`). `run_gpu.sh`'s `diag-tests` step exports `FHE_SSM_REQUIRE_DEVICE=1` and passes the model's
+files, `plan_ref` and `FHE_SSM_E_OUT` from `DATA` / `OUT`; it never sets `FHE_SSM_COMPILE_CHECK` (its `verify` step
+builds the binary where the default looks). By hand, set them as that step does.
 
 ## Upstream APIs this package depends on (at d97a6f7)
 
