@@ -294,7 +294,8 @@ Two independent ways on edge cases (`tests/`; `VERIFICATION` of the fork, carrie
 156 tests (140 at the synthetic shape, 16 marked `slow_shape` at ring 2^16), plus the planned driver's: 14
 CPU (`tests/test_planned_contract.py`, one of them `slow_shape`: a 1-block PCMM capture at the model's width
 planned and bound) and 3 marked `gpu` (`tests/test_planned_gpu.py`, skipped without the device build); the
-device diagonal encoder's CPU half adds 14 (`tests/test_diag_source.py`). The whole light suite
+device diagonal encoder's CPU half adds 14 (`tests/test_diag_source.py`) and its device half 3 marked `gpu`
+(`tests/test_diag_gpu.py`). The whole light suite
 (`-m "not slow_shape and not gpu"`) is 184 tests, the `slow_shape` set 19. The
 fork's tests of its GPU runner, planner wrapper, Colab build and tick meter are not carried over: those modules
 belong to the fork's C++ runtime; on this branch the device path is `impl.driver.PlannedRun` (below). Two
@@ -473,9 +474,32 @@ uploaded with `Session.register_tile`. `key_needs` reads no plaintext and is the
 without `Session.register_tile` refuses `generated` (`run`, `--keyspec`) before any session opens; `values` and the
 PCMM arms run on it as before.
 
-**What is not here.** The CUDA kernels (`diag_gather`, `encode_many`), pc-gpu's `DiagGen`, the replay's `Diag` arm
-(it returns an error naming the missing encoder), `Session(diag_tiles=...)` / `register_tile` in pc-py and the
-`diag.tiles` / `diag.scratch` MemPlan sections are the encoder's GPU half, not built yet.
+**The runtime** (upstream files, listed). Two kernels (`crates/pc-kernels`, ABI 17): `diag_gather` writes job j's
+N/2 slots `(W[at(v)], 0)` (thread = slot, coalesced writes, the address `(n B + row) d_out + m B + i` in 64 bits, the
+mod by `n_slots` a mask and the mod by `B` one subtract) from a row of a device job table (the tile's address and
+geometry, `(n, m, gg, jj)`), and `encode_many` is the `encode` kernels with the job on grid.y, so `encode` is
+`encode_many` at batch 1 and a batch equals its single encodes word for word. pc-gpu's `DiagGen` (sibling of
+`CoeffRowsDevice`) runs a sum in chunks of `host.diag_batch` jobs (default 32, at most 128): gather, encode_many, one
+NTT of the chunk's rows (a per-top row list carved at setup), then `Ops::mult_pt` for the first term and
+`Ops::mult_add_many` for the rest, `PtStore::sum_with`'s order. It pushes nothing through the constant ring (the
+degree factor is a resident table of ones; every term is degree 1), so a graph capture leases no slot; the job rows
+are written at bind (`Program.bind` after the bind proper) and a captured sum bakes fixed addresses only. The session
+declares the tiles at construction (`Session(diag_tiles=...)`, also `from_bundle` and `key_manifest`), carves them
+with the scratch, the job table and the row lists in `setup()` (`mem_report`: `diag.tiles`, `diag.scratch`,
+`diag.jobs`, `diag.lists`), uploads each matrix with `register_tile` (C-contiguous float64 `(d_in, d_out)` only, legal
+after `complete_setup`), and refuses a run while a declared tile was never uploaded. `Session.diag_stats()` counts the
+issued sums and the jobs whose 2^61 split fired (0 expected: `|W| < 1` keeps every coefficient below 2^55.5);
+`Session.diag_probe(names, level, values)` returns generated rows beside single and oracle encodes (tests). Device
+traffic per plaintext is about 36 + 1.25 L MiB (61 MiB at 20 limbs) [derived, `kernels/diag.cuh`].
+
+**On a device.** Nothing of the encoder's CUDA has been compiled or run. Its first device contact is
+`tools/fhe_ssm/run_gpu.sh diag-tests` (`RUNSHEET_GPU.md` §2a): the kernel selftest's `encode_many` / `diag_gather`
+lines, the crates' GPU tests (`crates/pc-program/tests/diag_gen_gpu.rs`: generated rows against the eager encode of
+the host-built vector, `encode_many` against single encodes, a fused sum against `PtStore::mult_pt_sum`, word for
+word; then the timings), the port's (`tests/test_diag_gpu.py`: the probe against `filling.diag_gather_reference` over
+the registered folded matrices; one block and the model against the exact forward). `run_planned` takes
+`--diag-batch` (the chunk) and `--diag-probe K` (the probe after setup, recorded in `setup.diag_probe`); the record
+carries `setup.diag` and each tick's `diag` counters.
 
 ## Upstream APIs this package depends on (at d97a6f7)
 

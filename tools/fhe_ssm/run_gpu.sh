@@ -18,8 +18,12 @@
 #                                                  (diagonal linears only under DIAG_SOURCE=generated: the device
 #                                                  diagonal encoder; else the PCMM arms only)
 #   bash tools/fhe_ssm/run_gpu.sh smoke            capture + plan + run of `pcmm24` at BLOCKS=1 (the first device contact)
+#   bash tools/fhe_ssm/run_gpu.sh diag-tests       the device diagonal encoder's device checks in acceptance order: the
+#                                                  kernel selftest's encode_many / diag_gather lines, the crates' GPU tests
+#                                                  (a)-(c), the port's gpu tests (a, b, d); then (e) with DIAG_E=1 (DATA and
+#                                                  the ref plan: run capture / plan ref first) and (f) with DIAG_F=1
 #   bash tools/fhe_ssm/run_gpu.sh smoke-diag       capture + plan + run of `ref` at BLOCKS=1 under DIAG_SOURCE=generated
-#                                                  (the device diagonal encoder's first device contact)
+#                                                  (the device diagonal encoder's first planned run; after diag-tests)
 #   bash tools/fhe_ssm/run_gpu.sh matrix [ARM...]  capture + plan + run (prepare for a CPU-only arm), one arm at a time
 #
 # Environment: OUT (default <worktree>/.cache/fhe_ssm/gpu_<UTC date>; every product lands there, one dir per arm),
@@ -32,7 +36,8 @@
 # PY (<worktree>/.venv/bin/python), PERSEUS_CORE_ARCH (build: default from nvidia-smi's compute capability),
 # PC_NVCC_JOBS (build: default 8), DIAG_SOURCE (values | generated, default values: where the diagonal linears'
 # plaintexts come from on the device, the driver's --diag-source; generated = the device diagonal encoder, which makes
-# every non-blocked arm a device arm; a driver flag only, so the captures and plans are the same under both).
+# every non-blocked arm a device arm; a driver flag only, so the captures and plans are the same under both), DIAG_E /
+# DIAG_F (diag-tests: 1 = also run (e) the model shape and (f) the timings).
 # Nothing here edits a tracked file; captures, plans and records go under OUT.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -262,6 +267,45 @@ keygen)
 smoke)
     export BLOCKS=1
     bash "$0" capture pcmm24 && bash "$0" plan pcmm24 && bash "$0" run pcmm24 ;;
+diag-tests)
+    # RUNSHEET_GPU.md step 10: stop at the first failure; every log under $OUT/diag_tests
+    gpu_free
+    r="$OUT/diag_tests"; mkdir -p "$r"
+    cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i "$GPU" 2>/dev/null | head -1 | tr -d '.')
+    export PERSEUS_CORE_ARCH=${PERSEUS_CORE_ARCH:-${cap:-120}} CUDA_HOME=${CUDA_HOME:-/usr/local/cuda-13.2}
+    export PATH="$CUDA_HOME/bin:$PATH"
+    dstep() {   # dstep <name> <cmd...>: run in the checkout on $GPU, log to $r/<name>.log, stop on failure
+        local name=$1; shift
+        log "diag-tests $name: $*"
+        ( cd "$W" && env CUDA_VISIBLE_DEVICES="$GPU" PYTHONPATH="$W/python" "$@" ) > "$r/$name.log" 2>&1
+        local rc=$?
+        tail -4 "$r/$name.log" | tee -a "$OUT/session.log"
+        [ $rc = 0 ] || die "diag-tests $name: exit $rc ($r/$name.log)"
+    }
+    # 1. the kernels against host references: every encode_many / diag_gather line of every built instance at 0
+    log "diag-tests 1_selftest: cargo run --release -p pc-kernels --bin pc-kernels-selftest -- --no-bench"
+    ( cd "$W" && CUDA_VISIBLE_DEVICES="$GPU" cargo run --release -p pc-kernels --bin pc-kernels-selftest -- --no-bench ) > "$r/1_selftest.log" 2>&1
+    n=$(grep -cE "\| (encode_many|diag_gather)" "$r/1_selftest.log"); ok=$(grep -cE "\| (encode_many|diag_gather).*\| +0 mismatches" "$r/1_selftest.log")
+    grep -E "\| (encode_many|diag_gather)" "$r/1_selftest.log" | tee -a "$OUT/session.log"
+    [ "$n" -gt 0 ] && [ "$n" = "$ok" ] || die "diag-tests 1_selftest: $ok of $n encode_many / diag_gather checks at 0 mismatches ($r/1_selftest.log)"
+    # 2. (a) generated rows == eager DeviceFft of the host vector, (b) encode_many == single encodes, (c) fused sum == store loop
+    dstep 2_crates_abc cargo test --release -p pc-program --features gpu --test diag_gen_gpu -- --ignored --test-threads=1 \
+        --nocapture --skip f_device_ms_per_plaintext
+    # 3. the session's probe against the port's oracle (a, b) and one block against the exact forward (d)
+    dstep 3_port_abd "$PY" -m pytest -q -p no:cacheprovider -m gpu python/perseus/examples/fhe_ssm/tests/test_diag_gpu.py \
+        -k "not model_shape"
+    if [ "${DIAG_E:-0}" = 1 ]; then   # 5. (e) the model shape on the ref arm's stock plan (after smoke-diag, step 4)
+        resolve_data
+        p="$OUT/bootstrap_placements/plan_ref"; [ -f "$p/PLAN_CMD.txt" ] || die "diag-tests (e): no plan $p (run_gpu.sh capture ref; plan ref)"
+        dstep 5_port_e env FHE_SSM_DATA="$(dirname "$WEIGHTS")" FHE_SSM_PLAN="$p" FHE_SSM_E_OUT="$r/5_model_shape.json" \
+            "$PY" -m pytest -q -p no:cacheprovider -m gpu python/perseus/examples/fhe_ssm/tests/test_diag_gpu.py -k model_shape
+    fi
+    if [ "${DIAG_F:-0}" = 1 ]; then   # 6. (f) device ms per plaintext at B = 1, 32, 128 and 18 / 10 limbs
+        dstep 6_crates_f cargo test --release -p pc-program --features gpu --test diag_gen_gpu -- --ignored --exact \
+            f_device_ms_per_plaintext --nocapture
+        grep "\[diag_gen\] (f)" "$r/6_crates_f.log" | tee -a "$OUT/session.log"
+    fi
+    log "diag-tests: passed ($r); $(build_id)" ;;
 smoke-diag)
     export BLOCKS=1 DIAG_SOURCE=generated
     bash "$0" capture ref && bash "$0" plan ref && bash "$0" run ref ;;
@@ -273,5 +317,5 @@ matrix)
         bash "$0" capture "$a" && bash "$0" plan "$a" && bash "$0" "$last" "$a" || log "arm $a stopped (above); continuing"
     done ;;
 *)
-    sed -n '2,36p' "$0"; exit 2 ;;
+    sed -n '2,41p' "$0"; exit 2 ;;
 esac

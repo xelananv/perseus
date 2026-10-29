@@ -901,10 +901,49 @@ class PlannedSsmRun(PlannedRun):
 
     # ── the record ──
     def counters(self) -> dict:
-        """``planned_stats()`` and the device memory, JSON-ready."""
+        """``planned_stats()`` and the device memory, JSON-ready; under ``generated`` the device diagonal encoder's
+        counters too (``Session.diag_stats``)."""
         st = {k: (list(v) if isinstance(v, tuple) else v) for k, v in dict(self.sess.planned_stats()).items()}
         free, total = self.fhe.mem_info()
-        return {"planned_stats": st, "mem_free_bytes": int(free), "mem_total_bytes": int(total)}
+        out = {"planned_stats": st, "mem_free_bytes": int(free), "mem_total_bytes": int(total)}
+        if self.diag_source == "generated":
+            out["diag_stats"] = {
+                k: (list(v) if isinstance(v, tuple) else v) for k, v in dict(self.sess.diag_stats()).items()
+            }
+        return out
+
+    def probe_diagonals(self, k: int, seed: int = 0) -> dict:
+        """The device diagonal encoder against the port's oracle (``Session.diag_probe``): ``k`` random diagonals of
+        the declared tiles (at most the encoder's batch), their slot vectors from ``filling.diag_gather_reference``
+        over the registered folded matrices, at the deepest diagonal sum's limbs and at half of them. Mismatch counts,
+        all 0 when the encoder is right: the gathered slots equal the oracle vectors bit for bit, ``encode_many``
+        equals one ``encode`` per job, and the eager ``DeviceFft`` encode of the oracle vector runs the same kernels
+        on the same values."""
+        tiles = self.diag_tiles()
+        if not tiles:
+            raise RuntimeError("probe_diagonals: diag_source generated only")
+        st = dict(self.sess.diag_stats())
+        picks = diaggen.probe_picks(self.model, tiles, min(int(k), int(st["batch"])), seed)
+        names = [nm for nm, _p, _j in picks]
+        vals = np.ascontiguousarray(
+            np.stack([filling.diag_gather_reference(p.W, p.N, p.t, [j])[0] for _nm, p, j in picks]),
+            dtype=np.float64,
+        )
+        out: dict[str, Any] = {"jobs": len(picks), "names": names[:4], "levels": {}}
+        full = int(st["max_rows"])
+        for limbs in sorted({full, max(1, full // 2)}, reverse=True):
+            level = N32_Q_PRIMES - limbs
+            r = self.sess.diag_probe(names, level, vals)
+            out["levels"][str(level)] = {
+                "limbs": limbs,
+                "slots_vs_oracle": int(
+                    np.count_nonzero(r["slots"].real != vals) + np.count_nonzero(r["slots"].imag)
+                ),
+                "generated_vs_single": int(np.count_nonzero(r["generated"] != r["single"])),
+                "generated_vs_oracle": int(np.count_nonzero(r["generated"] != r["oracle"])),
+                "words": int(r["generated"].size),
+            }
+        return out
 
     def program_report(self) -> dict:
         out = {}

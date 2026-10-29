@@ -182,6 +182,10 @@ def environment() -> dict[str, str]:
 STATS_STATES = ("stc_keys", "bound", "slab", "group_bytes", "stc_slots")
 
 
+#: Session.diag_stats fields that count since setup (the rest are states)
+DIAG_COUNTERS = ("sums", "terms", "chunks", "splits")
+
+
 def stats_delta(before: dict, after: dict) -> dict:
     """The per-tick increments of the runtime's counters (``Session.planned_stats``)."""
     out: dict[str, Any] = {}
@@ -470,6 +474,20 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--pool", type=int, default=16, help="eager ciphertext slots (block 0's input, the reply)")
     s.add_argument("--pcmm-cf", type=int, default=6, help="the PCMM service's correction factor")
     s.add_argument(
+        "--diag-batch",
+        type=int,
+        default=None,
+        help="with --diag-source generated: generated diagonals per chunk of the device diagonal encoder "
+        "(the Config's host.diag_batch; the session's default 32, at most 128)",
+    )
+    s.add_argument(
+        "--diag-probe",
+        type=int,
+        default=0,
+        help="with --diag-source generated: after setup, probe this many random diagonals against the port's "
+        "oracle (filling.diag_gather_reference over the registered matrices; setup.diag_probe in the record)",
+    )
+    s.add_argument(
         "--pt-budget-gb",
         type=float,
         default=40.0,
@@ -677,6 +695,12 @@ def main(argv=None) -> int:
     cfg = session_config(plan)
     if a.no_graphs:
         cfg["exec.use_graphs"] = False
+    if (a.diag_batch is not None or a.diag_probe) and a.diag_source != "generated":
+        raise SystemExit(
+            "--diag-batch / --diag-probe set the device diagonal encoder: --diag-source generated only"
+        )
+    if a.diag_batch is not None:
+        cfg["host.diag_batch"] = int(a.diag_batch)
     ticks = max(int(a.ticks), 0)
     streams, free, tok_meta = token_streams(a, params.vocab, n, max(ticks, a.probe))
     # a free run feeds its picks back into its own copy of the streams: the rows read that copy
@@ -782,11 +806,15 @@ def main(argv=None) -> int:
         "registers": run.n_regs,
         "pcmm_uploaded": list(run.uploaded),
         "diag_tiles_uploaded": len(run.tiles_uploaded),
+        "diag": run.counters().get("diag_stats"),
         "has_secret": bool(run.sess.has_secret),
         "profile": "a device fence after every stage on the fenced ticks: stage walls are attributions, not the production wall"
         if a.profile
         else None,
     }
+    if a.diag_probe:
+        header["setup"]["diag_probe"] = run.probe_diagonals(a.diag_probe, seed=a.seed)
+        log(f"[planned] diag probe: {json.dumps(header['setup']['diag_probe']['levels'])}")
     header["ticks"] = []
     write_json(out, header)
     exact = ExactModel(params, n)
@@ -812,6 +840,7 @@ def main(argv=None) -> int:
             "served": host["served"], "out_level": level, "refreshes_planned": header["prepare"]["refreshes_planned"],
             "counters": stats_delta(c0["planned_stats"], c1["planned_stats"]), "mem_free_bytes": c1["mem_free_bytes"],
             "stages": host["stages"] if a.profile else None,
+            "diag": {k: c1["diag_stats"][k] - c0["diag_stats"][k] for k in DIAG_COUNTERS} if "diag_stats" in c1 else None,
         }  # fmt: skip
         want = exact.step(rows_t)
         if got is None:

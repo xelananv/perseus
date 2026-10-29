@@ -1,20 +1,15 @@
 # SPDX-License-Identifier: MIT
 """The port side of the device diagonal encoder: where a diagonal linear's plaintexts come from (``--diag-source``).
-
-``values`` (the default) is what the port always did: every diagonal a slot vector built on the host
-(``LazyDiagonals``) and multiplied at use, so on a device every one of them is a resident ``PtStore`` plaintext (344,064
-per tick at the model shape). ``generated``: the device builds each diagonal inside the fused sum of its ``(m, gg)``
-group from the linear's resident float64 matrix (the tile), so the plaintexts never cross PCIe and hold no store slot.
-
-The two record the same op stream: per group the loop ``mult`` + ``add_inplace`` over its ``n_in b`` terms (n outer, jj
-inner), with equal levels, tags and, with values, magnitudes; a generated capture differs from a values capture only
-in each diagonal plaintext's ``args.pt`` (``kind = "diag"``, ``name = <linear>#<n>.<m>.<gg>.<jj>``), which the
-compiler fuses into one ``CoeffSum`` per group (crates/pc-program/src/compile/diag.rs). So a capture and its plan are
-shared by both sources; the source is the driver's choice (``run_planned --diag-source``, ``run_fake --diag-source``).
-
-``use_source(inf, source)`` installs the hook ``filling.mult_diag_sum`` dispatches to: on the numpy fake the values from
-``filling.diag_gather_reference`` (the kernel's index arithmetic) through ``ops.mult_pt_sum``, so the fake's reply is
-bit-identical under both sources only if that arithmetic is right; on the capture recorder ``diag_sum_recorder``.
+``values`` (the default): every diagonal a host slot vector (``LazyDiagonals``) multiplied at use, so on a device a
+resident ``PtStore`` plaintext (344,064 per tick at the model shape). ``generated``: the device builds each diagonal
+inside the fused sum of its ``(m, gg)`` group from the linear's resident float64 matrix (the tile): no PCIe, no slot.
+Both record the same op stream (per group the loop ``mult`` + ``add_inplace`` over ``n_in b`` terms, n outer, jj
+inner; equal levels, tags and, with values, magnitudes); a generated capture differs only in each diagonal's
+``args.pt`` (``kind = "diag"``, ``name = <linear>#<n>.<m>.<gg>.<jj>``), which the compiler fuses into one ``CoeffSum``
+per group (crates/pc-program/src/compile/diag.rs): captures and plans are shared, the source is the driver's choice.
+``use_source(inf, source)`` installs the hook ``filling.mult_diag_sum`` dispatches to: on the numpy fake the vectors
+of ``filling.diag_gather_reference`` (the kernel's index arithmetic) through ``ops.mult_pt_sum``, so the fake's reply
+is bit-identical under both sources only if that arithmetic is right; on the capture recorder ``diag_sum_recorder``.
 """
 
 from __future__ import annotations
@@ -156,3 +151,29 @@ def tile_matrices(model):
             pts = getattr(w, "pts", None)
             if isinstance(pts, filling.LazyDiagonals):
                 yield w.name, np.ascontiguousarray(pts.W, dtype=np.float64)
+
+
+def tile_pts(model, name: str) -> filling.LazyDiagonals:
+    """The ``LazyDiagonals`` of diagonal linear ``name`` (``b<b>.<kind>``): its folded matrix ``W`` (what
+    ``Session.register_tile`` uploads) and geometry."""
+    blk, _, kind = name.partition(".")
+    if not blk.startswith("b") or not blk[1:].isdigit() or not kind:
+        raise ValueError(f"{name!r} is not a diagonal linear's name (b<b>.<kind>)")
+    w = getattr(model.block_weights(int(blk[1:])), kind)
+    pts = getattr(w, "pts", None)
+    if w.name != name or not isinstance(pts, filling.LazyDiagonals):
+        raise ValueError(f"{name}: not a diagonal linear of this model ({w.name!r}, {type(pts)!r})")
+    return pts
+
+
+def probe_picks(model, tiles, k: int, seed: int = 0):
+    """``k`` random diagonals of the declared ``tiles``: ``[(plaintext name, LazyDiagonals, (n, m, gg, jj))]``."""
+    rng = np.random.default_rng(seed)
+    names = sorted(tiles)
+    out = []
+    for _ in range(int(k)):
+        name = names[int(rng.integers(len(names)))]
+        pts = tile_pts(model, name)
+        job = tuple(int(rng.integers(x)) for x in (pts.n_in, pts.n_out, pts.g, pts.b))
+        out.append((f"{name}#{job[0]}.{job[1]}.{job[2]}.{job[3]}", pts, job))
+    return out
