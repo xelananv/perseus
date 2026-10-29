@@ -129,8 +129,9 @@ fi
 [ -n "$SPARSE_B_K" ] && RUNTIME="$RUNTIME FIDESLIB_BTS_SPARSE_B_K=$SPARSE_B_K"
 [ -n "${RUNTIME_EXTRA:-}" ] && RUNTIME="$RUNTIME $RUNTIME_EXTRA"
 SCHEDULE=${SCHEDULE:-$([ "$PAIR" = 1 ] && echo siblings || echo program)}
-# every PLAN_* the caller exported is part of the recipe too (the planner reads several straight from the env)
-for k in $(env | sed -n 's/^\(PLAN_[A-Z0-9_]*\)=.*/\1/p' | sort); do
+# every PLAN_* the caller exported is part of the recipe too (the planner reads several straight from the env);
+# PLAN_ROOT is where the plan lands, not a planner input: it stays out of the recipe line (a machine path otherwise)
+for k in $(env | sed -n 's/^\(PLAN_[A-Z0-9_]*\)=.*/\1/p' | grep -vx PLAN_ROOT | sort); do
     case " ${RECIPE_KEYS[*]} " in *" $k "*) ;; *) RECIPE_KEYS+=("$k") ;; esac
 done
 for k in FIRST_ENTRY_LEVEL FIRST_ENTRY_DEG KV_ENTRY_LEVEL KV_ENTRY_DEG FORBID_STEPS BTS_OUT_DEG; do

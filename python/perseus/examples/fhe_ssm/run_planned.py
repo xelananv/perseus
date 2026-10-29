@@ -547,6 +547,7 @@ def prepare_report(run: PlannedSsmRun) -> dict:
     rep = {
         "compiled_by": run.compiled_by,
         "schedule": run.schedule,
+        "conversations": run.n_conv,
         "programs": progs,
         "refreshes_planned": sum(int(p["n_bootstraps"] or 0) for p in progs.values()),
         "check_errors": errors,

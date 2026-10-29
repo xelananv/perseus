@@ -11,6 +11,7 @@ import os
 import pathlib
 import shutil
 import subprocess
+import types
 
 import numpy as np
 import pytest
@@ -255,8 +256,9 @@ def test_lockstep_and_streams_are_refused_before_anything_runs(tmp_path):
 
 
 def test_the_reply_is_the_conversations_asked_for(tmp_path):
-    """``--conversations N`` runs N of the 64 pairs (the rest parked as copies): the reply decodes N rows, so it
-    compares with the exact forward's N; outside 1..capacity it is refused before anything is recorded."""
+    """``--conversations N`` runs N of the 64 pairs (the rest parked as copies): ``reply()`` decodes N rows (the
+    real axis first, then the imaginary one), so the tick compares N rows with the exact forward's N; outside
+    1..capacity the run is refused before anything is recorded."""
     model = small_model()[3]
     for bad in (0, model.capacity + 1):
         with pytest.raises(ValueError, match="capacity"):
@@ -264,9 +266,31 @@ def test_the_reply_is_the_conversations_asked_for(tmp_path):
                 None, "x", None, [], None, model=model, work_dir=str(tmp_path), conversations=bad
             )
     d, t = model.geo.base.d, model.geo.base.t
-    vec = np.zeros(d * t, dtype=np.complex128)
+    rng = np.random.default_rng(3)
     for n in (1, 3, t, t + 1, 2 * t):
-        assert filling.unpack_pairs(vec, d, n).shape == (n, d)
+        rows = rng.standard_normal((n, d))
+        # what the session decrypts: the packed pairs, the parked lanes zero; reply() is exercised on the
+        # in-process decrypt path with the session's two calls stubbed
+        vec = filling.pack_pairs(rows, d * t)
+        run = planned.PlannedSsmRun.__new__(planned.PlannedSsmRun)
+        run.d, run.t, run.n_conv, run.client, run.bundle = d, t, n, None, None
+        run.ops = types.SimpleNamespace(decrypt_slots_complex=lambda _ct, v=vec: v)  # type: ignore[assignment]
+        run.ct = lambda _reg: types.SimpleNamespace(level=30)  # type: ignore[method-assign]
+        got, frame, level = run.reply("out")
+        assert (frame, level, got.shape) == (None, 30, (n, d))
+        np.testing.assert_allclose(got, rows, rtol=0, atol=1e-12)
+
+
+def test_prepare_records_the_conversations_the_run_decodes(synthetic_plan, tmp_path):
+    out = tmp_path / "prep3.json"
+    rc = run_planned.main(
+        [*synthetic_plan["base"], "--plan", str(synthetic_plan["plan"]), "--prepare-only", "--conversations", "3",
+         "--out", str(out)]
+    )  # fmt: skip
+    assert rc == 0
+    d = json.loads(out.read_text())
+    assert (d["conversations"], d["prepare"]["conversations"]) == (3, 3)
+    assert d["capacity"] > 3  # the parked lanes are copies of the first conversation; reply() drops them
 
 
 def test_keygen_is_the_client_role_and_takes_no_model(tmp_path):
