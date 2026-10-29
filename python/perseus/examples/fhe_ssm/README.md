@@ -383,7 +383,9 @@ stage (k = 1), a lockstep compile would reorder nothing. No `--keys` and no `--i
 bundle directory without `keys.pckb`, or a bundle for another plan contract or chain. A plan whose capture
 md5 (`PLAN_CMD.txt`'s `graph=` line) differs from the capture at hand (`--capture DIR`, else the plan's
 own path when it exists). A plan stamped under another Config than the twin's (another `--levels`). A
-model whose stream is not static (never this model). **Diagonal linears on the device path**
+plan whose Config names a chain other than n32 (`CHAIN_PRESET` on its `runtime=` line, e.g. the lean
+n32a4: the session, its shadow and its key manifest would build that chain, while the model's plaintext
+rows and levels are n32's; `run_planned.session_config`). A model whose stream is not static (never this model). **Diagonal linears on the device path**
 (`--linear diagonal` and `pcmm-trunk`): `PlannedRun` keeps one resident plaintext slot per distinct
 plaintext (`pt_slots = len(pt_levels) + 8`, `driver.py:731`; a slot is `pt_rows` rows of N 32-bit words, 7
 MiB at 28 rows) and the reference circuit reads 344,064 diagonal plaintexts per tick (about 2.3 TiB), so

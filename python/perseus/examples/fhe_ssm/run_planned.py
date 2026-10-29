@@ -40,11 +40,13 @@ from .decode import FreeRun, Policy, prompt_lengths, streams_from_record
 from .geometry import LINEARS, PCMM_WBITS, ROUTES
 from .model import FheSsmModel
 from .norm import NEWTON_FORMS, NEWTON_SITES
-from .planned import LOCKSTEP_REFUSED, SCHEDULES, PlannedSsmRun, SsmRecorder, key_needs
+from .planned import LOCKSTEP_REFUSED, N32_Q_PRIMES, SCHEDULES, PlannedSsmRun, SsmRecorder, key_needs
 from .ref import ExactModel, MirrorModel, rel_err_rms
 from .weights import LANE_MIX, load_model
 
 PRESET = "n32_gpt2_decode"
+#: the chain the port is laid out for (``planned.N32_Q_PRIMES``, the ``--levels`` ladder, make_plan.sh's recipe)
+CHAIN = "n32"
 KEYS_INPROC = "inproc"
 INSECURE_BANNER = (
     "INSECURE: keys generated in process, the session holds the secret key: a timing run, never a deployment"
@@ -522,6 +524,21 @@ def check_plan_contract(plan: str, twin_cfg) -> dict | None:
     return stamp
 
 
+def session_config(plan: str):
+    """The session's Config: ``PRESET`` with the plan's stamp and ``runtime=`` line over it (pc-program's
+    ``PlanDir::config`` reads a plan the same way). The chain is a runtime Config field (``chain.preset``,
+    ``CHAIN_PRESET``): a runtime line that names another chain builds the session, its shadow and its key manifest
+    on that chain, while this model's plaintext rows and levels are the n32 chain's; such a plan is refused."""
+    cfg = config.plan_runtime(plan, CHAIN, base=config.preset(PRESET))
+    chain = cfg["chain.preset"]
+    if chain not in (None, CHAIN):
+        raise SystemExit(
+            f"{plan}: its Config names the chain preset {chain!r}; this model runs on {CHAIN} only "
+            f"({N32_Q_PRIMES} Q primes, the --levels ladder)"
+        )
+    return cfg
+
+
 def prepare_report(run: PlannedSsmRun) -> dict:
     """What the CPU part established: the compile's verdict per program, the registers, the carried names, the
     static-stream check, the plaintext budget, the PCMM declarations."""
@@ -594,7 +611,7 @@ def main(argv=None) -> int:
     if not 1 <= n <= model.capacity:
         raise SystemExit(f"{n} conversations for a capacity of {model.capacity}")
     stamp = check_plan_contract(plan, twin_cfg)
-    cfg = config.plan_runtime(plan, "n32", base=config.preset(PRESET))
+    cfg = session_config(plan)
     if a.no_graphs:
         cfg["exec.use_graphs"] = False
     ticks = max(int(a.ticks), 0)

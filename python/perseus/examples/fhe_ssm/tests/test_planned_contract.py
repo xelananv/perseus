@@ -3,7 +3,8 @@
 registering the named carried state, ``prepare`` at the synthetic shape against a plan the stock recipe makes of a
 synthetic capture (the compile check's verdict, the registers, the static stream, the schedule), the pair
 packing of block 0's input on the fake against the twin's own, the key needs the model emits, and the refusal
-paths (no keys, lockstep, streams, a plan whose capture md5 differs, a plan cut under other levels)."""
+paths (no keys, lockstep, streams, a plan whose capture md5 differs, a plan cut under other levels, a plan on
+another chain)."""
 
 import json
 import os
@@ -332,6 +333,39 @@ def test_a_plan_cut_under_other_levels_is_refused(synthetic_plan, tmp_path):
                 str(tmp_path / "x.json"),
             ]
         )
+
+
+def test_a_plan_on_another_chain_is_refused(synthetic_plan, tmp_path):
+    """The chain is a runtime Config field (``CHAIN_PRESET``): a plan whose runtime line names n32a4 would open the
+    session on that chain; the driver refuses it before anything runs. The plan as made names none (n32), and an
+    explicit n32 is the same chain."""
+    cfg = run_planned.session_config(str(synthetic_plan["plan"]))
+    assert cfg["chain.preset"] is None
+    for chain, ok in (("n32", True), ("n32a4", False)):
+        plan = tmp_path / f"plan_{chain}"
+        shutil.copytree(synthetic_plan["plan"], plan)
+        cmd = plan / "PLAN_CMD.txt"
+        lines = [
+            x + f" CHAIN_PRESET={chain}" if x.startswith("runtime=") else x
+            for x in cmd.read_text().splitlines()
+        ]
+        cmd.write_text("\n".join(lines) + "\n")
+        if ok:
+            assert run_planned.session_config(str(plan))["chain.preset"] == "n32"
+            continue
+        with pytest.raises(SystemExit, match="chain preset 'n32a4'"):
+            run_planned.session_config(str(plan))
+        with pytest.raises(SystemExit, match="chain preset 'n32a4'"):
+            run_planned.main(
+                [
+                    *synthetic_plan["base"],
+                    "--plan",
+                    str(plan),
+                    "--prepare-only",
+                    "--out",
+                    str(tmp_path / "x.json"),
+                ]
+            )
 
 
 def test_keyspec_on_the_cpu_build_emits_the_models_needs(synthetic_plan, tmp_path):
