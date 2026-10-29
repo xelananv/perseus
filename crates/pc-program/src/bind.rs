@@ -486,6 +486,12 @@ impl<'a, W: DevWord> Bound<'a, W> {
                 BoundPt { key: PtKey::new(name, r.level, DevForm::Eval), meta: None, rows: std::ptr::null(), in_sum }
             })
             .collect();
+        // a plain product or sum of a generated plaintext has no runtime path (its operand would be looked up in the
+        // store, where a generated plaintext never is): refused here by name, not at run time as "not resolved"
+        let unfused = diag::unfused_generated(p);
+        if !unfused.is_empty() {
+            return Err(berr(block, format!("{} op(s) read a generated plaintext outside a fused sum (a keep_going compile let the check's [pt_form_error] through): {}", unfused.len(), list(&unfused))));
+        }
         // steps
         let mut steps = vec![];
         let mut no_scalar: Vec<String> = vec![];

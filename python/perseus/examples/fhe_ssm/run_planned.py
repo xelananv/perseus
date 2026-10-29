@@ -481,6 +481,13 @@ def parser() -> argparse.ArgumentParser:
         "(the Config's host.diag_batch; the session's default 32, at most 128)",
     )
     s.add_argument(
+        "--diag-perturb",
+        default=None,
+        metavar="TILE:FACTOR",
+        help="TEST ONLY, a negative control with --diag-source generated: upload tile TILE (b<b>.<kind>) scaled by "
+        "FACTOR while the exact forward keeps the true matrix, so a correct encoder leaves the tolerance",
+    )
+    s.add_argument(
         "--diag-probe",
         type=int,
         default=0,
@@ -695,9 +702,9 @@ def main(argv=None) -> int:
     cfg = session_config(plan)
     if a.no_graphs:
         cfg["exec.use_graphs"] = False
-    if (a.diag_batch is not None or a.diag_probe) and a.diag_source != "generated":
+    if (a.diag_batch is not None or a.diag_probe or a.diag_perturb) and a.diag_source != "generated":
         raise SystemExit(
-            "--diag-batch / --diag-probe set the device diagonal encoder: --diag-source generated only"
+            "--diag-batch / --diag-probe / --diag-perturb set the device diagonal encoder: --diag-source generated only"
         )
     if a.diag_batch is not None:
         cfg["host.diag_batch"] = int(a.diag_batch)
@@ -792,6 +799,15 @@ def main(argv=None) -> int:
         )
     if bundle is not None:
         header["keys"]["bundle_info"] = check_bundle(bundle, cfg, needs)
+    if a.diag_perturb:
+        tile, _, factor = a.diag_perturb.partition(":")
+        run.tile_scale = {tile: float(factor)}
+        header["diag_perturb"] = {
+            "tile": tile,
+            "factor": float(factor),
+            "note": "TEST ONLY: a negative control",
+        }
+        log(f"[planned] TEST ONLY: tile {tile} uploaded x{float(factor)} (a negative control)")
     t0 = time.time()
     run.setup(rows)
     header["setup"] = {

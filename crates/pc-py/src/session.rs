@@ -1479,6 +1479,14 @@ fn args(config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usiz
         return Err(PyValueError::new_err("Session(ccmm=True) serves planned programs: pass programs=[...]"));
     }
     let cp = ccmm.then(|| crate::matmul::CcmmPlan { cfg: pc_gpu::matmul::ccmm::CcmmCfg::default() });
+    // the diagonal declaration checked here, so `Session(...)`, `from_bundle` and `key_manifest` refuse the same ones:
+    // every tile a program reads declared, `host.diag_batch` >= 1 (above DIAG_MAXB it is capped, said once here)
+    if let Some((ps, ds)) = plan.as_ref().and_then(|ps| ps.diag.as_ref().map(|ds| (ps, ds))) {
+        let sh = diag_shape(ps, ds, &cfg)?;
+        if cfg.host.diag_batch.is_some_and(|b| b > DIAG_MAXB as i64) {
+            eprintln!("[pc-py Session] host.diag_batch = {} is above the cap {DIAG_MAXB}: chunks of {} generated diagonals", cfg.host.diag_batch.unwrap_or(0), sh.batch);
+        }
+    }
     Ok(Args { cfg, ks, sizes, geometry, plan, pp, cp })
 }
 
@@ -1549,7 +1557,7 @@ impl PySession {
 
     /// The key bundle a `Session.from_bundle` with these arguments needs (JSON, `pc_client::KeySpec`): every
     /// switching key (role + rows), the SPRU material, the PCMM shapes, CCMM, a public key; the chain's params hash
-    /// and the plan contract. No device.
+    /// and the plan contract. No device. `diag_tiles` binds no key; it is validated as the constructor validates it.
     #[staticmethod]
     #[pyo3(signature = (config, keys, size=None, pool=256, pt_slots=256, encode_threads=4, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new(), diag_tiles=None))]
     #[allow(clippy::too_many_arguments)]
@@ -1866,7 +1874,7 @@ impl PySession {
             }
             let mut one = Vec::with_capacity(k * l * n);
             for j in 0..k {
-                let what = pc_gpu::encode_dev::Payload2::DeviceSlots { ptr: g.slots_ptr(j), slots: nh, payload };
+                let what = pc_gpu::encode_dev::Payload2::DeviceSlots { ptr: g.slots_ptr(j)?, slots: nh, payload };
                 one.extend(g.encode_with(&dev.ctx, &ex.compute, &mut pts.enc, &mut ops.ring, what, top, scale)?);
             }
             let orc = match &vals {

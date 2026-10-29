@@ -13,7 +13,8 @@ namespace diag {
 constexpr int BX = 256;
 
 // grid (N/2 / BX, njobs): thread s of block row y writes slot s of job y (coalesced: consecutive threads, consecutive
-// double2). The t consecutive slots of one diagonal entry read one address (a warp touches one or two elements).
+// double2). The t consecutive slots of one diagonal entry read one address: a warp of 32 slots touches max(1, 32 / t)
+// elements of the tile (one at the model's t = 32).
 __global__ void __launch_bounds__(BX)
 gather(const DiagJobRow* __restrict__ jobs, double2* __restrict__ v, uint64_t vs) {
     const uint32_t s = blockIdx.x * BX + threadIdx.x;

@@ -105,6 +105,17 @@ fn random_name(e: &Env<'_, '_>, rng: &mut Rng) -> String {
     format!("{name}#{}.{}.{}.{}", rng.below(t.n_in as usize), rng.below(t.n_out as usize), rng.below(t.g as usize), rng.below(t.b as usize))
 }
 
+/// Per tile `(0, 0, 0, 0)`, `(n_in - 1, n_out - 1, g - 1, b - 1)` and `(n_in - 1, 0, 1, 0)`.
+fn corners(e: &Env<'_, '_>) -> Vec<String> {
+    let mut out = vec![];
+    for (name, t) in &e.src.tiles {
+        for (n, m, gg, jj) in [(0, 0, 0, 0), (t.n_in - 1, t.n_out - 1, t.g - 1, t.b - 1), (t.n_in - 1, 0, 1, 0)] {
+            out.push(format!("{name}#{n}.{m}.{gg}.{jj}"));
+        }
+    }
+    out
+}
+
 /// Group `(m, gg)` of tile `tile` in the order the capture records it (n outer, jj inner).
 fn group(e: &Env<'_, '_>, tile: usize, m: u32, gg: u32) -> Vec<String> {
     let (name, t) = &e.src.tiles[tile];
@@ -159,7 +170,9 @@ fn ct_rows(e: &Env<'_, '_>, c: &Ct<'_, W>, top: usize) -> Res<Vec<W>> {
 fn a_generated_rows_equal_the_eager_device_encode_of_the_host_vector() -> Res<()> {
     with_env(32, 20, 0, |e| {
         let mut rng = Rng(0xa11ce);
-        let names: Vec<String> = (0..32).map(|_| random_name(e, &mut rng)).collect();
+        // the corners of each tile ((0, 0, 0, 0), the last block's last diagonal, the first rolled giant step) and 26 random
+        let mut names: Vec<String> = corners(e);
+        names.extend((0..32 - names.len()).map(|_| random_name(e, &mut rng)));
         for l in [20usize, 10] {
             let top = l - 1;
             let scale = e.ctx.scale.sf(top as i32)?;
@@ -201,7 +214,7 @@ fn b_encode_many_equals_single_encodes() -> Res<()> {
             let generated = (0..nb).map(|j| Ok(e.dg.download_rows(&e.ex.compute, j, top)?)).collect::<Res<Vec<_>>>()?;
             let mut bad = 0;
             for (j, g) in generated.iter().enumerate() {
-                let what = Payload2::DeviceSlots { ptr: e.dg.slots_ptr(j), slots: 1 << 15, payload: Payload::Real };
+                let what = Payload2::DeviceSlots { ptr: e.dg.slots_ptr(j)?, slots: 1 << 15, payload: Payload::Real };
                 bad += diff(g, &e.dg.encode_with(&e.ctx, &e.ex.compute, &mut e.store.enc, &mut e.ops.ring, what, top, scale)?);
             }
             println!("[diag_gen] (b) encode_many over B = {nb}: rows != {nb} single encodes {bad} of {}", (nb * 20) << 16);

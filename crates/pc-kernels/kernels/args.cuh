@@ -785,8 +785,9 @@ static_assert(sizeof(DiagGatherArgs) == 32, "DiagGatherArgs layout");
 // `batch` encodes (EncodeArgs semantics) in one set of launches: job j = grid.y reads e.v + j v_stride doubles, works
 // in e.a / e.b + j ab_stride and e.c + j c_stride doubles and e.cmax[j], and writes limb l at e.out + j out_stride +
 // l N words; e.deg_factor, e.pr, e.scale and e.nl are shared. The kernels are encode's (encode = encode_many at batch
-// 1), so job j's limbs equal one encode of its buffers word for word. v_stride and ab_stride even (double2 alignment).
-// nsplit non-null: +1 (atomic) per job whose 2^61 split is nonzero.
+// 1), so job j's limbs equal one encode of its buffers word for word. With batch > 1 (else -2): v_stride >= N and
+// ab_stride >= 2N, both even (double2 alignment), c_stride >= N, out_stride >= nl N. nsplit non-null: +1 (atomic) per
+// job per launch whose 2^61 split is nonzero (a replayed graph counts again).
 struct EncodeManyArgs {
     EncodeArgs e;
     uint64_t v_stride, ab_stride, c_stride, out_stride;

@@ -466,6 +466,8 @@ class PlannedSsmRun(PlannedRun):
         self.pcmm_cf, self.check_bin = int(pcmm_cf), check_bin
         self.diag_source = diag_source
         self.tiles_uploaded: list[str] = []
+        #: TEST ONLY (a negative control): {tile: factor} uploaded scaled, the twin and the exact forward unchanged
+        self.tile_scale: dict[str, float] = {}
         self.profile, self.profile_every = bool(profile), max(1, int(profile_every))
         self.static = False
         self.compiled_by: str | None = None
@@ -792,10 +794,14 @@ class PlannedSsmRun(PlannedRun):
         tiles = self.diag_tiles()
         if not tiles:
             return 0
+        unknown = sorted(set(self.tile_scale) - set(tiles))
+        if unknown:
+            raise RuntimeError(f"tile_scale names undeclared tiles {unknown}")
         for name, W in diaggen.tile_matrices(self.model):
             if W.shape != tiles[name][:2]:
                 raise RuntimeError(f"tile {name}: matrix {W.shape}, declared {tiles[name][:2]}")
-            self.sess.register_tile(name, W)
+            up = np.ascontiguousarray(W * float(self.tile_scale[name])) if name in self.tile_scale else W
+            self.sess.register_tile(name, up)
             self.tiles_uploaded.append(name)
         missing = sorted(set(tiles) - set(self.tiles_uploaded))
         if missing:

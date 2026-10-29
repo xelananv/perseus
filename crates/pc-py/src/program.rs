@@ -372,12 +372,21 @@ impl PyProgram {
             let routes = pl.routes();
             pc_program::bind::Bound::new_shared(&self.prog, &env, &routes, &dr).map_err(perr)?
         };
-        // every diagonal sum's jobs into the encoder's device job table (rows a captured graph reads at fixed addresses)
+        // every diagonal sum's jobs into the encoder's device job table (rows a captured graph reads at fixed addresses):
+        // all rows built and checked against the capacity before one upload, so a refused bind consumes no row
         if let Some(d) = pl.diag.as_mut() {
-            for cs in b.coeff_sums.iter_mut() {
+            let mut idx = vec![];
+            let mut sums = vec![];
+            for (c, cs) in b.coeff_sums.iter().enumerate() {
                 if let pc_program::compile::diag::SumSrc::Diag { jobs } = &cs.src {
-                    let rows = jobs.iter().map(|j| d.dg.job_row(j.tile as usize, j.n, j.m, j.gg, j.jj)).collect::<pc_gpu::Result<Vec<_>>>().map_err(gerr)?;
-                    cs.jobs_at = d.dg.register(&ex.compute, &rows).map_err(gerr)?.at;
+                    sums.push(jobs.iter().map(|j| d.dg.job_row(j.tile as usize, j.n, j.m, j.gg, j.jj)).collect::<pc_gpu::Result<Vec<_>>>().map_err(gerr)?);
+                    idx.push(c);
+                }
+            }
+            if !sums.is_empty() {
+                let ranges = d.dg.register_all(&ex.compute, &sums).map_err(gerr)?;
+                for (c, r) in idx.into_iter().zip(ranges) {
+                    b.coeff_sums[c].jobs_at = r.at;
                 }
             }
         }

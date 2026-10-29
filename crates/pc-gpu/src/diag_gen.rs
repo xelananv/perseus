@@ -103,7 +103,8 @@ pub struct DiagGen<'a, W: DevWord> {
     cmax: DBuf<'a, Compute, u64>,
     /// per job: rows `0..L` of its plaintext, job j at `j L N` words (L = the sum's limbs; `lists[L - 1]`)
     rows: DBuf<'a, Compute, W>,
-    /// jobs whose 2^61 split was nonzero since setup (the encode's counter; the diagonal bound keeps it 0)
+    /// jobs whose 2^61 split was nonzero, counted per launch since setup (a replayed graph counts again; the encode's
+    /// counter; the diagonal bound keeps it 0)
     nsplit: DBuf<'a, Compute, u64>,
     /// `deg_factor` of a degree-1 plaintext: one word per Q prime, all 1
     ones: Option<ConstBuf<'a, W>>,
@@ -203,16 +204,37 @@ impl<'a, W: DevWord> DiagGen<'a, W> {
         Ok(DiagJobRow { w: buf.dptr() as u64, d_out: g.d_out, side: g.side, b: g.b, log_t: g.t.trailing_zeros(), n, m, gg, jj })
     }
 
-    /// Append one bound sum's job rows (term order) to the table; returns its range. Setup (bind) only: a synchronous
-    /// upload on `s`, and the rows must stay put once a graph reads them.
+    /// Append one bound sum's job rows (term order) to the table; returns its range (`register_all` of one sum).
     pub fn register(&mut self, s: &Stream<Compute>, rows: &[DiagJobRow]) -> Result<JobRange> {
-        if rows.is_empty() || self.filled + rows.len() > self.shape.jobs {
-            return Err(shape_err(format!("{} job rows: {} of {} filled (DiagShape::jobs: every diagonal term of the programs the session was sized for)", rows.len(), self.filled, self.shape.jobs)));
+        Ok(self.register_all(s, &[rows.to_vec()])?[0])
+    }
+
+    /// Append the job rows of every diagonal sum of one bound program (term order), checked against the capacity first
+    /// and uploaded once, so a refused program consumes no row; returns each sum's range. The capacity
+    /// (`DiagShape::jobs`) is every diagonal term of the programs the session was sized for: it assumes each of them
+    /// binds once. Setup (bind) only: a synchronous upload on `s`; the rows stay put once a graph reads them.
+    pub fn register_all(&mut self, s: &Stream<Compute>, sums: &[Vec<DiagJobRow>]) -> Result<Vec<JobRange>> {
+        let total: usize = sums.iter().map(|r| r.len()).sum();
+        if sums.iter().any(|r| r.is_empty()) || self.filled + total > self.shape.jobs {
+            return Err(shape_err(format!(
+                "{} sums of {total} job rows: {} of {} filled (DiagShape::jobs: every diagonal term of the programs the session was sized for, each bound once)",
+                sums.len(),
+                self.filled,
+                self.shape.jobs
+            )));
         }
-        let at = self.filled;
-        self.jobs.upload_at(s, at, rows)?;
-        self.filled += rows.len();
-        Ok(JobRange { at: at as u32, len: rows.len() as u32 })
+        let mut ranges = Vec::with_capacity(sums.len());
+        let mut at = self.filled;
+        for r in sums {
+            ranges.push(JobRange { at: at as u32, len: r.len() as u32 });
+            at += r.len();
+        }
+        if total > 0 {
+            let flat: Vec<DiagJobRow> = sums.concat();
+            self.jobs.upload_at(s, self.filled, &flat)?;
+        }
+        self.filled += total;
+        Ok(ranges)
     }
 
     fn deg_factor(&self, deg: u8) -> Result<*const c_void> {
@@ -268,15 +290,23 @@ impl<'a, W: DevWord> DiagGen<'a, W> {
         Ok(())
     }
 
-    /// Device address of job `j`'s rows after `generate` at `top` (rows `0..=top`, N words apart).
-    pub fn rows_ptr(&self, j: usize, top: usize) -> *const c_void {
-        // SAFETY (pointer): j (top + 1) N < batch max_rows N for j < batch, top < max_rows (the callers' range)
-        unsafe { self.rows.dptr().add(j * (top + 1) * self.lay.n) as *const c_void }
+    /// Device address of job `j`'s rows after `generate` at `top` (rows `0..=top`, N words apart); Err unless `j <
+    /// batch` and `top < max_rows`.
+    pub fn rows_ptr(&self, j: usize, top: usize) -> Result<*const c_void> {
+        if j >= self.shape.batch || top >= self.shape.max_rows {
+            return Err(shape_err(format!("rows of job {j} at top {top} (batch {}, max_rows {})", self.shape.batch, self.shape.max_rows)));
+        }
+        // SAFETY: j (top + 1) N + (top + 1) N <= batch max_rows N words, inside `rows` (checked above)
+        Ok(unsafe { self.rows.dptr().add(j * (top + 1) * self.lay.n) } as *const c_void)
     }
-    /// Device address of job `j`'s gathered slots (N/2 double2) after `generate` (`Payload2::DeviceSlots`).
-    pub fn slots_ptr(&self, j: usize) -> *const c_void {
-        // SAFETY (pointer): j N < batch N for j < batch
-        unsafe { self.v.dptr().add(j * self.lay.n) as *const c_void }
+    /// Device address of job `j`'s gathered slots (N/2 double2) after `generate` (`Payload2::DeviceSlots`); Err unless
+    /// `j < batch`.
+    pub fn slots_ptr(&self, j: usize) -> Result<*const c_void> {
+        if j >= self.shape.batch {
+            return Err(shape_err(format!("slots of job {j} (batch {})", self.shape.batch)));
+        }
+        // SAFETY: (j + 1) N <= batch N doubles, inside `v` (checked above)
+        Ok(unsafe { self.v.dptr().add(j * self.lay.n) } as *const c_void)
     }
     /// Host copy of job `j`'s rows `0..=top` (tests, `Session.diag_probe`). Synchronous on `s`.
     pub fn download_rows(&self, s: &Stream<Compute>, j: usize, top: usize) -> Result<Vec<W>> {
@@ -319,8 +349,8 @@ impl<'a, W: DevWord> DiagGen<'a, W> {
         Ok(self.rows.download_range(s, 0, l * self.lay.n)?)
     }
 
-    /// Jobs whose 2^61 split was nonzero since setup (a nonzero count = a coefficient past 2^61: |W| times the scale
-    /// broke the bound the encoder relies on). Synchronous on `s`.
+    /// Jobs whose 2^61 split was nonzero, per launch since setup (a replayed graph counts again; any nonzero count = a
+    /// coefficient past 2^61: |W| times the scale broke the bound the encoder relies on). Synchronous on `s`.
     pub fn splits(&self, s: &Stream<Compute>) -> Result<u64> {
         Ok(self.nsplit.download(s)?.first().copied().unwrap_or(0))
     }
@@ -357,7 +387,7 @@ impl<'a, W: DevWord> DiagGen<'a, W> {
             self.generate(ctx, &ex.compute, jobs.at as usize + ci * bt, cc.len(), top, scale, deg)?;
             // SAFETY: job j's rows 0..=top were just written by `generate` (stream order) and are not rewritten before
             // the products below run (the next chunk's generate is issued after them on the same lane)
-            let pts: Vec<Pt<'_>> = (0..cc.len()).map(|j| unsafe { Pt::from_raw(pm, self.rows_ptr(j, top)) }).collect();
+            let pts: Vec<Pt<'_>> = (0..cc.len()).map(|j| Ok(unsafe { Pt::from_raw(pm, self.rows_ptr(j, top)?) })).collect::<Result<_>>()?;
             if ci == 0 {
                 ops.mult_pt(ctx, ex, sh, std::slice::from_mut(out), &cc[..1], &pts[..1])?;
                 if cc.len() > 1 {

@@ -76,7 +76,8 @@ __device__ __forceinline__ int split_of(unsigned long long cmax_bits) {
     return logc > 61 ? logc - 61 : 0;
 }
 
-// (cs: doubles between two jobs' c; os: words between two jobs' out; nsplit: +1 per job with a nonzero split)
+// (cs: doubles between two jobs' c; os: words between two jobs' out; nsplit: +1 per job and launch with a nonzero
+// split, so a replayed graph counts again)
 template <class W, class MM>
 __global__ void scatter(const double* c, const unsigned long long* cmax, W* out, const W* deg_factor,
                         const PrimeConst* pr, int nl, uint64_t cs, uint64_t os, unsigned long long* nsplit) {
@@ -105,7 +106,10 @@ int launch_many(const EncodeManyArgs* m, cudaStream_t s) {
     const EncodeArgs* a = &m->e;
     const int nb = m->batch;
     if (nb < 1 || nb > 65535) return -1;
-    if (nb > 1 && ((m->v_stride | m->ab_stride) & 1u)) return -2;
+    // jobs must not overlap: N/2 double2 of v, N double2 of a and b, N doubles of c, nl rows of N words of out each
+    if (nb > 1 && (((m->v_stride | m->ab_stride) & 1u) || m->v_stride < (uint64_t)N || m->ab_stride < 2ull * N ||
+                   m->c_stride < (uint64_t)N || m->out_stride < (uint64_t)a->nl * N))
+        return -2;
     const uint64_t vs = m->v_stride / 2, ab2 = m->ab_stride / 2;
     const dim3 gh((N / 2 + BX - 1) / BX, nb), gn((N + BX - 1) / BX, nb);
     double2* A = (double2*)a->a;

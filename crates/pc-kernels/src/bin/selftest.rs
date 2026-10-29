@@ -1741,11 +1741,14 @@ fn t_encode(st: &mut Setup) -> Vec<TestResult> {
 
 // ================================================================================================ encode_many
 /// encode_many over 3 jobs == 3 single encodes of the same buffers, word for word (limbs, coefficients, max |c|); the
-/// split counter counts exactly the jobs whose max |c| passes 2^61 (job 1's slots are 2^30 times larger).
+/// split counter counts exactly the jobs whose max |c| passes 2^61 (job 1's slots are 2^30 times larger). Every max
+/// word starts at a sentinel (the bits of 2^80) and the a / b and c strides are padded past their minimums, so a clear
+/// that misses a job's max word or a swapped stride shows up as wrong limbs and a wrong count.
 fn t_encode_many(st: &mut Setup) -> Vec<TestResult> {
     let mut out = Vec::new();
     let nl = if st.ctx.wb == 8 { 2 } else { 3 };
     let nb = 3usize;
+    let (ab_s, c_s) = (2 * N + 2, N + 8);
     let scale = (1u64 << 40) as f64;
     let mags = [1.0, (1u64 << 30) as f64, 0.5];
     let mut vflat: Vec<f64> = Vec::with_capacity(nb * N);
@@ -1756,8 +1759,9 @@ fn t_encode_many(st: &mut Setup) -> Vec<TestResult> {
     }
     let vd = st.ctx.up_f64(&vflat);
     let df = st.ctx.up(&vec![1u64; nl]);
-    let (sa, sb) = (st.ctx.zeros_wb(nb * 2 * N, 8), st.ctx.zeros_wb(nb * 2 * N, 8));
-    let (sc, cm, ns) = (st.ctx.zeros_wb(nb * N, 8), st.ctx.zeros_wb(nb, 8), st.ctx.zeros_wb(1, 8));
+    let (sa, sb) = (st.ctx.zeros_wb(nb * ab_s, 8), st.ctx.zeros_wb(nb * ab_s, 8));
+    let (sc, ns) = (st.ctx.zeros_wb(nb * c_s, 8), st.ctx.zeros_wb(1, 8));
+    let cm = st.ctx.up_wb(&vec![(1u64 << 40) as f64 * (1u64 << 40) as f64; nb].iter().map(|x| x.to_bits()).collect::<Vec<_>>(), 8);
     let o = st.ctx.zeros(nb * nl * N);
     let e = |v: *const c_void, a: *mut c_void, b: *mut c_void, c: *mut c_void, cmax: *mut c_void, o: *mut c_void, st: &Setup| EncodeArgs {
         v,
@@ -1775,15 +1779,16 @@ fn t_encode_many(st: &mut Setup) -> Vec<TestResult> {
     let m = EncodeManyArgs {
         e: e(vd.c(), sa.p(), sb.p(), sc.p(), cm.p(), o.p(), st),
         v_stride: N as u64,
-        ab_stride: 2 * N as u64,
-        c_stride: N as u64,
+        ab_stride: ab_s as u64,
+        c_stride: c_s as u64,
         out_stride: (nl * N) as u64,
         nsplit: ns.p() as *mut u64,
         batch: nb as i32,
         pad: 0,
     };
     ck(unsafe { (st.t.encode_many)(&m, st.s()) });
-    let (limbs, coefs, cmaxs, nsplit) = (o.read(&st.ctx), sc.read(&st.ctx), cm.read(&st.ctx), ns.read(&st.ctx)[0]);
+    let (limbs, cpad, cmaxs, nsplit) = (o.read(&st.ctx), sc.read(&st.ctx), cm.read(&st.ctx), ns.read(&st.ctx)[0]);
+    let coefs: Vec<u64> = (0..nb).flat_map(|j| cpad[j * c_s..j * c_s + N].to_vec()).collect();
     let (mut l1, mut c1, mut m1) = (Vec::new(), Vec::new(), Vec::new());
     let (ta, tb, tc, tm, to) = (st.ctx.zeros_wb(2 * N, 8), st.ctx.zeros_wb(2 * N, 8), st.ctx.zeros_wb(N, 8), st.ctx.zeros_wb(1, 8), st.ctx.zeros(nl * N));
     for j in 0..nb {
@@ -1795,7 +1800,7 @@ fn t_encode_many(st: &mut Setup) -> Vec<TestResult> {
     }
     out.push(cmp("encode_many (3 jobs) limbs == 3 single encodes", &limbs, &l1));
     out.push(cmp("encode_many (3 jobs) coefficients == 3 single encodes", &coefs, &c1));
-    out.push(cmp("encode_many (3 jobs) max |c| == 3 single encodes", &cmaxs, &m1));
+    out.push(cmp("encode_many (3 jobs) max abs(c) words == 3 single encodes", &cmaxs, &m1));
     let want = m1.iter().filter(|&&b| f64::from_bits(b) > (1u64 << 61) as f64).count() as u64;
     out.push(TestResult {
         name: "encode_many split counter == jobs past 2^61".into(),

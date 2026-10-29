@@ -292,14 +292,9 @@ pub fn form_errors(p: &Program) -> Vec<String> {
                         out.push(format!("[pt_form_error] op {oi} coeff_sum: {e}"));
                     }
                 }
-                Kind::MultPt(id) | Kind::AddPt(id) => {
-                    if let Some(r) = p.pt_refs.get(*id as usize).filter(|r| is_generated(r.form)) {
-                        out.push(format!(
-                            "[pt_form_error] op {oi} {}: {} plaintext {} outside a fused sum (it has no runtime path)",
-                            m.kind.name(),
-                            form_name(r.form),
-                            r.name
-                        ));
+                Kind::MultPt(_) | Kind::AddPt(_) => {
+                    if let Some(e) = unfused_msg(p, oi, m) {
+                        out.push(format!("[pt_form_error] {e}"));
                     }
                 }
                 _ => {}
@@ -307,6 +302,26 @@ pub fn form_errors(p: &Program) -> Vec<String> {
         }
     }
     out
+}
+
+/// The plain products and sums (`MultPt` / `AddPt`, and so the `MultPtAdd` units made of them) whose plaintext is
+/// generated: no runtime path serves them (the replay reads such an operand from the store, where a generated plaintext
+/// never is). One message per op, naming the plaintext. The bind refuses a program with any (a `keep_going` compile
+/// lets the check's error through).
+pub fn unfused_generated(p: &Program) -> Vec<String> {
+    let mut out = vec![];
+    for (oi, op) in p.ops.iter().enumerate() {
+        for m in op.members() {
+            out.extend(unfused_msg(p, oi, m));
+        }
+    }
+    out
+}
+
+fn unfused_msg(p: &Program, oi: usize, m: &crate::program::Op) -> Option<String> {
+    let (Kind::MultPt(id) | Kind::AddPt(id)) = &m.kind else { return None };
+    let r = p.pt_refs.get(*id as usize).filter(|r| is_generated(r.form))?;
+    Some(format!("op {oi} {}: {} plaintext {} outside a fused sum (it has no runtime path)", m.kind.name(), form_name(r.form), r.name))
 }
 
 /// What a program's fused sums and plaintexts are (compile_check's census).
@@ -465,6 +480,24 @@ mod tests {
         assert!(e[0].contains("diag plaintext a#0.0.1.0 outside a fused sum"), "{e:?}");
         let p = prog(vec![pt("a#0.0.0.0", PtForm::DiagGen)], Some(pt("pt_9", PtForm::AtUse)));
         assert!(form_errors(&p).is_empty());
+        assert!(unfused_generated(&p).is_empty());
+    }
+
+    #[test]
+    fn an_unfused_generated_plaintext_is_named_for_the_bind() {
+        // a product of a diagonal and a sum with a streamed row, both outside any CoeffSum: each named; a store
+        // plaintext in a product is not
+        let mut p = prog(vec![pt("a#0.0.0.0", PtForm::DiagGen)], Some(pt("a#0.0.1.0", PtForm::DiagGen)));
+        p.pt_refs.push(pt("w#5", PtForm::CoeffStream));
+        p.vars.push(Var { name: "v_y".into(), meta: CtMeta::new(30, 1), slot: None });
+        let (id, out) = ((p.pt_refs.len() - 1) as u32, (p.vars.len() - 1) as u32);
+        p.ops.push(Op { kind: Kind::AddPt(id), ins: vec![0], outs: vec![out], pre: vec![], origin: Origin::Node(2), inplace: false });
+        let u = unfused_generated(&p);
+        assert_eq!(u.len(), 2, "{u:?}");
+        assert!(u[0].contains("diag plaintext a#0.0.1.0 outside a fused sum"), "{u:?}");
+        assert!(u[1].contains("stream plaintext w#5 outside a fused sum"), "{u:?}");
+        assert_eq!(form_errors(&p).len(), 2);
+        assert!(form_errors(&p).iter().zip(&u).all(|(f, x)| f == &format!("[pt_form_error] {x}")));
     }
 
     #[test]

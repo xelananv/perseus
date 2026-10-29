@@ -362,6 +362,33 @@ def test_the_twin_keeps_names_not_vectors_and_the_session_arguments_filter_them(
     assert run_v.sess.got == {}
 
 
+def test_a_perturbed_tile_is_uploaded_scaled_and_nothing_else_changes(captures, tmp_path):
+    """The device tests' negative control (``run_planned --diag-perturb TILE:FACTOR``): only that tile is uploaded
+    scaled; a tile that is not declared is refused, and so is the flag under ``--diag-source values``."""
+    run, model = planned_run(captures, tmp_path, "generated")
+
+    class Sess:
+        def __init__(self):
+            self.got = {}
+
+        def register_tile(self, name, W):
+            self.got[name] = np.array(W)
+
+    run.sess = Sess()
+    run.tile_scale = {"b0.wr": 2.0}
+    assert run.upload_tiles() == 10
+    for name, W in run.sess.got.items():
+        b, kind = name[1:].split(".")
+        want = getattr(model.block_weights(int(b)), kind).pts.W
+        np.testing.assert_array_equal(W, want * (2.0 if name == "b0.wr" else 1.0))
+    run.sess, run.tiles_uploaded, run.tile_scale = Sess(), [], {"b7.wq": 2.0}
+    with pytest.raises(RuntimeError, match="undeclared tiles"):
+        run.upload_tiles()
+    with pytest.raises(SystemExit, match="generated only"):
+        run_planned.main([*captures["base"], "--plan", str(captures["plan"]), "--diag-perturb", "b0.wr:2",
+                          "--prepare-only", "--out", str(tmp_path / "x.json")])  # fmt: skip
+
+
 def test_a_device_build_without_the_encoder_is_refused(captures, tmp_path, monkeypatch):
     from perseus import _pc  # type: ignore[attr-defined]
 

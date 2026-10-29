@@ -497,9 +497,10 @@ traffic per plaintext is about 36 + 1.25 L MiB (61 MiB at 20 limbs) [derived, `k
 lines, the crates' GPU tests (`crates/pc-program/tests/diag_gen_gpu.rs`: generated rows against the eager encode of
 the host-built vector, `encode_many` against single encodes, a fused sum against `PtStore::mult_pt_sum`, word for
 word; then the timings), the port's (`tests/test_diag_gpu.py`: the probe against `filling.diag_gather_reference` over
-the registered folded matrices; one block and the model against the exact forward). `run_planned` takes
-`--diag-batch` (the chunk) and `--diag-probe K` (the probe after setup, recorded in `setup.diag_probe`); the record
-carries `setup.diag` and each tick's `diag` counters.
+the registered folded matrices; one block and the model against the exact forward; a perturbed tile, which must leave
+the tolerance). `run_planned` takes `--diag-batch` (the chunk), `--diag-probe K` (the probe after setup, recorded in
+`setup.diag_probe`) and, for that negative control only, `--diag-perturb TILE:FACTOR` (the tile uploaded scaled, the
+exact forward unchanged); the record carries `setup.diag` and each tick's `diag` counters.
 
 ## Upstream APIs this package depends on (at d97a6f7)
 

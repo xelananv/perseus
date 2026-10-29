@@ -11,22 +11,26 @@
 #   bash tools/fhe_ssm/run_gpu.sh plan ARM         tools/fhe_ssm/make_plan.sh on that capture (+ the compile check)
 #   bash tools/fhe_ssm/run_gpu.sh prepare ARM      the driver's CPU part (--prepare-only: record, compile check, report)
 #   bash tools/fhe_ssm/run_gpu.sh keyspec ARM      the key request of ARM's plan ($DRIVER --keyspec: the model's needs and,
-#                                                  on the device build, the session's) -> $OUT/keys_ARM/keyspec.json
+#                                                  on the device build, the session's) -> $OUT/keys_ARM[_bN]/keyspec.json
 #   bash tools/fhe_ssm/run_gpu.sh keygen ARM       the client role for that request ($DRIVER --keygen: a fresh secret,
-#                                                  keys.pckb); then KEYS=bundle FHE_SSM_KEYS=$OUT/keys_ARM for run
+#                                                  keys.pckb); then KEYS=bundle FHE_SSM_KEYS=$OUT/keys_ARM[_bN] for run
 #   bash tools/fhe_ssm/run_gpu.sh run ARM          the planned run: $DRIVER --ticks $TICKS --profile, nvidia-smi sampled
 #                                                  (diagonal linears only under DIAG_SOURCE=generated: the device
 #                                                  diagonal encoder; else the PCMM arms only)
 #   bash tools/fhe_ssm/run_gpu.sh smoke            capture + plan + run of `pcmm24` at BLOCKS=1 (the first device contact)
-#   bash tools/fhe_ssm/run_gpu.sh diag-tests       the device diagonal encoder's device checks in acceptance order: the
-#                                                  kernel selftest's encode_many / diag_gather lines, the crates' GPU tests
-#                                                  (a)-(c), the port's gpu tests (a, b, d); then (e) with DIAG_E=1 (DATA and
-#                                                  the ref plan: run capture / plan ref first) and (f) with DIAG_F=1
+#   bash tools/fhe_ssm/run_gpu.sh diag-tests       the device diagonal encoder's device checks in acceptance order: 1 the
+#                                                  kernel selftest (encode / encode_many / diag_gather lines), 2 the crates'
+#                                                  GPU tests (a)-(c), 3 the port's gpu tests (a, b, d); e (DIAG_E=1: DATA and
+#                                                  the whole-model plan_ref) and f (DIAG_F=1); DIAG_ONLY=1,2,3,e,f picks steps;
+#                                                  a passed step is skipped on the next call unless DIAG_RERUN=1
 #   bash tools/fhe_ssm/run_gpu.sh smoke-diag       capture + plan + run of `ref` at BLOCKS=1 under DIAG_SOURCE=generated
-#                                                  (the device diagonal encoder's first planned run; after diag-tests)
+#                                                  (the device diagonal encoder's first planned run; after diag-tests; KEYS
+#                                                  defaults to inproc here: a contact test, recorded insecure-inproc)
 #   bash tools/fhe_ssm/run_gpu.sh matrix [ARM...]  capture + plan + run (prepare for a CPU-only arm), one arm at a time
 #
-# Environment: OUT (default <worktree>/.cache/fhe_ssm/gpu_<UTC date>; every product lands there, one dir per arm),
+# Environment: OUT (default <worktree>/.cache/fhe_ssm/gpu_<UTC date>; every product lands there, one dir per arm; with
+# BLOCKS=N every capture, plan, prepare, run and key directory of an arm carries the suffix _bN, so a smoke never
+# replaces the whole model's plan),
 # DATA (a directory holding the model's weights .npz, seeds .json and config .json; WEIGHTS / SEEDS / CONFIG override
 # each), DRIVER (the planned driver's python module, default perseus.examples.fhe_ssm.run_planned: its contract is in
 # RUNSHEET_GPU.md §4), TICKS (2), BLOCKS (all), GPU (0), KEYS (NO DEFAULT; run, smoke and matrix refuse without it:
@@ -48,6 +52,7 @@ DRIVER=${DRIVER:-perseus.examples.fhe_ssm.run_planned}
 TICKS=${TICKS:-2}; BLOCKS=${BLOCKS:-}; GPU=${GPU:-0}; KEYS=${KEYS:-}; PROFILE_EVERY=${PROFILE_EVERY:-2}
 DIAG_SOURCE=${DIAG_SOURCE:-values}
 case "$DIAG_SOURCE" in values|generated) ;; *) echo "run_gpu: DIAG_SOURCE=$DIAG_SOURCE (values | generated)" >&2; exit 2 ;; esac
+S=${BLOCKS:+_b$BLOCKS}   # the BLOCKS suffix of every product name (capname gives captures the same one)
 mkdir -p "$OUT"
 log() { echo "[run_gpu $(date -u +%H:%M:%S)] $*" | tee -a "$OUT/session.log"; }
 die() { log "STOP: $*"; exit 1; }
@@ -119,6 +124,12 @@ capname() {   # the capture an arm uses: arms that differ only at plan or run ti
     echo "cap_${key%_}${BLOCKS:+_b$BLOCKS}"
 }
 
+cuda_env() {   # the build's CUDA environment for every step that compiles the kernels: build.rs re-runs nvcc whenever
+               # PERSEUS_CORE_ARCH or PC_NVCC_JOBS differ from the last build's, so build, bench and diag-tests share one
+    local cc; cc=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i "$GPU" 2>/dev/null | head -1 | tr -d '.')
+    export PERSEUS_CORE_ARCH=${PERSEUS_CORE_ARCH:-${cc:-120}} PC_NVCC_JOBS=${PC_NVCC_JOBS:-8}
+    export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda-13.2}; export PATH="$CUDA_HOME/bin:$PATH"
+}
 gpu_free() {
     local apps; apps=$(nvidia-smi --query-compute-apps=pid,used_memory --format=csv,noheader -i "$GPU" 2>/dev/null)
     [ -z "$apps" ] || die "GPU $GPU runs other processes ($apps): a timing needs an idle GPU (RUNSHEET_GPU.md §0)"
@@ -142,9 +153,7 @@ box)
     } > "$OUT/box.txt" 2>&1
     cat "$OUT/box.txt"; log "box recorded in $OUT/box.txt" ;;
 build)
-    cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i "$GPU" 2>/dev/null | head -1 | tr -d '.')
-    export PERSEUS_CORE_ARCH=${PERSEUS_CORE_ARCH:-${cap:-120}} PC_NVCC_JOBS=${PC_NVCC_JOBS:-8}
-    export CUDA_HOME=${CUDA_HOME:-/usr/local/cuda-13.2}; export PATH="$CUDA_HOME/bin:$PATH"
+    cuda_env
     log "build: PERSEUS_CORE_ARCH=$PERSEUS_CORE_ARCH PC_NVCC_JOBS=$PC_NVCC_JOBS CUDA_HOME=$CUDA_HOME"
     t0=$(date +%s)
     ( cd "$W" && uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[hf,examples,dev]" \
@@ -172,6 +181,7 @@ verify)
     log "verify: $(build_id)" ;;
 bench)
     gpu_free
+    cuda_env
     ( cd "$W" && CUDA_VISIBLE_DEVICES=$GPU cargo run --release -p pc-tools --bin pc-bench -- bts --all --k 1,8 --reps 20 --keys packed ) \
         > "$OUT/bench_bts.txt" 2>&1 || { tail -20 "$OUT/bench_bts.txt"; die "pc-bench failed"; }
     tail -25 "$OUT/bench_bts.txt"; log "bench: $OUT/bench_bts.txt (set PLAN_BTS_MS from it for ILP_OBJECTIVE=ms); $(build_id)" ;;
@@ -196,19 +206,19 @@ capture)
 plan)
     a=${1:?arm}; arm "$a"; c="$OUT/$(capname "$a")"
     [ -d "$c" ] || die "no capture $c: run_gpu.sh capture $a"
-    ( env $PLANENV PLAN_ROOT="$OUT" MEMGUARD_GB= bash "$HERE/make_plan.sh" "$c" "plan_$a" ) 2>&1 | tee "$OUT/plan_$a.log" | tail -8
+    ( env $PLANENV PLAN_ROOT="$OUT" MEMGUARD_GB= bash "$HERE/make_plan.sh" "$c" "plan_$a$S" ) 2>&1 | tee "$OUT/plan_$a$S.log" | tail -8
     rc=${PIPESTATUS[0]}
-    [ "$rc" = 0 ] || die "plan $a: make_plan.sh exit $rc (a PlanInfeasible block, a bad NAME, ...): $OUT/plan_$a.log"
-    grep -q "compile check FAILED" "$OUT/bootstrap_placements/plan_$a/summary.txt" && die "plan $a does not bind (compile check)"
-    grep -q "compile check: skipped" "$OUT/bootstrap_placements/plan_$a/summary.txt" && die "plan $a was not gated: the compile check is missing (run_gpu.sh verify builds it)"
-    log "plan $a: $OUT/bootstrap_placements/plan_$a" ;;
+    [ "$rc" = 0 ] || die "plan $a: make_plan.sh exit $rc (a PlanInfeasible block, a bad NAME, ...): $OUT/plan_$a$S.log"
+    grep -q "compile check FAILED" "$OUT/bootstrap_placements/plan_$a$S/summary.txt" && die "plan $a does not bind (compile check)"
+    grep -q "compile check: skipped" "$OUT/bootstrap_placements/plan_$a$S/summary.txt" && die "plan $a was not gated: the compile check is missing (run_gpu.sh verify builds it)"
+    log "plan $a: $OUT/bootstrap_placements/plan_$a$S" ;;
 prepare)
-    a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a"
+    a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a$S"
     [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
     PYTHONPATH="$W/python" "$PY" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$DRIVER') else 1)" 2>/dev/null \
         || die "no driver module $DRIVER (RUNSHEET_GPU.md §4 is its contract)"
     resolve_data
-    r="$OUT/prepare_$a"; mkdir -p "$r"
+    r="$OUT/prepare_$a$S"; mkdir -p "$r"
     log "prepare $a (CPU only): $CAPENV $DRIVER --plan $p --prepare-only $CAP $RUNF ${PREPARE_EXTRA:-}"
     t0=$(date +%s)
     ( cd "$W" && env CUDA_VISIBLE_DEVICES="" PYTHONPATH="$W/python" $CAPENV "$PY" -m "$DRIVER" $MODEL_ARGS --plan "$p" \
@@ -218,7 +228,7 @@ prepare)
     tail -8 "$r/prepare.log"
     [ $rc = 0 ] || die "prepare $a failed ($r/prepare.log)" ;;
 run)
-    a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a"
+    a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a$S"
     [ "$DEVICE" = 1 ] || die "run $a: under DIAG_SOURCE=values a diagonal linear does not run on the device path (344,064 resident plaintexts per tick, about 2.3 TiB; the driver refuses it): DIAG_SOURCE=generated runs it on the device diagonal encoder, or run_gpu.sh prepare $a runs its CPU part (RUNSHEET_GPU.md §3)"
     [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
     PYTHONPATH="$W/python" "$PY" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$DRIVER') else 1)" 2>/dev/null \
@@ -227,7 +237,7 @@ run)
     [ "$KEYS" != bundle ] || [ -d "${FHE_SSM_KEYS:-}" ] || die "KEYS=bundle reads the client's key directory from FHE_SSM_KEYS: export it (or KEYS=<dir>)"
     gpu_free
     resolve_data
-    r="$OUT/run_$a"; mkdir -p "$r"
+    r="$OUT/run_$a$S"; mkdir -p "$r"
     echo "$(build_id)" > "$r/build_id.txt"
     nvidia-smi --query-gpu=timestamp,memory.used,utilization.gpu,power.draw --format=csv -lms 500 -i "$GPU" > "$r/nvsmi.csv" 2>/dev/null &
     smi=$!
@@ -243,10 +253,10 @@ run)
     tail -15 "$r/run.log"
     [ $rc = 0 ] || die "run $a failed ($r/run.log)" ;;
 keyspec)
-    a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a"
+    a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a$S"
     [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
     resolve_data
-    r="$OUT/keys_$a"; mkdir -p "$r"
+    r="$OUT/keys_$a$S"; mkdir -p "$r"
     log "keyspec $a: $DRIVER --plan $p --keyspec $r/keyspec.json $CAP $RUNF"
     ( cd "$W" && env CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH="$W/python" $CAPENV "$PY" -m "$DRIVER" $MODEL_ARGS --plan "$p" \
         --keyspec "$r/keyspec.json" $CAP $RUNF ) > "$r/keyspec.log" 2>&1
@@ -255,7 +265,7 @@ keyspec)
     tail -5 "$r/keyspec.log"
     [ $rc = 0 ] || die "keyspec $a failed ($r/keyspec.log)" ;;
 keygen)
-    a=${1:?arm}; r="$OUT/keys_$a"
+    a=${1:?arm}; r="$OUT/keys_$a$S"
     [ -f "$r/keyspec.json" ] || die "no key request $r/keyspec.json: run_gpu.sh keyspec $a"
     log "keygen $a (the client role, on this box for the test): $DRIVER --keygen $r --keyspec-file $r/keyspec.json"
     ( cd "$W" && env CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH="$W/python" "$PY" -m "$DRIVER" --keygen "$r" \
@@ -268,46 +278,91 @@ smoke)
     export BLOCKS=1
     bash "$0" capture pcmm24 && bash "$0" plan pcmm24 && bash "$0" run pcmm24 ;;
 diag-tests)
-    # RUNSHEET_GPU.md step 10: stop at the first failure; every log under $OUT/diag_tests
+    # RUNSHEET_GPU.md §2a, in order, stopping at the first failure; logs under $OUT/diag_tests. Steps: 1 2 3 (default),
+    # e (DIAG_E=1), f (DIAG_F=1), or the list in DIAG_ONLY (e.g. DIAG_ONLY=e,f). A passed step leaves <name>.passed and is
+    # skipped on the next call unless DIAG_RERUN=1.
     gpu_free
+    cuda_env
+    # every module loaded at context creation (no lazy-load allocation after the first tick: the free-memory checks
+    # compare ticks exactly); a test that cannot find the encoder's session fails instead of skipping
+    export CUDA_MODULE_LOADING=EAGER FHE_SSM_REQUIRE_DEVICE=1
     r="$OUT/diag_tests"; mkdir -p "$r"
-    cap=$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader -i "$GPU" 2>/dev/null | head -1 | tr -d '.')
-    export PERSEUS_CORE_ARCH=${PERSEUS_CORE_ARCH:-${cap:-120}} CUDA_HOME=${CUDA_HOME:-/usr/local/cuda-13.2}
-    export PATH="$CUDA_HOME/bin:$PATH"
-    dstep() {   # dstep <name> <cmd...>: run in the checkout on $GPU, log to $r/<name>.log, stop on failure
-        local name=$1; shift
+    only=${DIAG_ONLY:-}
+    if [ -z "$only" ]; then
+        only=1,2,3; [ "${DIAG_E:-0}" = 1 ] && only="$only,e"; [ "${DIAG_F:-0}" = 1 ] && only="$only,f"
+    fi
+    want() { case ",$only," in *",$1,"*) return 0 ;; *) return 1 ;; esac; }
+    skip_done() {   # skip_done <name>: true (and logged) when the step passed before and DIAG_RERUN is not 1
+        [ -f "$r/$1.passed" ] && [ "${DIAG_RERUN:-0}" != 1 ] && { log "diag-tests $1: passed before ($r/$1.passed; DIAG_RERUN=1 reruns)"; return 0; }
+        return 1
+    }
+    dfail() {   # dfail <name> <message>: the failing lines of the step's log, then stop
+        grep -E 'FAILED|panicked at|Error|error\[' "$r/$1.log" 2>/dev/null | head -20 | tee -a "$OUT/session.log"
+        die "diag-tests $1: $2 ($r/$1.log)"
+    }
+    dstep() {   # dstep <name> <ERE the log must hold> <cmd...>: run in the checkout on $GPU, log to $r/<name>.log
+        local name=$1 expect=$2; shift 2
         log "diag-tests $name: $*"
         ( cd "$W" && env CUDA_VISIBLE_DEVICES="$GPU" PYTHONPATH="$W/python" "$@" ) > "$r/$name.log" 2>&1
         local rc=$?
         tail -4 "$r/$name.log" | tee -a "$OUT/session.log"
-        [ $rc = 0 ] || die "diag-tests $name: exit $rc ($r/$name.log)"
+        [ $rc = 0 ] || dfail "$name" "exit $rc"
+        grep -qE "$expect" "$r/$name.log" || dfail "$name" "exit 0 but no line matching '$expect' (a skipped or deselected test passes nothing)"
+        touch "$r/$name.passed"
     }
-    # 1. the kernels against host references: every encode_many / diag_gather line of every built instance at 0
-    log "diag-tests 1_selftest: cargo run --release -p pc-kernels --bin pc-kernels-selftest -- --no-bench"
-    ( cd "$W" && CUDA_VISIBLE_DEVICES="$GPU" cargo run --release -p pc-kernels --bin pc-kernels-selftest -- --no-bench ) > "$r/1_selftest.log" 2>&1
-    n=$(grep -cE "\| (encode_many|diag_gather)" "$r/1_selftest.log"); ok=$(grep -cE "\| (encode_many|diag_gather).*\| +0 mismatches" "$r/1_selftest.log")
-    grep -E "\| (encode_many|diag_gather)" "$r/1_selftest.log" | tee -a "$OUT/session.log"
-    [ "$n" -gt 0 ] && [ "$n" = "$ok" ] || die "diag-tests 1_selftest: $ok of $n encode_many / diag_gather checks at 0 mismatches ($r/1_selftest.log)"
-    # 2. (a) generated rows == eager DeviceFft of the host vector, (b) encode_many == single encodes, (c) fused sum == store loop
-    dstep 2_crates_abc cargo test --release -p pc-program --features gpu --test diag_gen_gpu -- --ignored --test-threads=1 \
-        --nocapture --skip f_device_ms_per_plaintext
-    # 3. the session's probe against the port's oracle (a, b) and one block against the exact forward (d)
-    dstep 3_port_abd "$PY" -m pytest -q -p no:cacheprovider -m gpu python/perseus/examples/fhe_ssm/tests/test_diag_gpu.py \
-        -k "not model_shape"
-    if [ "${DIAG_E:-0}" = 1 ]; then   # 5. (e) the model shape on the ref arm's stock plan (after smoke-diag, step 4)
-        resolve_data
-        p="$OUT/bootstrap_placements/plan_ref"; [ -f "$p/PLAN_CMD.txt" ] || die "diag-tests (e): no plan $p (run_gpu.sh capture ref; plan ref)"
-        dstep 5_port_e env FHE_SSM_DATA="$(dirname "$WEIGHTS")" FHE_SSM_PLAN="$p" FHE_SSM_E_OUT="$r/5_model_shape.json" \
-            "$PY" -m pytest -q -p no:cacheprovider -m gpu python/perseus/examples/fhe_ssm/tests/test_diag_gpu.py -k model_shape
+    PYT=("$PY" -m pytest -q -rs -x -p no:cacheprovider -m gpu python/perseus/examples/fhe_ssm/tests/test_diag_gpu.py)
+    # 1. the kernels against host references, every built instance (the default w32 build: u32 x Barrett64 and
+    #    Barrett32, both with NTT): exit 0, the final "total mismatches 0" line, and per instance 3 encode, 4 encode_many
+    #    and 2 diag_gather lines, every one at 0 mismatches (encode's lines are the refactored kernels' own host check)
+    if want 1 && ! skip_done 1_selftest; then
+        log "diag-tests 1_selftest: cargo run --release -p pc-kernels --bin pc-kernels-selftest -- --no-bench"
+        ( cd "$W" && CUDA_VISIBLE_DEVICES="$GPU" cargo run --release -p pc-kernels --bin pc-kernels-selftest -- --no-bench ) > "$r/1_selftest.log" 2>&1
+        rc=$?
+        L="$r/1_selftest.log"
+        grep -E '\| (encode |encode_many |diag_gather )' "$L" | tee -a "$OUT/session.log"
+        inst=$(grep -cE '^\[selftest\] [^|]*: [0-9]+ checks, [0-9]+ mismatches$' "$L")
+        nenc=$(grep -cE '\| encode [^|]*\| +[0-9]+ mismatches' "$L"); nem=$(grep -cE '\| encode_many [^|]*\| +[0-9]+ mismatches' "$L")
+        ndg=$(grep -cE '\| diag_gather [^|]*\| +[0-9]+ mismatches' "$L")
+        bad=$(grep -E '\| (encode |encode_many |diag_gather )' "$L" | grep -cvE '\| +0 mismatches of')
+        [ $rc = 0 ] || dfail 1_selftest "exit $rc"
+        grep -qE '^\[selftest\] instances .*: total mismatches 0$' "$L" || dfail 1_selftest "no final 'total mismatches 0' line"
+        [ "$inst" -ge 1 ] && [ "$nenc" = $((3 * inst)) ] && [ "$nem" = $((4 * inst)) ] && [ "$ndg" = $((2 * inst)) ] && [ "$bad" = 0 ] \
+            || dfail 1_selftest "$inst instance(s): $nenc encode, $nem encode_many, $ndg diag_gather lines (want 3, 4, 2 each), $bad not at 0"
+        touch "$r/1_selftest.passed"
     fi
-    if [ "${DIAG_F:-0}" = 1 ]; then   # 6. (f) device ms per plaintext at B = 1, 32, 128 and 18 / 10 limbs
-        dstep 6_crates_f cargo test --release -p pc-program --features gpu --test diag_gen_gpu -- --ignored --exact \
-            f_device_ms_per_plaintext --nocapture
+    # 2. (a) generated rows == eager DeviceFft of the host vector, (b) encode_many == single encodes, (c) fused sum == store loop
+    if want 2 && ! skip_done 2_crates_abc; then
+        dstep 2_crates_abc 'test result: ok\. 3 passed' cargo test --release -p pc-program --features gpu --test diag_gen_gpu -- \
+            --ignored --test-threads=1 --nocapture --skip f_device_ms_per_plaintext
+    fi
+    # 3. the session's probe against the port's oracle (a, b), one block against the exact forward (d), the negative
+    #    control (a perturbed tile must leave the tolerance), chunks of 1 and 128
+    if want 3 && ! skip_done 3_port_abd; then
+        dstep 3_port_abd '(^| )3 passed' "${PYT[@]}" -k "not model_shape"
+    fi
+    # e. the whole model, 2 ticks on the ref arm's whole-model stock plan (never the BLOCKS=1 smoke's plan_ref_b1)
+    if want e && ! skip_done 5_port_e; then
+        resolve_data
+        p="$OUT/bootstrap_placements/plan_ref"
+        [ -f "$p/PLAN_CMD.txt" ] || die "diag-tests (e): no whole-model plan $p (run_gpu.sh capture ref; run_gpu.sh plan ref, without BLOCKS)"
+        wcap=$(BLOCKS=; capname ref)
+        g=$(sed -n 's/^graph=\([^ ]*\).*/\1/p' "$p/PLAN_CMD.txt")
+        [ "$(basename "$g")" = "$wcap" ] || die "diag-tests (e): $p was cut on $(basename "$g"), not the whole-model capture $wcap"
+        nb=$(ls "$p"/block_*_placement.json 2>/dev/null | wc -l | tr -d ' ')
+        [ "$nb" -ge 25 ] || die "diag-tests (e): $p holds $nb block plans; the model has 25 stages"
+        dstep 5_port_e '(^| )1 passed' env FHE_SSM_WEIGHTS="$WEIGHTS" FHE_SSM_SEEDS="$SEEDS" FHE_SSM_CONFIG="$CONFIG" \
+            FHE_SSM_PLAN="$p" FHE_SSM_E_OUT="$r/5_model_shape.json" "${PYT[@]}" -k model_shape
+    fi
+    # f. device ms per plaintext at B = 1, 32, 128 and 18 / 10 limbs
+    if want f && ! skip_done 6_crates_f; then
+        dstep 6_crates_f 'test result: ok\. 1 passed' cargo test --release -p pc-program --features gpu --test diag_gen_gpu -- \
+            --ignored --exact f_device_ms_per_plaintext --nocapture
         grep "\[diag_gen\] (f)" "$r/6_crates_f.log" | tee -a "$OUT/session.log"
     fi
-    log "diag-tests: passed ($r); $(build_id)" ;;
+    log "diag-tests: steps $only passed ($r); $(build_id)" ;;
 smoke-diag)
-    export BLOCKS=1 DIAG_SOURCE=generated
+    export BLOCKS=1 DIAG_SOURCE=generated KEYS=${KEYS:-inproc}
+    log "smoke-diag: KEYS=$KEYS (a contact test; inproc = in-process keys, recorded insecure-inproc)"
     bash "$0" capture ref && bash "$0" plan ref && bash "$0" run ref ;;
 matrix)
     [ $# -gt 0 ] || set -- ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24 pcmm24 best
@@ -317,5 +372,5 @@ matrix)
         bash "$0" capture "$a" && bash "$0" plan "$a" && bash "$0" "$last" "$a" || log "arm $a stopped (above); continuing"
     done ;;
 *)
-    sed -n '2,41p' "$0"; exit 2 ;;
+    sed -n '2,45p' "$0"; exit 2 ;;
 esac
