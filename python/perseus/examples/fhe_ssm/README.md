@@ -501,6 +501,14 @@ the registered folded matrices; one block and the model against the exact forwar
 the tolerance). `run_planned` takes `--diag-batch` (the chunk), `--diag-probe K` (the probe after setup, recorded in
 `setup.diag_probe`) and, for that negative control only, `--diag-perturb TILE:FACTOR` (the tile uploaded scaled, the
 exact forward unchanged); the record carries `setup.diag` and each tick's `diag` counters.
+Environment the GPU tests and the driver read: `FHE_SSM_REQUIRE_DEVICE=1` makes `tests/test_diag_gpu.py` fail
+instead of skipping when the `perseus._pc` build has no `Session.register_tile` (`diag-tests` exports it, so a step
+cannot pass with no test run); `FHE_SSM_WEIGHTS` / `FHE_SSM_SEEDS` / `FHE_SSM_CONFIG` and `FHE_SSM_PLAN` (the
+model's files and its whole-model stock plan) select the model-shape test (e), which writes its record to
+`FHE_SSM_E_OUT` (default: pytest's temporary directory); `FHE_SSM_COMPILE_CHECK` points the CPU build of the driver
+at a `compile_check` binary other than the one `tools/fhe_ssm/compile_check/build.sh` builds (`planned.py`
+`default_check_bin`). `run_gpu.sh` sets all of them from `DATA` / `OUT`; by hand they are set as `run_gpu.sh`'s
+`diag-tests` step shows.
 
 ## Upstream APIs this package depends on (at d97a6f7)
 
