@@ -6,7 +6,9 @@ The linear is ``perseus.impl.prefill.DiagLinear`` (``b`` baby rotations by ``j*t
 ``g*b*t``, ``b*g = d`` products per ``d x d`` block). ``DiagLinear.slot_vectors`` materializes every plaintext
 (1.07 GB per ``1024 x 4096`` matrix at ring 2^16), so ``encode_diag`` hands it ``LazyDiagonals``, one giant
 group on read; ``apply_diag`` is ``prefill.diag_apply`` with the input hint's headroom as a parameter (2
-upstream's, 1 the fork's reference circuit). README.md has the derivation.
+upstream's, 1 the fork's reference circuit). ``diag_slot_index`` / ``diag_gather_reference`` are the device
+diagonal encoder's index arithmetic in numpy; ``mult_diag_sum`` is the one call per ``(m, gg)`` group (a session's
+hook, ``diaggen``, or ``DiagLinear._sum``). README.md has the derivations.
 """
 
 from __future__ import annotations
@@ -102,6 +104,63 @@ class LazyDiagonals:
         return np.stack([np.stack([self[m, gg] for gg in range(self.g)]) for m in range(self.n_out)])
 
 
+def diag_slot_index(v, n: int, m: int, gg: int, jj: int, B: int, t: int):
+    """``(row, col)`` in the ``(d_in, d_out)`` matrix of the element slot ``v`` of plaintext ``(n, m, gg, jj)`` holds
+    (``DiagLinear.slot_vectors``: ``np.roll(np.repeat(blk[(i + k) % B, i], t), gg b t)``, ``k = gg b + jj``, ``blk``
+    the ``(n, m)`` block). The roll moves elements to higher indices, so slot ``v`` reads element ``v - gg b t`` of the
+    repeated diagonal: ``i = ((v - gg b t) mod n_slots) // t``, row ``n B + ((i + k) mod B)``, col ``m B + i``; the
+    first mod is a mask (``n_slots = B t`` a power of two), the second one conditional subtract (``i + k < 2 B``).
+    ``v`` an int or an integer array; the kernel's arithmetic (crates/pc-program/src/compile/diag.rs
+    ``TileInfo::slot``)."""
+    b, _g = DiagLinear.split(B)
+    n_slots = B * t
+    if n_slots & (n_slots - 1):
+        raise ValueError(f"n_slots = B t = {n_slots} is not a power of two")
+    v = np.asarray(v, dtype=np.int64)
+    i = ((v - gg * b * t) & (n_slots - 1)) // t
+    r = i + gg * b + jj
+    r = np.where(r >= B, r - B, r)
+    return n * B + r, m * B + i
+
+
+def diag_gather_reference(W, n_slots: int, t: int, jobs):
+    """The slot vectors of plaintexts ``jobs`` = ``[(n, m, gg, jj), ...]`` of the ``(d_in, d_out)`` matrix ``W``:
+    ``(len(jobs), n_slots)`` float64, each element read from ``W`` at ``diag_slot_index`` (no rolling, no repeat:
+    one gather per slot, as the device does it). Equals ``LazyDiagonals(W, n_slots, t)[m, gg][n, jj]`` bit for bit."""
+    W = np.asarray(W, dtype=np.float64)
+    B = n_slots // t
+    v = np.arange(n_slots)
+    out = np.empty((len(jobs), n_slots))
+    for q, (n, m, gg, jj) in enumerate(jobs):
+        r, c = diag_slot_index(v, int(n), int(m), int(gg), int(jj), B, t)
+        out[q] = W[r, c]
+    return out
+
+
+def group_jobs(lin: DiagLinear, m: int, gg: int) -> list[tuple[int, int, int, int]]:
+    """The ``(n, m, gg, jj)`` of one ``(m, gg)`` group in the order ``DiagLinear._sum`` reads its terms (n outer, jj
+    inner: term ``k = n b + jj``)."""
+    return [(n, m, gg, jj) for n in range(lin.n_in) for jj in range(lin.b)]
+
+
+def diag_name(lin: DiagLinear, n: int, m: int, gg: int, jj: int) -> str:
+    """A generated diagonal's plaintext name, ``<linear>#<n>.<m>.<gg>.<jj>`` (the compiler's ``PtForm::DiagGen``)."""
+    if not lin.name or "#" in lin.name:
+        raise ValueError(f"a generated diagonal needs its linear's name (b<b>.<kind>), got {lin.name!r}")
+    return f"{lin.name}#{n}.{m}.{gg}.{jj}"
+
+
+def mult_diag_sum(ops, xs, lin: DiagLinear, m: int, gg: int):
+    """``sum_{n, jj} P[n, m, gg, jj] * xs[n][jj]``, one call per ``(m, gg)`` group: the session's ``mult_diag_sum``
+    hook when it has one (``diaggen.use_source``: the fake builds the vectors with ``diag_gather_reference``, the
+    capture recorder records generated diagonals), else ``DiagLinear._sum`` (the values: ``pts[m, gg]`` through
+    ``ops.mult_pt_sum``), unchanged."""
+    hook = getattr(ops.inf, "mult_diag_sum", None)
+    if hook is None:
+        return lin._sum(ops, xs, m, gg)
+    return hook(ops, [x for xn in xs for x in xn], lin, m, gg)
+
+
 def encode_diag(W, N: int, t: int, name: str | None = None) -> DiagLinear:
     """A ``(d_in, d_out)`` matrix as a ``DiagLinear`` over lazy diagonals (``LazyDiagonals``)."""
     pts = LazyDiagonals(W, N, t)
@@ -131,7 +190,7 @@ def apply_diag(rt, Xs, lins, hint: int = 1):
         for m in range(lin.n_out):
             acc = None
             for gg in range(lin.g):
-                tmp = lin._sum(ops, xs, m, gg)
+                tmp = mult_diag_sum(ops, xs, lin, m, gg)
                 if gg:
                     tmp = ops.rotate(tmp, gg * lin.b * d.t)
                 if acc is None:

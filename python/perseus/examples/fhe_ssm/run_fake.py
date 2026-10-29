@@ -4,7 +4,8 @@
     python -m perseus.examples.fhe_ssm.run_fake --weights W.npz --seeds S.json --config C.json \\
         --tokens 2 --blocks 24 [--newton-form ...] [--newton-sites ...] [--pack-stats ...] [--linear ...]
         [--pcmm-wbits ...] [--lane-mix ...] [--diag-hint ...] [--levels ...] [--rules ...] [--layout ...]
-        [--payload ...] [--pair-route ...] [--conversations N] [--capture DIR [--capture-tick 1]] [--out F]
+        [--payload ...] [--pair-route ...] [--conversations N] [--diag-source values|generated]
+        [--capture DIR [--capture-tick 1]] [--out F]
 
 Per tick: the reply's relative RMS error against the mirror and the exact forward, the refreshes (reactive /
 hints / carry / PCMM, and by step), the op counts, the levels. ``--capture DIR`` runs on the capture recorder
@@ -31,7 +32,7 @@ import numpy as np
 import perseus
 from perseus.impl import fake, fakecap
 
-from . import fakes
+from . import diaggen, fakes
 from . import scales as scales_mod
 from .block import PACK_STATS
 from .geometry import LINEARS, PCMM_WBITS, ROUTES
@@ -205,12 +206,15 @@ def run(
     linear="diagonal",
     diag_hint=1,
     pcmm_wbits=16,
+    diag_source="values",
     capture=None,
     capture_tick=1,
     log=print,
 ):
     """``token_ids``: ``(ticks, conversations)`` (or ``(ticks,)`` for one conversation);
-    ``scales``: the power-of-two folds per block (scales.py), or None; ``capture``: a graph dir."""
+    ``scales``: the power-of-two folds per block (scales.py), or None; ``capture``: a graph dir; ``diag_source``:
+    where the diagonal linears' plaintexts come from (``diaggen``: values, or generated from the matrices with the
+    device's index arithmetic, the same op stream)."""
     ids = np.asarray(token_ids)
     ids = ids[:, None] if ids.ndim == 1 else ids
     lim, land = fakes.level_preset(levels)
@@ -242,6 +246,7 @@ def run(
     if not 1 <= n <= model.capacity:
         raise ValueError(f"{n} conversations for a capacity of {model.capacity}")
     _rot_band(fhe, model)
+    diaggen.use_source(inf, diag_source)
     if capture is not None:
         os.environ[CAPTURE_TOKEN] = str(int(capture_tick))
         model.set_capture(str(capture))
@@ -301,6 +306,7 @@ def run(
         "payload": payload if layout == "filled" else "real",
         "pair_route": pair_route if complex_payload else None,
         "axes": model.axes(),
+        "diag_source": diag_source,
         "scales": None if scales is None else [dataclasses.astuple(x) for x in scales[: model.n_layers]],
         "capacity": model.capacity,
         "conversations": n,
@@ -389,6 +395,13 @@ def main(argv=None):
         choices=LANE_MIX,
         help="random = the cost-only lane-mixing term per block (no trained kernel: counts only)",
     )
+    ap.add_argument(
+        "--diag-source",
+        default="values",
+        choices=diaggen.SOURCES,
+        help="the diagonal linears' plaintexts: values (slot vectors) or generated (gathered from the matrices with the "
+        "device encoder's index arithmetic; a capture records them as generated diagonals, the same op stream)",
+    )
     ap.add_argument("--ms-norm-k", type=float, default=5.5, help="sigma = -K b / a (--ms-norm)")
     ap.add_argument(
         "--newton-frac",
@@ -445,6 +458,7 @@ def main(argv=None):
         linear=a.linear,
         diag_hint=a.diag_hint,
         pcmm_wbits=a.pcmm_wbits,
+        diag_source=a.diag_source,
         capture=a.capture,
         capture_tick=a.capture_tick,
     )

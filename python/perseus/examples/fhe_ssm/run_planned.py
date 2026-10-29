@@ -3,7 +3,7 @@
 
     python -m perseus.examples.fhe_ssm.run_planned --weights W --seeds S --config C [--levels preset] [axis flags]
         --plan DIR --ticks T [--tokens tokens.json [--free-run]] [--schedule program|siblings] [--profile]
-        --keys inproc|bundle|DIR | --insecure-test-keys --out record.json
+        [--diag-source values|generated] --keys inproc|bundle|DIR | --insecure-test-keys --out record.json
     ... --prepare-only [--lean]          the CPU part: record the twin, compile (check) against the plan, no session
     ... --keyspec [FILE]                 the key request: the model's needs, and the session's on the device build
     ... --keygen DIR --keyspec-file F    the client role: a secret and the bundle DIR/keys.pckb for a key request
@@ -33,7 +33,7 @@ from perseus import config
 from perseus._paths import resolve
 from perseus.plan import contract
 
-from . import fakes, run_fake
+from . import diaggen, fakes, run_fake
 from . import scales as scales_mod
 from .block import PACK_STATS
 from .decode import FreeRun, Policy, prompt_lengths, streams_from_record
@@ -392,6 +392,14 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--seed", type=int, default=7, help="the random tokens' seed")
     g.add_argument("--schedule", default="program", choices=SCHEDULES, help="Program.compile's schedule")
     g.add_argument(
+        "--diag-source",
+        default="values",
+        choices=diaggen.SOURCES,
+        help="where the diagonal linears' plaintexts come from: values = resident store plaintexts (the PCMM arms "
+        "only fit); generated = built on the device inside each group's fused sum from the declared tiles (the device "
+        "diagonal encoder). A driver flag: the capture and the plan are shared by both",
+    )
+    g.add_argument(
         "--profile",
         action="store_true",
         help="a device fence after every stage: stage walls (an attribution)",
@@ -505,6 +513,7 @@ def make_twin(a):
         linear=a.linear, diag_hint=a.diag_hint, pcmm_wbits=a.pcmm_wbits,
     )  # fmt: skip
     run_fake._rot_band(fhe, model)
+    diaggen.use_source(inf, a.diag_source)
     twin_cfg = fakes.runtime_config(limit, bts_out, a.unit)
     return params, model, twin_cfg, {"limit": limit, "bts_out": bts_out, "unit": a.unit, "scales": a.scales}
 
@@ -545,9 +554,38 @@ def session_config(plan: str):
     return cfg
 
 
+def sum_census(run: PlannedSsmRun) -> dict:
+    """The fused sums the programs hold: per source the count and the term-count histogram (the compile check's
+    ``sums`` row on the CPU build, ``Program.coeff_sums`` / ``diag_sums`` on the device build)."""
+    out: dict[str, Any] = {"diag": 0, "stream": 0, "diag_terms": {}, "stream_terms": {}, "per_program": {}}
+    for lab, p in run.progs.items():
+        row = getattr(p, "row", None)
+        if isinstance(row, dict) and "sums" in row:
+            sm = row["sums"]
+            hist = {
+                src: {int(k): int(v) for k, v in sm[f"{src}_terms"].items()} for src in ("diag", "stream")
+            }
+        else:
+            hist = {}
+            for src, terms in (
+                ("diag", getattr(p, "diag_sums", [])),
+                ("stream", getattr(p, "coeff_sums", [])),
+            ):
+                h: dict[int, int] = {}
+                for k in terms:
+                    h[int(k)] = h.get(int(k), 0) + 1
+                hist[src] = h
+        for src in ("diag", "stream"):
+            out[src] += sum(hist[src].values())
+            for k, v in hist[src].items():
+                out[f"{src}_terms"][k] = out[f"{src}_terms"].get(k, 0) + v
+        out["per_program"][lab] = sum(hist["diag"].values()) + sum(hist["stream"].values())
+    return out
+
+
 def prepare_report(run: PlannedSsmRun) -> dict:
     """What the CPU part established: the compile's verdict per program, the registers, the carried names, the
-    static-stream check, the plaintext budget, the PCMM declarations."""
+    static-stream check, the plaintext budget, the fused sums, the diagonal tiles, the PCMM declarations."""
     progs = run.program_report()
     errors = {lab: p["check"][1] for lab, p in progs.items() if p["check"] and p["check"][0]}
     rep = {
@@ -562,11 +600,19 @@ def prepare_report(run: PlannedSsmRun) -> dict:
         "static_stream": run.static,
         "carried": {str(b): names for b, names in run.kv_names().items()},
         "plaintexts": run.plaintext_budget(),
+        "diag_source": run.diag_source,
+        "sums": sum_census(run),
         "prepare_s": round(run.prepare_s, 1),
         "rotation_steps": sorted({int(s) for p in run.progs.values() for s in p.rot_steps()}),
     }
     if run.pcmm_specs():
         rep["pcmm"] = {"declared": [s[0] for s in run.pcmm_specs()], **run.check_pcmm_names()}
+    tiles = run.diag_tiles()
+    if tiles:
+        rep["diag_tiles"] = {
+            "n": len(tiles),
+            "bytes": sum(8 * d_in * d_out for d_in, d_out, _t in tiles.values()),
+        }
     return rep
 
 
@@ -609,6 +655,16 @@ def main(argv=None) -> int:
         raise SystemExit(
             "a device run needs the GPU build of perseus._pc (Session, Program); the CPU build runs --prepare-only / --keyspec"
         )
+    if (
+        device
+        and mode in ("run", "keyspec")
+        and a.diag_source == "generated"
+        and not hasattr(_pc.Session, "register_tile")
+    ):
+        raise SystemExit(
+            "--diag-source generated: this build of perseus._pc has no device diagonal encoder (Session.register_tile, "
+            "Session(diag_tiles=...)); --diag-source values runs the PCMM arms"
+        )
     log = lambda m: print(m, flush=True)
     plan = str(resolve(a.plan))
     lines = plan_cmd_lines(plan)
@@ -637,7 +693,7 @@ def main(argv=None) -> int:
     run = PlannedSsmRun(
         SsmRecorder(model, model.n_layers, lean=a.lean and mode != "run"), plan, cfg, labels, keys, model=model,
         conversations=n, work_dir=work, schedule=a.schedule, bundle=None if bundle is None else bundle / "keys.pckb", client=client,
-        pcmm_cf=a.pcmm_cf, profile=a.profile, profile_every=a.profile_every, ref_token=a.ref_token, probe=a.probe,
+        pcmm_cf=a.pcmm_cf, diag_source=a.diag_source, profile=a.profile, profile_every=a.profile_every, ref_token=a.ref_token, probe=a.probe,
         pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool, log=log,
     )  # fmt: skip
     needs = key_needs(model)
@@ -659,6 +715,7 @@ def main(argv=None) -> int:
             for k in ("weights", "seeds", "config")
         },
         "axes": model.axes(),
+        "diag_source": a.diag_source,
         "levels": levels,
         "conversations": n,
         "capacity": model.capacity,
@@ -706,8 +763,8 @@ def main(argv=None) -> int:
         raise SystemExit(
             f"--linear {a.linear}: the programs read {budget['plaintexts']} distinct plaintexts, resident at "
             f"{budget['rows']} rows each = {budget['bytes'] / GiB:.1f} GiB (PlannedRun keeps one slot per plaintext); "
-            f"over --pt-budget-gb {a.pt_budget_gb}. The diagonal linears need the streamed-weights path or the device "
-            "diagonal encoder (README.md); the PCMM arms run resident"
+            f"over --pt-budget-gb {a.pt_budget_gb}. The diagonal linears run on the device diagonal encoder "
+            "(--diag-source generated: no store slot per diagonal; README.md); the PCMM arms run resident"
         )
     if bundle is not None:
         header["keys"]["bundle_info"] = check_bundle(bundle, cfg, needs)
@@ -724,6 +781,7 @@ def main(argv=None) -> int:
         "rotation_keys": list(run.rot_keys),
         "registers": run.n_regs,
         "pcmm_uploaded": list(run.uploaded),
+        "diag_tiles_uploaded": len(run.tiles_uploaded),
         "has_secret": bool(run.sess.has_secret),
         "profile": "a device fence after every stage on the fenced ticks: stage walls are attributions, not the production wall"
         if a.profile

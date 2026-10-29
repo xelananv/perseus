@@ -82,6 +82,7 @@ weights, seeds, config and scales. The times are the fake's own and say nothing 
 | `--pcmm-wbits` | `16`, `24` | PCMM's integer weight width (2 or 3 int8 digit planes) |
 | `--diag-hint` | `1`, `2` | headroom (product units) of the diagonal linear's input hint: 1 = the reference circuit (the fork's: a `headroom(1)` hint, the linear's one product fits under the ceiling); 2 = upstream's `diag_apply` headroom rule (the input refreshed one level earlier) |
 | `--lane-mix` | `off`, `random` | the cost-only lane-mixing term per block (`lanemix.py`); no trained kernel, so count only |
+| `--diag-source` | `values`, `generated` | where the diagonal linears' plaintexts come from (`diaggen.py`): slot vectors, or gathered from the matrices with the device encoder's index arithmetic (the fake: the same reply bit for bit; the capture: the same graph but each diagonal's `args.pt`). A driver flag (`run_fake`, `run_planned`): captures and plans are shared; "The device diagonal encoder" below |
 | `--levels` | `fork`, `preset` | ceiling / landing: 46 / 34 (the fork's session, whose fake counts its C++ GPU runs reproduced), or the n32 GPT-2 preset's 44 / 32 (this runtime's); `--limit`, `--bts-out` override |
 | `--rules` | `runtime`, `stock` | the fake's level rules: the runtime's (the Shadow's `fakecap` mode) or `perseus.impl.fake` as shipped (a rescale charged at once: refreshes one product earlier) |
 | `--layout`, `--payload`, `--pair-route` | `filled`/`decode`, `pairs`/`real`, `split`/`lane` | 64 conversations as split pairs (default), 64 lane-wise, 32 real, or one sequence in the cachemir decode packing |
@@ -126,9 +127,10 @@ vector — 1.07 GB for one `1024 x 4096` matrix, 3.75 GB per block — so `encod
 as a parameter: the default, 1, is the reference circuit (the fork's: a `headroom(1)` hint before each
 linear, the linear's one product fitting under the ceiling); 2 is upstream's rule (the input refreshed one
 level earlier), and at 2 the copy records `diag_apply`'s op stream exactly (tested). The call to
-`DiagLinear._sum` is the port's one use of an upstream private; the identity test guards it. Weights are
-streamed (unkeyed `mult_pt_sum`: nothing cached on the fake; on a device `DiagLinear.encode(pinned=…)` and
-`mult_coeff_sum` encode them there).
+`DiagLinear._sum` is the port's one use of an upstream private; the identity test guards it. Each `(m, gg)` group
+goes through `filling.mult_diag_sum`, which is `DiagLinear._sum` unless the session carries a `mult_diag_sum` hook
+(`--diag-source generated`, below). Weights are streamed (unkeyed `mult_pt_sum`: nothing cached on the fake); on a
+device the diagonals are generated inside each group's fused sum (the device diagonal encoder, below).
 
 **PCMM** (`impl.pcmm`). `Shape(t)` is pinned to `N = 2^16` (`pcmm.py:13-14, 29-41`): nch = 16 · (4096 / 2t)
 = 1,024 channels at t = 32, so one port ciphertext is exactly one PCMM block and a matrix must be whole
@@ -285,12 +287,15 @@ Two independent ways on edge cases (`tests/`; `VERIFICATION` of the fork, carrie
 | PCMM | 1→1, 1→4, 4→1 at d = 1,024; 16 and 24 bits; trunk and all | `x @ W_q` bitwise | `x @ W`; the quantized mirror vs the plain one; the external refreshes; the keys; the refusals | `test_pcmm.py`, `test_axes.py` |
 | lane mix | the no-source lanes; a wrong t | slots vs rows (5e-15) | the count formulas; the band | `test_axes.py` |
 | the capture | every stage at tick 1 only | the graphs' op census equals the fake's counts | the carried-state names; the refreshes and levels equal the fake's | `test_capture.py` |
+| `--diag-source generated` | every plaintext of 1→1, 1→4, 4→1 at the synthetic shape; 64 random jobs at 2^15 slots, B = 1,024 | `LazyDiagonals`, `DiagLinear.slot_vectors`, one element by hand | the fake's reply bit-identical to `values` (a flipped roll breaks it); the capture equal to the values capture but `args.pt`; the stock plan binds with one sum per group and 808 launches fewer per block | `test_diag_source.py` |
 | the driver | the four arms; the axes in the report; refusals | the errors it computes | its counts against independent tallies; the hashes | `test_run_fake.py` |
 | the scale folds | exponents 0, mid, 14; brute force | bit-for-bit factors | the whole model with folds vs the mirror and the unfolded closed form | `test_scales.py` |
 
 156 tests (140 at the synthetic shape, 16 marked `slow_shape` at ring 2^16), plus the planned driver's: 14
 CPU (`tests/test_planned_contract.py`, one of them `slow_shape`: a 1-block PCMM capture at the model's width
-planned and bound) and 3 marked `gpu` (`tests/test_planned_gpu.py`, skipped without the device build). The
+planned and bound) and 3 marked `gpu` (`tests/test_planned_gpu.py`, skipped without the device build); the
+device diagonal encoder's CPU half adds 14 (`tests/test_diag_source.py`). The whole light suite
+(`-m "not slow_shape and not gpu"`) is 184 tests, the `slow_shape` set 19. The
 fork's tests of its GPU runner, planner wrapper, Colab build and tick meter are not carried over: those modules
 belong to the fork's C++ runtime; on this branch the device path is `impl.driver.PlannedRun` (below). Two
 further checks run at the model's shape with the published checkpoint (`tests/test_model_shape.py`, skipped
@@ -385,13 +390,14 @@ md5 (`PLAN_CMD.txt`'s `graph=` line) differs from the capture at hand (`--captur
 own path when it exists). A plan stamped under another Config than the twin's (another `--levels`). A
 plan whose Config names a chain other than n32 (`CHAIN_PRESET` on its `runtime=` line, e.g. the lean
 n32a4: the session, its shadow and its key manifest would build that chain, while the model's plaintext
-rows and levels are n32's; `run_planned.session_config`). A model whose stream is not static (never this model). **Diagonal linears on the device path**
-(`--linear diagonal` and `pcmm-trunk`): `PlannedRun` keeps one resident plaintext slot per distinct
-plaintext (`pt_slots = len(pt_levels) + 8`, `driver.py:731`; a slot is `pt_rows` rows of N 32-bit words, 7
-MiB at 28 rows) and the reference circuit reads 344,064 diagonal plaintexts per tick (about 2.3 TiB), so
-the driver refuses above `--pt-budget-gb` (40) with the count; the streamed-weights path
-(`StreamedPlannedRun`, `Session(streams=)`, `CoeffSum`) or the device diagonal encoder is separate work.
-The `--linear pcmm` arms are resident (about 1,200 per-channel constants per tick) and run.
+rows and levels are n32's; `run_planned.session_config`). A model whose stream is not static (never this model). **Diagonal linears on the device path under
+`--diag-source values`** (`--linear diagonal` and `pcmm-trunk`): `PlannedRun` keeps one resident plaintext
+slot per distinct plaintext (`pt_slots = len(pt_levels) + 8`, `driver.py:731`; a slot is `pt_rows` rows of N
+32-bit words, 7 MiB at 28 rows) and the reference circuit reads 344,064 diagonal plaintexts per tick (about
+2.3 TiB), so the driver refuses above `--pt-budget-gb` (40) with the count; `--diag-source generated` runs
+them on the device diagonal encoder (below). `--diag-source generated` on a device build without the
+encoder (`Session.register_tile`). The `--linear pcmm` arms are resident (about 1,200 per-channel
+constants per tick) and run.
 
 **What the CPU verifies and what is GPU-only.** On the CPU-only `perseus._pc` (no `Session` /
 `Program`), `--prepare-only` records the twin, writes the reference stream as a graph dir and compiles it
@@ -415,6 +421,62 @@ capture's node count), 637 refresh sites, 0 check errors, 0 dynamic steps, 73 re
 footprint. A PCMM arm records with values on every path (`impl.pcmm`'s fake computes its products on the
 slot vectors).
 
+## The device diagonal encoder
+
+Under `--diag-source values` every diagonal plaintext is a `PtStore` slot: 14 tiles x 1,024 diagonals = 14,336 per
+block, 344,064 per tick, each (54 - level) rows of 2^16 32-bit words: 70.0 GiB per block at 20 rows, 2.30 TiB at the
+driver's 28 [derived; `BATCH3_ENCODER_BRIEF_20261029.md` §0-1 in the research record]. No store policy fixes that:
+the keys are per plaintext. Upstream's answer for its streamed GPT-2 weights is the fused op `CoeffSum` (the twin
+records the loop `mult` + `add_inplace` over named rows, `examples/llama/model.py` `stream_sum_recorder`; the compiler
+fuses it, `crates/pc-program/src/compile/stream.rs`; the device expands float32 rows inside the op). The encoder is
+that op's sibling: the plaintext's source is the linear's float64 matrix resident on the device (the tile) instead
+of host rows, and each diagonal is gathered from it, encoded and multiplied inside the sum. Bytes over PCIe per tick:
+none; device memory: the tiles (24 x 14 x 1,024^2 x 8 B = 2.625 GiB; 1.5 GiB on `pcmm-trunk`) and a scratch of at
+most 128 plaintexts in flight.
+
+**The contract.** A generated plaintext is `<linear>#<n>.<m>.<gg>.<jj>`: `<linear>` the port's `b<b>.<kind>`, `(n, m)`
+the `B x B` block of the linear's `(d_in, d_out)` matrix (`B = n_slots / t`), `gg` the giant and `jj` the baby index,
+`k = gg b + jj`. Slot `v` holds `W[n B + ((i + k) mod B)][m B + i]` with `i = ((v - gg b t) mod n_slots) / t`
+(`DiagLinear.slot_vectors`' `np.roll(np.repeat(blk[(i + k) % B, i], t), gg b t)`: the roll moves elements to higher
+indices), a real payload. `filling.diag_slot_index` / `diag_gather_reference` are that arithmetic in numpy (and
+`crates/pc-program/src/compile/diag.rs` `TileInfo::slot` / `addr` in Rust); both are held to `LazyDiagonals` and to
+upstream's `slot_vectors` (`tests/test_diag_source.py`, and the crate's unit test).
+
+**The twin and the capture.** `diaggen.use_source(inf, "generated")` installs the hook `filling.mult_diag_sum` hands
+each `(m, gg)` group to. On the capture recorder (`diaggen.diag_sum_recorder`, the sibling of `stream_sum_recorder`)
+it records the loop `FheOps.mult_pt_sum` records (a `mult` per term, n outer and jj inner, `add_inplace` into the
+first) with each plaintext a `Pt(src=("diag", name))` at the ciphertext's effective level, degree 1, tagged from its
+full vector in every mode (`pt_tag` reads the values), holding the vector only when the recorder keeps values. So a
+generated capture equals the values capture in every op, var name, level, tag and magnitude, and differs only in
+each diagonal's `args.pt` (`kind = "diag"`, `name`); the values capture is unchanged (md5 at the synthetic shape:
+the same before and after this change). The planned twin keeps a `diaggen.GeneratedPt` (the name) for each, never
+its 256 KiB vector. On the numpy fake the hook builds the group's vectors with `diag_gather_reference` and multiplies
+them through `ops.mult_pt_sum` as `DiagLinear._sum` does: the reply is bit-identical under both sources only if the
+index arithmetic is right (a flipped roll changes it; tested).
+
+**The compiler** (upstream files, `tools/fhe_ssm/UPSTREAM_CHANGES.md`): `args.pt.kind = "diag"` is
+`PtForm::DiagGen`, its name refused unless it parses; the fuse pass turns every generated product into a one-term
+`CoeffSum` and merges partial sums of one form only (one `CoeffSum` per group: 352 per block at the model shape, 320
+of 32 terms and `W_v`'s 32 of 128; 44 per block at the synthetic shape, 40 of 8 and 4 of 32); the check refuses a
+sum mixing sources and any generated plaintext outside a sum. The bind keeps generated plaintexts out of the store
+(`BoundPt.in_sum`), binds a diagonal sum only when the session declares every tile it reads, and parses each term
+into a gather job; a stream-only program is bound exactly as before. `tools/fhe_ssm/compile_check` prints the census
+per block (sums by source, term histograms, fused vars, plaintext forms, store references, store references named
+`<linear>#...`).
+
+**The driver.** `--diag-source generated`: the plaintext budget, `pt_levels` / `pt_slots` and `stream_info` leave
+generated plaintexts out (as `StreamedPlannedRun` leaves streamed rows out); the session is built with
+`diag_tiles={name: (d_in, d_out, t)}` (`diaggen.diag_tiles`: five linears per block on the all-diagonal arms, `W_k` and
+`W_r` on `pcmm-trunk`; the lane count rides with the shape because the tile side `B = n_slots / t` is the layout's, not
+the matrix's), and after `complete_setup` each tile's folded matrix (`LazyDiagonals.W`, C-contiguous float64) is
+uploaded with `Session.register_tile`. `key_needs` reads no plaintext and is the same under both sources. A build
+without `Session.register_tile` refuses `generated` (`run`, `--keyspec`) before any session opens; `values` and the
+PCMM arms run on it as before.
+
+**What is not here.** The CUDA kernels (`diag_gather`, `encode_many`), pc-gpu's `DiagGen`, the replay's `Diag` arm
+(it returns an error naming the missing encoder), `Session(diag_tiles=...)` / `register_tile` in pc-py and the
+`diag.tiles` / `diag.scratch` MemPlan sections are the encoder's GPU half, not built yet.
+
 ## Upstream APIs this package depends on (at d97a6f7)
 
 | what | where |
@@ -428,6 +490,7 @@ slot vectors).
 | Newton and the lane route | `perseus/impl/poly.py:515` `inv_sqrt_newton`, :745 `LanePackedOps` (`lane_square` :719, `lane_mult` :733) |
 | the decode layout | `perseus/impl/layout.py:23` `Dims`, :104 `linear_rot_steps`, :236 `encode_bias_vector`, :280 `lane_vec`, :289 `stride_mask`, :458 `ladder_radix_bits`; `perseus/impl/linear.py:15` `EncodedLinear`, :142 `linear`, :147 `linear_multi` |
 | the session bundle | `perseus/impl/rt.py:22` `Rt` (`mult_mask` :97, `step` :194) |
+| generated diagonals (this branch) | `crates/pc-program/src/compile/diag.rs` (`parse_diag_name`, `TileInfo`, `DiagSource`, `SumSrc`); `perseus/impl/fakecap.py:105` `Pt` (`src`), :33 `pt_tag`, :646 `CapInf._like`; `perseus/impl/driver.py:477-482` `rec_pt_var`; the session's `diag_tiles=` / `register_tile` (the GPU half) |
 | the capture contract, the presets | `perseus/plan/contract.py:72` `capture_contract`; `perseus/config/__init__.py:29` `preset` (`_pc.Config.preset("n32_gpt2_decode")`) |
 | the PCMM key path on a device | `crates/pc-py/src/session.rs:189, 751-770, 868`; `crates/pc-py/src/matmul.rs:303`; `crates/pc-client/src/client.rs:190-200` |
 

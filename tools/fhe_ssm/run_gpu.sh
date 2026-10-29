@@ -15,8 +15,11 @@
 #   bash tools/fhe_ssm/run_gpu.sh keygen ARM       the client role for that request ($DRIVER --keygen: a fresh secret,
 #                                                  keys.pckb); then KEYS=bundle FHE_SSM_KEYS=$OUT/keys_ARM for run
 #   bash tools/fhe_ssm/run_gpu.sh run ARM          the planned run: $DRIVER --ticks $TICKS --profile, nvidia-smi sampled
-#                                                  (PCMM arms only: the driver refuses diagonal linears on a device)
+#                                                  (diagonal linears only under DIAG_SOURCE=generated: the device
+#                                                  diagonal encoder; else the PCMM arms only)
 #   bash tools/fhe_ssm/run_gpu.sh smoke            capture + plan + run of `pcmm24` at BLOCKS=1 (the first device contact)
+#   bash tools/fhe_ssm/run_gpu.sh smoke-diag       capture + plan + run of `ref` at BLOCKS=1 under DIAG_SOURCE=generated
+#                                                  (the device diagonal encoder's first device contact)
 #   bash tools/fhe_ssm/run_gpu.sh matrix [ARM...]  capture + plan + run (prepare for a CPU-only arm), one arm at a time
 #
 # Environment: OUT (default <worktree>/.cache/fhe_ssm/gpu_<UTC date>; every product lands there, one dir per arm),
@@ -27,7 +30,10 @@
 # in FHE_SSM_KEYS, made by keyspec + keygen | that directory), PROFILE_EVERY (2: a stage fence on every 2nd tick, so one run
 # holds fenced and unfenced ticks; 1 = every tick), PREPARE_EXTRA (more `prepare` flags, e.g. --lean on a small host),
 # PY (<worktree>/.venv/bin/python), PERSEUS_CORE_ARCH (build: default from nvidia-smi's compute capability),
-# PC_NVCC_JOBS (build: default 8). Nothing here edits a tracked file; captures, plans and records go under OUT.
+# PC_NVCC_JOBS (build: default 8), DIAG_SOURCE (values | generated, default values: where the diagonal linears'
+# plaintexts come from on the device, the driver's --diag-source; generated = the device diagonal encoder, which makes
+# every non-blocked arm a device arm; a driver flag only, so the captures and plans are the same under both).
+# Nothing here edits a tracked file; captures, plans and records go under OUT.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=$(git -C "$HERE" rev-parse --show-toplevel)
@@ -35,6 +41,8 @@ PY=${PY:-$W/.venv/bin/python}
 OUT=${OUT:-$W/.cache/fhe_ssm/gpu_$(date -u +%Y%m%d)}
 DRIVER=${DRIVER:-perseus.examples.fhe_ssm.run_planned}
 TICKS=${TICKS:-2}; BLOCKS=${BLOCKS:-}; GPU=${GPU:-0}; KEYS=${KEYS:-}; PROFILE_EVERY=${PROFILE_EVERY:-2}
+DIAG_SOURCE=${DIAG_SOURCE:-values}
+case "$DIAG_SOURCE" in values|generated) ;; *) echo "run_gpu: DIAG_SOURCE=$DIAG_SOURCE (values | generated)" >&2; exit 2 ;; esac
 mkdir -p "$OUT"
 log() { echo "[run_gpu $(date -u +%H:%M:%S)] $*" | tee -a "$OUT/session.log"; }
 die() { log "STOP: $*"; exit 1; }
@@ -87,10 +95,17 @@ arm() {   # sets CAP, PLANENV, RUNF, NOTE, DEVICE for arm $1
     case "$PLANENV" in *LANDING=high*)
         [ "${HIGH_CAPTURE_OK:-1}" = 1 ] || NOTE="BLOCKED (HIGH_CAPTURE_OK=0): LANDING=high needs a capture Config with stc_first=2 / raise_drop=512:1; $NOTE" ;;
     esac
-    # DEVICE=1: every linear is PCMM. The driver refuses a diagonal linear on a device: a planned session keeps every
-    # plaintext it reads resident, and the diagonals are 344,064 per tick (about 2.3 TiB at 28 rows; its --pt-budget-gb).
-    # Such an arm runs its CPU part only (capture, plan, prepare) until the streamed-weights path or a device encoder.
+    # DEVICE=1: the arm runs on a device. Under DIAG_SOURCE=values only the all-PCMM arms do: a values session keeps
+    # every plaintext it reads resident and the diagonals are 344,064 per tick (about 2.3 TiB at 28 rows; the driver's
+    # --pt-budget-gb refuses them), so a diagonal arm runs its CPU part only (capture, plan, prepare). Under
+    # DIAG_SOURCE=generated the device builds each diagonal inside its group's fused sum from the declared tiles
+    # (2.625 GiB of float64 matrices, no store slot per diagonal): every non-blocked arm is a device arm, and the
+    # driver flag rides in RUNF (run, prepare, keyspec), never in CAP, so the capture name and the plan stay shared.
     case "$CAP" in *"--linear pcmm --"*|*"--linear pcmm") DEVICE=1 ;; *) DEVICE=0 ;; esac
+    if [ "$DIAG_SOURCE" = generated ]; then
+        RUNF="${RUNF:+$RUNF }--diag-source generated"
+        case "$NOTE" in BLOCKED*) ;; *) DEVICE=1 ;; esac
+    fi
 }
 capname() {   # the capture an arm uses: arms that differ only at plan or run time share one
     arm "$1"
@@ -199,7 +214,7 @@ prepare)
     [ $rc = 0 ] || die "prepare $a failed ($r/prepare.log)" ;;
 run)
     a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a"
-    [ "$DEVICE" = 1 ] || die "run $a: a diagonal linear does not run on the device path (the driver refuses it: 344,064 resident plaintexts per tick, about 2.3 TiB); its CPU part is run_gpu.sh prepare $a (RUNSHEET_GPU.md §3)"
+    [ "$DEVICE" = 1 ] || die "run $a: under DIAG_SOURCE=values a diagonal linear does not run on the device path (344,064 resident plaintexts per tick, about 2.3 TiB; the driver refuses it): DIAG_SOURCE=generated runs it on the device diagonal encoder, or run_gpu.sh prepare $a runs its CPU part (RUNSHEET_GPU.md §3)"
     [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
     PYTHONPATH="$W/python" "$PY" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$DRIVER') else 1)" 2>/dev/null \
         || die "no driver module $DRIVER (RUNSHEET_GPU.md §4 is its contract)"
@@ -247,6 +262,9 @@ keygen)
 smoke)
     export BLOCKS=1
     bash "$0" capture pcmm24 && bash "$0" plan pcmm24 && bash "$0" run pcmm24 ;;
+smoke-diag)
+    export BLOCKS=1 DIAG_SOURCE=generated
+    bash "$0" capture ref && bash "$0" plan ref && bash "$0" run ref ;;
 matrix)
     [ $# -gt 0 ] || set -- ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24 pcmm24 best
     for a in "$@"; do
@@ -255,5 +273,5 @@ matrix)
         bash "$0" capture "$a" && bash "$0" plan "$a" && bash "$0" "$last" "$a" || log "arm $a stopped (above); continuing"
     done ;;
 *)
-    sed -n '2,30p' "$0"; exit 2 ;;
+    sed -n '2,36p' "$0"; exit 2 ;;
 esac

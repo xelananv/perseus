@@ -50,8 +50,8 @@ On the device path it runs only the arms whose every linear is PCMM (`pcmm24`, `
 | 8 | plans (CPU) | `bash tools/fhe_ssm/run_gpu.sh plan <arm>` = `tools/fhe_ssm/make_plan.sh` with the arm's axes, then the compile check | `plan_<arm>/summary.txt`: refreshes per stage @ exit level, the total, `compile check … check errors 0`. A planner failure (exit ≠ 0) or a compile check error stops the step | 25 stages, min-cut: 168-183 s on the same laptop [S5]; `LANDING=high`: 992 s (every block retried once; another planner beside part of it) [S10]; ILP: 55-58 s for 2 GPT-2 stages [S5] |
 | 8a | the driver's CPU part | `bash tools/fhe_ssm/run_gpu.sh prepare <arm>` = `$DRIVER … --plan P --prepare-only` (`PREPARE_EXTRA=--lean` on a host with little RAM: plaintext digests instead of values) | `prepare_<arm>/record.json`: the recorded stream's op count = the capture's node count, the plan's refresh count, 0 check errors, the stream static across ticks | the reference at the model shape, `--lean`: 885.6 s, contended [S12]; `pcmm24` at `BLOCKS=1`: 3 s; the 24-block `pcmm24` prepare needs more than 3 GB of host memory [S13] |
 | 9 | keys | `KEYS` has no default: `run`, `smoke` and `matrix` refuse without it. `KEYS=inproc` = the driver's `--insecure-test-keys`: the session derives every key from the compiled programs and holds the secret for the whole run (`crates/pc-py/src/session.rs:617-737`), a timing run only, recorded as `keys.mode = "insecure-inproc"`. The deployment split: `bash tools/fhe_ssm/run_gpu.sh keyspec <arm>` = `$DRIVER … --plan P --keyspec $OUT/keys_<arm>/keyspec.json` (the key request: the model's rotation steps, the conjugation, the PCMM `t`s, and on the device build the session's own `Session.key_manifest` after the programs compile), then `bash tools/fhe_ssm/run_gpu.sh keygen <arm>` = `$DRIVER --keygen $OUT/keys_<arm> --keyspec-file …/keyspec.json` (the client role, no model flags: a fresh secret, `keys.pckb`, and `client_secret.bin` kept beside it so the run can decode its replies; a real client runs this elsewhere and ships `keys.pckb` only), then `KEYS=bundle FHE_SSM_KEYS=$OUT/keys_<arm>` (or `KEYS=<that dir>`) for `run`. The driver checks the bundle before the session opens (plan contract, PCMM keys, switching-key count, public key) and opens it with `Session.from_bundle` without a secret; the reply is decrypted by `_pc.Client` on the client's side of the process | `keyspec.json`; `keygen.log`: the key count, the bundle size; the run logs the PCMM `t`s | unmeasured |
-| 10 | 1-block smoke | `bash tools/fhe_ssm/run_gpu.sh smoke` (capture, plan and run of `pcmm24` at `BLOCKS=1`: a diagonal arm cannot run on the device path, §3) | the driver's per-tick line, `mem_report`, `nvsmi.csv` | unmeasured |
-| 11 | the matrix | `bash tools/fhe_ssm/run_gpu.sh matrix pcmm24 best pcmm24` on the device; `bash tools/fhe_ssm/run_gpu.sh matrix ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24` runs those arms' CPU part (capture, plan, prepare: `matrix` calls `prepare` instead of `run` for an arm that is not all PCMM). The lockstep arms stay blocked (§3). One arm at a time, the control first and last | per arm `run_<arm>/record.json` (§4), `run.log`, `nvsmi.csv`, `build_id.txt` | unmeasured on this runtime |
+| 10 | 1-block smokes | `bash tools/fhe_ssm/run_gpu.sh smoke` (capture, plan and run of `pcmm24` at `BLOCKS=1`); then `bash tools/fhe_ssm/run_gpu.sh smoke-diag` (`ref` at `BLOCKS=1` under `DIAG_SOURCE=generated`: the device diagonal encoder's first device contact, §3; a build without the encoder refuses it: `no device diagonal encoder`) | the driver's per-tick line, `mem_report` (with `diag.tiles` / `diag.scratch` under `generated`), `nvsmi.csv` | unmeasured |
+| 11 | the matrix | `bash tools/fhe_ssm/run_gpu.sh matrix pcmm24 best pcmm24` on the device; `DIAG_SOURCE=generated bash tools/fhe_ssm/run_gpu.sh matrix ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24 ref` runs the diagonal arms on the device (the encoder); under the default `DIAG_SOURCE=values` the same command runs their CPU part only (capture, plan, prepare: `matrix` calls `prepare` instead of `run` for an arm that is not a device arm). The lockstep arms stay blocked (§3). One arm at a time, the control first and last | per arm `run_<arm>/record.json` (§4), `run.log`, `nvsmi.csv`, `build_id.txt` | unmeasured on this runtime |
 | 12 | bring it home | `rsync -a $OUT/ <the records' home>/gpu_<date>/` | — | — |
 
 ## 3. The axis matrix
@@ -117,13 +117,20 @@ What blocks which arms:
   K streams need K ciphertext sets in each captured stage and registers per stream; `PlannedRun.prepare` does not pass
   a schedule (`python/perseus/impl/driver.py:653-655`). `run_gpu.sh` refuses these arms.
 - **Diagonal linears on the device** (every arm but `pcmm24` and `best`: `ref`, `depth2`, `persite`, `packstats`,
-  `high`, `pair`, `sbk16`, `emfuse`, and `pcmmtrunk24`'s `W_k` / `W_r`): a planned session keeps every plaintext its
-  programs read resident (`driver.py:731`; 28 rows × 2^16 × 4 B = 7 MiB each). For the model's 344,064 diagonals that
-  is ≈ 2.3 TiB. The driver refuses such an arm above `--pt-budget-gb` (default 40) with the count, and `run_gpu.sh run`
-  refuses it before the driver starts; `prepare` runs its CPU part. Running it needs the streamed-weights path
-  (`StreamedPlannedRun`, `driver.py:941-965`; `Session(streams=, stream_frames=)`, `session.rs:1441-1444`) or a device
-  diagonal encoder. Until then the device control of `best` is `pcmm24`, and the diagonal arms are compared by their
-  planned counts only.
+  `high`, `pair`, `sbk16`, `emfuse`, and `pcmmtrunk24`'s `W_k` / `W_r`) run only under `DIAG_SOURCE=generated` (the
+  driver's `--diag-source generated`: the device diagonal encoder). Under the default `values` a planned session
+  keeps every plaintext its programs read resident (`driver.py:725-731`; 28 rows × 2^16 × 4 B = 7 MiB each): for the
+  model's 344,064 diagonals per tick ≈ 2.3 TiB, refused above `--pt-budget-gb` (40) by the driver and before it by
+  `run_gpu.sh run`. Under `generated` the twin records each diagonal as a generated plaintext
+  (`<linear>#<n>.<m>.<gg>.<jj>`), the compiler fuses each `(m, gg)` group into one `CoeffSum` (352 per block, 8,448 per
+  tick at the model shape), the session declares the linears' float64 matrices (`Session(diag_tiles=...)`, 2.625 GiB;
+  1.5 GiB on `pcmmtrunk24`) and the device builds every diagonal inside its sum; the store holds the other 1,633
+  plaintexts. The flag is the driver's: the captures and the plans are the ones the values arms use (§2 step 7-8), and
+  `run_gpu.sh arms` under `DIAG_SOURCE=generated` lists every non-blocked arm `device[yes]`. Controls on the device:
+  `ref` under `generated` is the reference circuit itself (first and last); the linear route alone is `high` under
+  `generated` against `pcmm24` (both `LANDING=high`, the same circuit but for the linears), while `ref` (generated)
+  against `pcmm24` also moves the landings (stock vs high) and reads as the two arms' totals only. A build without the encoder's kernels
+  (`Session.register_tile`) refuses `generated` before any session opens.
 - **Captures at the runtime's levels**: `run_gpu.sh` passes `--levels preset` (ceiling 44, landing 32 + a pending
   rescale). A capture at the fork's levels records its own refreshes where this runtime has no route.
 - **`SPARSE_SLOTS=512,32,1`**: the runtime lists no landing for 32 slots (`crates/pc-program/src/compile/mod.rs:250-262`);
@@ -138,7 +145,7 @@ What blocks which arms:
 ```
 python -m $DRIVER --weights W --seeds S --config C --levels preset [--blocks N] [run_fake's axis flags]
                   --plan PLAN_DIR --ticks T --profile --profile-every K --keys inproc|bundle|DIR
-                  [--schedule program|siblings|lockstep] --out record.json
+                  [--schedule program|siblings|lockstep] [--diag-source values|generated] --out record.json
 python -m $DRIVER … --plan PLAN_DIR --prepare-only [--lean] … --out record.json        (the CPU part, no session)
 ```
 
@@ -153,11 +160,16 @@ The landing's runtime switches are in the environment. The driver must:
   production wall: the fence serializes host issue with device work. `impl/profile.TimedOps` times Python-issued ops
   and so times nothing on this path. `--profile-every K` fences every K-th tick only, so one run holds fenced and
   unfenced ticks (each tick's record says which); `run_gpu.sh` passes `PROFILE_EVERY` (default 2);
-- refuse diagonal linears above `--pt-budget-gb` (§3).
+- refuse diagonal linears above `--pt-budget-gb` under `--diag-source values`; under `generated` record each diagonal
+  as a generated plaintext on the twin (a name, never its vector), leave every generated plaintext out of the store's
+  slots and staging, declare the diagonal linears' matrices at construction (`Session(diag_tiles={name: (d_in, d_out,
+  t)})`, also `from_bundle` / `key_manifest`) and upload them after setup (`Session.register_tile`), and refuse on a
+  build without the encoder (§3).
 
 `record.json`, one object per arm:
 - `build_id`, and the plan's `axes=` and `runtime=` lines;
-- per program: `n_bootstraps`, `bts_batches`, `n_pairs`, `n_finishes`, `mem()`;
+- per program: `n_bootstraps`, `bts_batches`, `n_pairs`, `n_finishes`, `mem()`; the fused sums by source
+  (`prepare.sums`: counts and term histograms; `diag_tiles` uploaded after setup);
 - after setup: `sess.mem_report`, `sess.setup_seconds()` (setup, keygen), `sess.fhe.mem_info()` (free, total bytes);
 - per tick: `wall_s` (issue to the reply's decrypt); `stage_wall_s` (with `--profile`); `sess.planned_stats()` (host_us,
   launch_us, captures and replays, pairs as one or split, fused product-adds, StC-first cache misses);
@@ -181,13 +193,16 @@ The landing's runtime switches are in the environment. The driver must:
 - **The fork's C++ runtime** (another binary): the planned plateau was 35,961 MiB on an RTX PRO 6000 and 35,118 MiB on
   an RTX A6000, leaving 13.1 GiB free on that 48 GB card [S8].
 - **This runtime: unmeasured.** Every term differs:
-  - no device weight tiles: PCMM keeps int8 digit planes, ≈ 0.7-1.05 GB for the model (≈ 349 M weights × 2-3 planes);
-    diagonal arms stream weights into `stream_frames` device frames;
+  - the weights: PCMM keeps int8 digit planes, ≈ 0.7-1.05 GB for the model (≈ 349 M weights × 2-3 planes); the
+    diagonal arms under `DIAG_SOURCE=generated` keep the linears' float64 tiles (`diag.tiles`: 24 × 14 × 1,024² × 8 B =
+    2.625 GiB; 1.5 GiB on `pcmmtrunk24`) and the encoder's scratch (`diag.scratch`: 3,145,736 + 262,144·L bytes per
+    plaintext in flight, at most 128: 1.0 GiB at L = 20) [derived, BATCH3_ENCODER_BRIEF §1]; nothing is streamed;
   - a ciphertext slab sized by the compiled programs. The compile check prints it per stage on the CPU: 1,711 MB for
     the model's largest stage under `program` [S6]; GPT-2 Prefill-128's record plan, 1,421 MB under `program` and
     6,705 MB under `lockstep` [S7];
   - keys derived from the plan (the packed layout regenerates `a`);
-  - a `PtStore` of every plaintext the programs read.
+  - a `PtStore` of every plaintext the programs read from it: under `generated` 1,633 (the masks and constants; ≈ 11.2
+    GiB at 28 rows [derived]), under `values` every diagonal too (≈ 2.3 TiB: refused).
 
   The session prints its own breakdown at setup (`sess.mem_report`; `driver.py:718`). Record it on the first arm, and
   decide then whether 48 GB would have been enough.
@@ -196,7 +211,9 @@ The landing's runtime switches are in the environment. The driver must:
 
 - a device run of the planned driver (§4: written, its CPU part verified [S12]);
 - the lockstep arms: K-stream captures (§3);
-- the diagonal arms on the GPU: the streamed-weights path in the driver (§3);
+- the diagonal arms on the GPU: the device diagonal encoder's kernels and session half (`diag_gather`,
+  `encode_many`, pc-gpu `DiagGen`, `Session(diag_tiles=...)` / `register_tile`); the compiler, the bind, the twin's
+  recording and the driver are in (§3); until the kernels land, `DIAG_SOURCE=generated` refuses on the device build;
 - `SPARSE_SLOTS=512,32,1`: no 32-slot landing in the runtime (§3).
 
 ## 8. After the first runs

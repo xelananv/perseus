@@ -9,7 +9,8 @@ insecure) or on a client's key bundle (no secret on the server), every plaintext
 without per-tick recording (the stream is the same every tick, verified on the probes), the reply decrypted in
 process or exported as a frame for the client, and a device fence per stage under ``--profile``. On the CPU-only
 build ``prepare`` compiles through ``tools/fhe_ssm/compile_check`` and ``CheckedProgram`` stands in for the
-programs. README.md "Running under a plan on a GPU".
+programs. Under ``diag_source="generated"`` (``diaggen``) the diagonals are made on the device from declared tiles.
+README.md "Running under a plan on a GPU", "The device diagonal encoder".
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from perseus.impl import pcmm as pcmm_mod
 from perseus.impl.driver import PlannedRun, Recorder, diff_block
 from perseus.impl.ops import FheOps
 
-from . import filling, pairs
+from . import diaggen, filling, pairs
 from .geometry import KINDS, PairGeometry, park
 from .model import STATE_NAMES, FheSsmModel
 
@@ -42,6 +43,11 @@ LOCKSTEP_REFUSED = (
 N32_Q_PRIMES = 54
 #: one row of a device plaintext slot: N = 2^16 coefficients of 32-bit words
 SLOT_ROW_BYTES = (1 << 16) * 4
+#: plaintext forms generated inside a fused sum (``Program.pt_refs``' form; crates/pc-program/src/compile/diag.rs):
+#: never a store slot, never staged
+GENERATED_FORMS = ("stream", "diag")
+#: the forms of a v2 graph's ``args.pt.kind`` as the compiler reads them (compile/resolve.rs ``pt_form``)
+PT_KIND_FORMS = {"stream": "stream", "diag": "diag", "cached": "cached"}
 #: a device program's static counters the record keeps
 PROGRAM_FIELDS = (
     "n_ops",
@@ -97,6 +103,8 @@ class LeanValues:
 
 
 def values_equal(a, b) -> bool:
+    if isinstance(a, diaggen.GeneratedPt) or isinstance(b, diaggen.GeneratedPt):
+        return a == b
     if isinstance(a, LeanValues) or isinstance(b, LeanValues):
         return isinstance(a, LeanValues) and isinstance(b, LeanValues) and a.digest == b.digest
     return a is b or bool(np.array_equal(a, b))
@@ -104,8 +112,9 @@ def values_equal(a, b) -> bool:
 
 def stream_info(nodes) -> dict:
     """What ``prepare`` and the CPU check read of a block's stream without its nodes: the (level, deg) of every
-    output, the plaintext references, the rotation steps, the PCMM finishes by linear, the op count, and a digest of
-    the stream's identity (op, inputs, output, args per node: what ``diff_block`` compares)."""
+    output, the plaintext references (name, level, deg, form: the form from ``args.pt.kind`` as the compiler reads it,
+    so a generated diagonal is ``diag``), the rotation steps, the PCMM finishes by linear, the op count, and a digest
+    of the stream's identity (op, inputs, output, args per node: what ``diff_block`` compares)."""
     by_out: dict[str, tuple[int, int]] = {}
     refs: list[tuple[str, int, int, str]] = []
     rot: set[int] = set()
@@ -117,10 +126,13 @@ def stream_info(nodes) -> dict:
     for n in nodes:
         by_out[n["output"]] = (int(n["output_level"]), int(n.get("output_noise_level", 1)))
         lv = n.get("input_levels") or []
+        args = n.get("args") or {}
+        kind = PT_KIND_FORMS.get(str((args.get("pt") or {}).get("kind", "")), "at_use")
         canon = []
         for j, x in enumerate(n["inputs"]):
             if x.startswith("pt_"):
-                refs.append((x, int(lv[j]) if j < len(lv) else 0, 1, "at_use"))
+                name = str(args["pt"]["name"]) if kind in GENERATED_FORMS else x
+                refs.append((name, int(lv[j]) if j < len(lv) else 0, 1, kind))
             elif x.startswith("rot("):
                 rot.update(int(v) for v in x[4:-1].split(","))
             if x.startswith(("pt_", "const(", "rot(", "hint_lev(", "lvl_cap(")) or x in made:
@@ -128,7 +140,6 @@ def stream_info(nodes) -> dict:
             else:
                 canon.append(f"in{pos.setdefault(x, len(pos))}")
         made.add(n["output"])
-        args = n.get("args") or {}
         ext = args.get("external")
         if isinstance(ext, dict) and ext.get("op") == "pcmm":
             fin.setdefault(str(ext["linear"]), []).append(ext)
@@ -169,10 +180,26 @@ class SsmRecorder(Recorder):
                 fhe._rec_metas[name] = (int(ct.level), int(ct.noise_deg))
 
         fhe.name_ct = rec_name_ct
+        # a generated diagonal (diaggen.diag_sum_recorder) is kept by name, never by its vector, in every mode
+        kept_pt_var = fhe.pt_var  # Recorder's rec_pt_var (this recorder's), wrapped below once more when lean
+        base_pt_var = fhe._rec_orig[0]
+
+        def diag_pt_var(pt):
+            if pt.src[0] != "diag":
+                return kept_pt_var(pt)
+            new = not (pt.gen == fhe.gen and pt.name)
+            name = base_pt_var(pt)
+            if new and fhe.nodes is not None:
+                fhe._rec_pts[name] = diaggen.GeneratedPt(pt.src[1])
+            return name
+
+        fhe.pt_var = diag_pt_var
         if self.lean:
             pt_var = fhe._rec_orig[0]
 
             def lean_pt_var(pt):
+                if pt.src[0] == "diag":
+                    return diag_pt_var(pt)
                 new = not (pt.gen == fhe.gen and pt.name)
                 name = pt_var(pt)
                 if new and fhe.nodes is not None:
@@ -385,6 +412,7 @@ class PlannedSsmRun(PlannedRun):
         bundle=None,
         client=None,
         pcmm_cf=6,
+        diag_source="values",
         profile=False,
         profile_every=1,
         check_bin=None,
@@ -410,6 +438,8 @@ class PlannedSsmRun(PlannedRun):
         n_conv = model.capacity if conversations is None else int(conversations)
         if not 1 <= n_conv <= model.capacity:
             raise ValueError(f"{n_conv} conversations for a capacity of {model.capacity}")
+        if diag_source not in diaggen.SOURCES:
+            raise ValueError(f"diag_source must be one of {diaggen.SOURCES}, got {diag_source!r}")
         chain = config["chain.preset"] if config is not None else None
         if chain not in (None, "n32"):  # the plaintext rows below are sized with N32_Q_PRIMES
             raise ValueError(f"the session Config names chain preset {chain!r}; this model runs on n32 only")
@@ -434,6 +464,8 @@ class PlannedSsmRun(PlannedRun):
         self.n_conv = n_conv  # reply() unpacks n_conv rows; the parked lanes are dropped
         self.schedule, self.bundle, self.client = schedule, bundle, client
         self.pcmm_cf, self.check_bin = int(pcmm_cf), check_bin
+        self.diag_source = diag_source
+        self.tiles_uploaded: list[str] = []
         self.profile, self.profile_every = bool(profile), max(1, int(profile_every))
         self.static = False
         self.compiled_by: str | None = None
@@ -589,9 +621,16 @@ class PlannedSsmRun(PlannedRun):
         return {b: [self.ref[b].inputs()[i] for i, _nm in kv] for b, kv in self.kv.items()}
 
     def plaintext_refs(self) -> set[tuple[str, str, int]]:
-        """The distinct (program, name, level) plaintext references: a store key is the block's (``<block>/pt_N``),
-        so the same ``pt_N`` in two blocks is two slots."""
-        return {(lab, nm, int(lv)) for lab, p in self.progs.items() for nm, lv, _d, _f in p.pt_refs}
+        """The distinct (program, name, level) plaintext references the store holds: a store key is the block's
+        (``<block>/pt_N``), so the same ``pt_N`` in two blocks is two slots; a plaintext generated inside a fused sum
+        (a streamed row, a generated diagonal) holds none (``StreamedPlannedRun`` filters the same way,
+        ``driver.py:1265, :1279``)."""
+        return {
+            (lab, nm, int(lv))
+            for lab, p in self.progs.items()
+            for nm, lv, _d, f in p.pt_refs
+            if f not in GENERATED_FORMS
+        }
 
     def plaintext_budget(self) -> dict:
         """What the resident plaintexts would take on the device: one slot per distinct (program, name, level)
@@ -677,15 +716,39 @@ class PlannedSsmRun(PlannedRun):
             "seqLen": 1,
         }
 
+    def diag_tiles(self) -> dict[str, tuple[int, int, int]]:
+        """``Session(diag_tiles=...)``: ``{linear: (d_in, d_out, t)}`` of the diagonal linears under
+        ``diag_source="generated"``, else empty (``diaggen.diag_tiles``)."""
+        return diaggen.diag_tiles(self.model) if self.diag_source == "generated" else {}
+
     def session_kwargs(self):
         kw = super().session_kwargs()
         kw["size"] = self.size_dict()
         specs = self.pcmm_specs()
         kw["pcmm"] = specs or None
         kw["pcmm_cf"] = self.pcmm_cf
+        # the store holds the plaintexts read from it only: PlannedRun.session_kwargs (driver.py:725-731) counts
+        # every reference, generated ones included (344,064 diagonals per tick at the model shape)
+        progs = kw["programs"]
+        kw["pt_levels"] = [
+            lv
+            for p in progs
+            for _nm, lv in sorted({(nm, lv) for nm, lv, _d, f in p.pt_refs if f not in GENERATED_FORMS})
+        ]
+        kw["pt_slots"] = len(kw["pt_levels"]) + 8
         if kw["pt_levels"] and self.pt_rows:
             kw["pt_rows"] = max(self.pt_rows, N32_Q_PRIMES - min(kw["pt_levels"]))
+        tiles = self.diag_tiles()
+        if tiles:
+            kw["diag_tiles"] = tiles
         return kw
+
+    def device_has_encoder(self) -> bool:
+        """Whether this build's session takes generated diagonals (``Session.register_tile``, with the
+        ``diag_tiles`` declaration)."""
+        from perseus import _pc  # type: ignore[attr-defined]
+
+        return hasattr(getattr(_pc, "Session", None), "register_tile")
 
     # ── the session (device) ──
     def open_session(self, kw):
@@ -703,6 +766,11 @@ class PlannedSsmRun(PlannedRun):
         by name and every plaintext staged once."""
         from perseus import _pc  # type: ignore[attr-defined]
 
+        if self.diag_tiles() and not self.device_has_encoder():
+            raise RuntimeError(
+                "diag_source generated: this build of perseus._pc has no device diagonal encoder "
+                "(Session.register_tile / Session(diag_tiles=...)); run --diag-source values or a build with it"
+            )
         super().setup(rows, argmax)
         self.ops = FheOps(self.sess.fhe, _pc, self.model.rt.ops.unit)
         if self.bundle is not None and self.fhe.has_secret_key:
@@ -710,9 +778,29 @@ class PlannedSsmRun(PlannedRun):
         for name, lin in self.linears().items():
             self.sess.pcmm_upload(name, np.ascontiguousarray(lin.Wd, dtype=np.int8).tobytes())
             self.uploaded.append(name)
+        self.upload_tiles()
         n = self.stage_static()
-        self.log(f"[planned] {len(self.uploaded)} PCMM linears uploaded, {n} plaintext slots staged")
+        self.log(
+            f"[planned] {len(self.uploaded)} PCMM linears uploaded, {len(self.tiles_uploaded)} diagonal tiles "
+            f"uploaded, {n} plaintext slots staged"
+        )
         return self
+
+    def upload_tiles(self) -> int:
+        """Every declared tile's matrix to the device (after ``complete_setup``, like ``pcmm_upload``), one block's
+        matrices built at a time; returns the tiles uploaded (0 under ``diag_source="values"``)."""
+        tiles = self.diag_tiles()
+        if not tiles:
+            return 0
+        for name, W in diaggen.tile_matrices(self.model):
+            if W.shape != tiles[name][:2]:
+                raise RuntimeError(f"tile {name}: matrix {W.shape}, declared {tiles[name][:2]}")
+            self.sess.register_tile(name, W)
+            self.tiles_uploaded.append(name)
+        missing = sorted(set(tiles) - set(self.tiles_uploaded))
+        if missing:
+            raise RuntimeError(f"declared tiles never uploaded: {missing[:8]}")
+        return len(self.tiles_uploaded)
 
     def stage_static(self) -> int:
         """Every plaintext the programs read, from the reference stream, staged once; equal values share one slot
@@ -729,6 +817,8 @@ class PlannedSsmRun(PlannedRun):
             lab, r = self.labels[b], self.ref[b]
             keys = self.progs[lab].pt_keys()
             for nm, lv in keys:
+                if "#" in nm:  # Bound::pt_keys skips every plaintext generated inside a sum (bind.rs in_sum)
+                    raise RuntimeError(f"stage_static: {nm} is a generated plaintext, not a store key")
                 v = r.pts[nm.split("/", 1)[1]]
                 if isinstance(v, LeanValues):
                     raise TypeError("stage_static: a lean recorder holds digests, not values")
