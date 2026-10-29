@@ -1,10 +1,17 @@
 // Compiles the feature-selected instantiation TUs (kernels/inst/*.cu) with nvcc into one static archive.
 // PC_NVCC_JOBS (default 2) nvcc processes at a time: the box's shared-CPU budget. PERSEUS_CORE_ARCH (default 120)
 // selects -gencode arch=compute_<a>,code=sm_<a>.
+// PC_KERNELS_NO_NVCC=1 skips nvcc and emits no archive and no link lines: enough for `cargo check` / `cargo clippy`
+// of the dependents on a machine without CUDA (the Rust side type-checks; nothing links or runs).
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 fn main() {
+    println!("cargo:rerun-if-env-changed=PC_KERNELS_NO_NVCC");
+    if std::env::var("PC_KERNELS_NO_NVCC").is_ok_and(|v| v == "1") {
+        println!("cargo:warning=pc-kernels: PC_KERNELS_NO_NVCC=1, no kernels compiled (type-check only; a link fails)");
+        return;
+    }
     let cuda = std::env::var("CUDA_HOME").unwrap_or_else(|_| "/usr/local/cuda-13.2".into());
     let nvcc = format!("{cuda}/bin/nvcc");
     let arch_env = std::env::var("PERSEUS_CORE_ARCH").unwrap_or_else(|_| "120".into());
