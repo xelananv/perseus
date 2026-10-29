@@ -5,7 +5,8 @@ A tick is one token per conversation: fresh encode, the block stages with their 
 RMSNorm (with ``g_out``) as the reply. Each stage ends with the canonical carry of its two state
 ciphertexts, so every tick is one op stream; the state starts as encryptions of zero passed once through a
 bootstrap, so tick 0 enters as every later tick does; each stage names its carried state for the planner
-(``cache.<name>-lvl=<level>``). The geometry's axes (``linear``, ``diag_hint``, ``pcmm_wbits``) and
+(``cache.<name>-lvl=<level>``) and hands it to the planned driver as its K/V (``stage_caches``; ``encode_input``
+packs a tick's rows; planned.py). The geometry's axes (``linear``, ``diag_hint``, ``pcmm_wbits``) and
 ``newton_form`` / ``pack_stats`` are the model's; ``newton_sites`` / ``lane_mix`` are the parameters'. Block
 numbering: 0..n_layers-1 the blocks, n_layers the tail. README.md: layouts, capture, the key rule.
 """
@@ -24,6 +25,8 @@ from .weights import BlockWeights, ModelParams, encode_block
 
 LAYOUTS = ("filled", "decode")
 PAYLOADS = ("pairs", "real")
+#: the two carried ciphertexts of a block, in the order ``stage_caches`` returns them
+STATE_NAMES = ("s", "n_prev")
 
 
 class FheSsmModel(ImplModel):
@@ -162,6 +165,24 @@ class FheSsmModel(ImplModel):
         for name, ct in (("s", st.s), ("n_prev", st.n_prev)):
             lvl = self.rt.ops.level(ct)
             self.inf.name_ct(ct, f"{self.inf.block_prefix}cache.{name}-lvl={lvl}")
+
+    def encode_input(self, rows):
+        """Block 0's input of one tick: the conversations' embedding rows packed in the layout
+        (``ImplModel``'s hook, read by the planned driver's recorder)."""
+        return self.geo.encode_rows(rows)
+
+    @staticmethod
+    def cache_keys(b: int) -> list[str]:
+        """The residency keys of block ``b``'s two carried ciphertexts, in ``stage_caches`` order."""
+        return [f"impl.b{b}.{name}" for name in STATE_NAMES]
+
+    def stage_caches(self, i):
+        """The carried state of block ``i`` as the planned driver's K/V: ``([s, n_prev], keys)``,
+        the objects the next tick reads (registers on a device); None for the tail."""
+        if i >= self.n_layers or not self.state:
+            return None
+        st = self.state[i]
+        return [st.s, st.n_prev], self.cache_keys(i)
 
     def token_stages(self, x, pos):  # noqa: ARG002 (ImplModel's hook signature)
         def block_fn(b):

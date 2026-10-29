@@ -98,7 +98,8 @@ class CapCt(FakeCt):
     def __init__(self, *a, **k):
         super().__init__(*a, **k)
         if CapCt.novec and self.vec.shape[0] > 1:
-            self.vec = self.vec[:1]
+            # a copy: a slice would keep the whole product vector alive through its base (256 KB per op)
+            self.vec = self.vec[:1].copy()
 
 
 class Pt:

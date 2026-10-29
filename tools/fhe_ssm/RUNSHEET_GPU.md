@@ -6,8 +6,11 @@ source tag [Sn] when it was measured (the sources are listed in the research rec
 says **unmeasured**. Paths are relative to the checkout.
 
 Status: the plan tooling (`make_plan.sh`), the CPU compile check (`compile_check/`), the change check and the sync
-script work on the CPU; the port's fake and capture run (`python/perseus/examples/fhe_ssm/run_fake.py`). **The port's
-planned GPU driver does not exist yet** (its contract is §4): steps 0-9 run without it, steps 10-12 need it.
+script work on the CPU; the port's fake and capture run (`python/perseus/examples/fhe_ssm/run_fake.py`). The planned
+driver (`python/perseus/examples/fhe_ssm/run_planned.py`, contract §4) exists and its CPU part (`--prepare-only`: the
+recorded stream, the compile check, the report) runs on a CPU-only build [S12]; **nothing of it has run on a device**.
+On the device path it runs only the arms whose every linear is PCMM (`pcmm24`, `best`); the others run their CPU part
+(§3).
 
 ## 0. Rules for every timed step
 
@@ -43,23 +46,26 @@ planned GPU driver does not exist yet** (its contract is §4): steps 0-9 run wit
 | 4 | the model's data | the pbd430a checkpoint's weights `.npz` (sha256 begins `3ec3f1d8`, ends `784b` [S3]), seeds `.json` and config `.json` in one directory; `export DATA=<that dir>` | `sha256sum` matches | — |
 | 5 | this build's refresh prices | `bash tools/fhe_ssm/run_gpu.sh bench` = `cargo run --release -p pc-tools --bin pc-bench -- bts --all --k 1,8 --reps 20 --keys packed` (the command in `README.md` of upstream `main`) | `$OUT/bench_bts.txt`: ms per refresh per route at K = 1 and 8. Set `PLAN_BTS_MS` from it before planning with `ILP_OBJECTIVE=ms` | unmeasured |
 | 6 | the arms | `bash tools/fhe_ssm/run_gpu.sh arms` | the table of §3 | — |
-| 7 | captures (CPU) | `bash tools/fhe_ssm/run_gpu.sh capture <arm>` per distinct capture (arms that differ only in plan or run share one); or make them elsewhere at the same commit and copy `$OUT/cap_*` | `$OUT/cap_<landing>_<flags>/`: `block_<b>/graph.json` × 25 stages, `capture_env.json`, `capture_config.json`. A `LANDING=high` arm is refused (§3) | 24 blocks at `--levels preset`: 11 min 29 s on a 16 GB laptop CPU [S4]; the plain fake run of the same model: 17-25 s [S2] |
-| 8 | plans (CPU) | `bash tools/fhe_ssm/run_gpu.sh plan <arm>` = `tools/fhe_ssm/make_plan.sh` with the arm's axes, then the compile check | `plan_<arm>/summary.txt`: refreshes per stage @ exit level, the total, `compile check … check errors 0`. A planner failure (exit ≠ 0) or a compile check error stops the step | 25 stages, min-cut: 168-183 s on the same laptop [S5]; ILP: 55-58 s for 2 GPT-2 stages [S5] |
-| 9 | keys | in-process by default: the session derives every key from the compiled programs (`crates/pc-py/src/session.rs:617-731`), nothing to do. For the deployment split (`KEYS=bundle`; the driver must support it): `Session.key_manifest(cfg, keys, **kw)` → `Client(ClientSecret.generate(), complex=True).keygen(spec, path, threads=8)` → `Session.from_bundle(cfg, keys, path, **kw, debug_secret=secret.to_bytes())` (`session.rs:1445-1480`; `speedrun/server.py:132-148`) | the driver logs the key count, the PCMM `t`s, the bundle size | unmeasured |
-| 10 | 1-block smoke | `bash tools/fhe_ssm/run_gpu.sh smoke` (capture, plan and run of `ref` at `BLOCKS=1`) | the driver's per-tick line, `mem_report`, `nvsmi.csv` | unmeasured |
-| 11 | the matrix | `bash tools/fhe_ssm/run_gpu.sh matrix ref depth2 persite packstats ref` now; the `LANDING=high` arms once §3's blockers are gone. One arm at a time, the control first and last | per arm `run_<arm>/record.json` (§4), `run.log`, `nvsmi.csv`, `build_id.txt` | unmeasured on this runtime |
+| 7 | captures (CPU) | `bash tools/fhe_ssm/run_gpu.sh capture <arm>` per distinct capture (arms that differ only in plan or run share one); or make them elsewhere at the same commit and copy `$OUT/cap_*` | `$OUT/cap_<landing>_<flags>/`: `block_<b>/graph.json` × 25 stages, `capture_env.json`, `capture_config.json`. A `LANDING=high` arm's capture is checked after it is written: its `capture_config.json` must carry `stc_first=2` and `raise_drop=512:1` (§3) | 24 blocks at `--levels preset`: 11 min 29 s on a 16 GB laptop CPU [S4] (17 min 7 s for the high switches' capture, with a planner running beside it [S10]); every linear PCMM: 31 s [S11]; the plain fake run of the same model: 17-25 s [S2] |
+| 8 | plans (CPU) | `bash tools/fhe_ssm/run_gpu.sh plan <arm>` = `tools/fhe_ssm/make_plan.sh` with the arm's axes, then the compile check | `plan_<arm>/summary.txt`: refreshes per stage @ exit level, the total, `compile check … check errors 0`. A planner failure (exit ≠ 0) or a compile check error stops the step | 25 stages, min-cut: 168-183 s on the same laptop [S5]; `LANDING=high`: 992 s (every block retried once; another planner beside part of it) [S10]; ILP: 55-58 s for 2 GPT-2 stages [S5] |
+| 8a | the driver's CPU part | `bash tools/fhe_ssm/run_gpu.sh prepare <arm>` = `$DRIVER … --plan P --prepare-only` (`PREPARE_EXTRA=--lean` on a host with little RAM: plaintext digests instead of values) | `prepare_<arm>/record.json`: the recorded stream's op count = the capture's node count, the plan's refresh count, 0 check errors, the stream static across ticks | the reference at the model shape, `--lean`: 885.6 s, contended [S12]; `pcmm24` at `BLOCKS=1`: 3 s; the 24-block `pcmm24` prepare needs more than 3 GB of host memory [S13] |
+| 9 | keys | in-process by default: the session derives every key from the compiled programs (`crates/pc-py/src/session.rs:617-731`), nothing to do. For the deployment split (`KEYS=bundle`; the driver must support it): `Session.key_manifest(cfg, keys, **kw)` → `Client(ClientSecret.generate(), complex=True).keygen(spec, path, threads=8)` → `Session.from_bundle(cfg, keys, path, **kw, debug_secret=secret.to_bytes())` (`session.rs:1445-1480`; `speedrun/server.py:132-148`). `run_gpu.sh`: `KEYS=inproc` (the driver's loud in-process mode, a timing run only), `KEYS=bundle` (the client's key directory in `FHE_SSM_KEYS`; `run` stops when it is unset) or `KEYS=<dir>` | the driver logs the key count, the PCMM `t`s, the bundle size | unmeasured |
+| 10 | 1-block smoke | `bash tools/fhe_ssm/run_gpu.sh smoke` (capture, plan and run of `pcmm24` at `BLOCKS=1`: a diagonal arm cannot run on the device path, §3) | the driver's per-tick line, `mem_report`, `nvsmi.csv` | unmeasured |
+| 11 | the matrix | `bash tools/fhe_ssm/run_gpu.sh matrix pcmm24 best pcmm24` on the device; `bash tools/fhe_ssm/run_gpu.sh matrix ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24` runs those arms' CPU part (capture, plan, prepare: `matrix` calls `prepare` instead of `run` for an arm that is not all PCMM). The lockstep arms stay blocked (§3). One arm at a time, the control first and last | per arm `run_<arm>/record.json` (§4), `run.log`, `nvsmi.csv`, `build_id.txt` | unmeasured on this runtime |
 | 12 | bring it home | `rsync -a $OUT/ <the records' home>/gpu_<date>/` | — | — |
 
 ## 3. The axis matrix
 
-> Every `LANDING=high` arm (high, pair, sbk16, emfuse, pcmmtrunk24, pcmm24, best, lockstep*) is **BLOCKED** in
-> `run_gpu.sh` until the port's capture writes a `capture_config.json` carrying `bts.stc_first=2` and
-> `bts.raise_drop=512:1` (next work); `run_gpu.sh arms` shows the block, `matrix` skips them, and `HIGH_CAPTURE_OK=1`
-> lifts the block once that Config exists (the post-capture check still guards the file written).
+> The `LANDING=high` arms (high, pair, sbk16, emfuse, pcmmtrunk24, pcmm24, best) run. The port's session Config takes
+> the landing's runtime switches from the environment (`LANDING_SWITCHES` in `python/perseus/examples/fhe_ssm/fakes.py`),
+> so a capture made under them writes a `capture_config.json` carrying `bts.stc_first=2` and `bts.raise_drop=512:1`
+> and records its own dense refreshes StC-first; `run_gpu.sh capture` checks the stamp after the capture, and
+> `HIGH_CAPTURE_OK=0` blocks these arms. Their plans need the planner fix of upstream PR #10, which this branch carries
+> (`tools/fhe_ssm/UPSTREAM_CHANGES.md`). The lockstep arms stay blocked (below).
 
 
 Columns: the capture flags (`run_fake.py`), the plan axes (`make_plan.sh`), the run flags (the driver), what the arm
-isolates, and its control. The counts are plans made on the CPU [S5, S6]; no time on this runtime is measured.
+isolates, and its control. The counts are plans made on the CPU [S5, S6, S10, S11]; no time on this runtime is measured.
 
 | arm | capture | plan | run | isolates | control |
 |---|---|---|---|---|---|
@@ -76,34 +82,48 @@ isolates, and its control. The counts are plans made on the CPU [S5, S6]; no tim
 | `best` | depth2 + per-site + pack-stats + pcmm 24 | `LANDING=high PAIR=1` | `--schedule siblings` | the stack | `ref` and `high` |
 | `lockstep2`, `lockstep4` | `--streams K` (**does not exist**) | `LANDING=high` | `--schedule lockstep` | K batches of conversations through one stream | `high` |
 
-Planned counts so far [S6]:
+Planned counts so far [S6, S10, S11] (`summary.total_bootstraps` per tick; the landings are effective levels, a raw
+landing plus the pending rescale):
 - **the reference (`ref`, diagonal hint 1)**: LANDING=stock **637** refreshes per tick (446 placed, 143 fired hints, 48
   deliberate; block 0 29, blocks 1-23 26 each, the head 10), 0 check errors, 152 s of planning;
+- **`high`** (the same circuit, captured under the high switches): **609** per tick (560 placed, 1 fired hint, 48
+  deliberate; block 0 24, blocks 1-23 25 each, the head 10), 0 check errors. Routes: dense StC-first landing at 28: 95;
+  dense in the shipped order at 34: 24 (one per block, the exit refresh of the planner's retry, its input past the
+  StC-first entry 46); SparseB-512 at 26: 490. The capture's own eager refreshes: 1,968 without the switches, 1,344 with
+  them; every one StC-first, none past the entry [S10];
+- **`pcmm24`** (every linear PCMM at 24 bits, captured under the high switches): **802** per tick = 490 placed
+  (SparseB-512 at 26) + 48 deliberate carry refreshes (dense StC-first at 28) + 264 PCMM output finishes (11 per
+  block); blocks 0-23 33 each, the head 10; no fired hint; 0 check errors (the compile counts 538 refresh sites plus
+  120 PCMM finish ops, one per linear call). The PCMM input cap (44) never fires: every input arrives at 40 or below
+  [S11];
+- a LANDING=high plan of a capture made WITHOUT the switches: 610 planned, **120 compile-check errors** (does not bind)
+  [S10];
 - a capture at diagonal hint 2 (the upstream `diag_apply` rule): the same 637, stage for stage, although its graphs
   differ (half its linear-input hints have threshold 40 instead of 42). The planner decides which hints fire, and at
   this runtime's landings the thresholds do not bind. LANDING=fork (the fork's landings, dense and 512 at 36) on that
-  capture: **900**;
-- LANDING=high does not plan (below).
+  capture: **900**.
 
 What blocks which arms:
-- **Every `LANDING=high` arm** (`high`, `pair`, `sbk16`, `emfuse`, the PCMM arms, `best`), for two reasons:
-  1. The port's capture cannot carry the StC-first runtime yet. `fakes.make_capture_session` builds its Config from the
-     ceiling, the landing and the unit only (`python/perseus/examples/fhe_ssm/fakes.py:45-49, 139`). Its
-     `capture_config.json` has no `stc_first` / `raise_drop`, its own refreshes land in the shipped order, and
-     `run_gpu.sh capture` refuses it for a high arm.
-  2. Planned from a stock capture, block 1 is infeasible. Block 0 exits at 48/d2 and the planner's exit-refresh retry
-     does not move it, with or without `PLAN_PRUNE` [S6]. Without the hard envelope cap every block enters at 48/d2,
-     the top of the window [S6].
-  Next work: (i) a capture Config carrying `bts.stc_first=2` and `bts.raise_drop=512:1`; (ii) the planner fix that
-  keeps forced exit refreshes through the re-cut and the prune (upstream PR #10, not on `speedrun`). The fix enters as a
-  listed change in `UPSTREAM_CHANGES.md` if it is needed before upstream merges it.
+- **The `LANDING=high` arms are no longer blocked**; what they needed, and what still goes wrong without it:
+  1. A capture under the high switches. The port's capture now takes them from the environment; a capture made without
+     them records its own refreshes in the shipped order, and a LANDING=high plan of it does not bind (the compile
+     check's level errors) [S10].
+  2. The planner fix of upstream PR #10 (forced exit refreshes survive the re-cut and the prune), on this branch as a
+     listed change. Under the high recipe the cheapest plan of each block leaves its exit at 48/d2, the next block is
+     refused there, and the planner retries the block with a forced exit refresh; without the fix a re-cut trial drops
+     that refresh and block 1 is infeasible [S6, S10]. With it the 24 stages after block 0 each refuse their entry once
+     and blocks 0-23 are each retried once.
 - **Lockstep**: `Program.compile(schedule="lockstep")` reorders what was captured (`crates/pc-py/src/program.rs:68-84`).
   K streams need K ciphertext sets in each captured stage and registers per stream; `PlannedRun.prepare` does not pass
   a schedule (`python/perseus/impl/driver.py:653-655`). `run_gpu.sh` refuses these arms.
-- **Diagonal arms on the GPU** (`ref`, `depth2`, `persite`, `packstats`): a planned session keeps every plaintext its
+- **Diagonal linears on the device** (every arm but `pcmm24` and `best`: `ref`, `depth2`, `persite`, `packstats`,
+  `high`, `pair`, `sbk16`, `emfuse`, and `pcmmtrunk24`'s `W_k` / `W_r`): a planned session keeps every plaintext its
   programs read resident (`driver.py:731`; 28 rows × 2^16 × 4 B = 7 MiB each). For the model's 344,064 diagonals that
-  is ≈ 2.3 TiB. The driver must use the streamed-weights path (`StreamedPlannedRun`, `driver.py:941-965`;
-  `Session(streams=, stream_frames=)`, `session.rs:1433-1436`).
+  is ≈ 2.3 TiB. The driver refuses such an arm above `--pt-budget-gb` (default 40) with the count, and `run_gpu.sh run`
+  refuses it before the driver starts; `prepare` runs its CPU part. Running it needs the streamed-weights path
+  (`StreamedPlannedRun`, `driver.py:941-965`; `Session(streams=, stream_frames=)`, `session.rs:1433-1436`) or a device
+  diagonal encoder. Until then the device control of `best` is `pcmm24`, and the diagonal arms are compared by their
+  planned counts only.
 - **Captures at the runtime's levels**: `run_gpu.sh` passes `--levels preset` (ceiling 44, landing 32 + a pending
   rescale). A capture at the fork's levels records its own refreshes where this runtime has no route.
 - **`SPARSE_SLOTS=512,32,1`**: the runtime lists no landing for 32 slots (`crates/pc-program/src/compile/mod.rs:240-252`);
@@ -117,8 +137,9 @@ What blocks which arms:
 
 ```
 python -m $DRIVER --weights W --seeds S --config C --levels preset [--blocks N] [run_fake's axis flags]
-                  --plan PLAN_DIR --ticks T --profile --keys inproc|bundle [--schedule program|siblings|lockstep]
-                  --out record.json
+                  --plan PLAN_DIR --ticks T --profile --profile-every K --keys inproc|bundle|DIR
+                  [--schedule program|siblings|lockstep] --out record.json
+python -m $DRIVER … --plan PLAN_DIR --prepare-only [--lean] … --out record.json        (the CPU part, no session)
 ```
 
 The landing's runtime switches are in the environment. The driver must:
@@ -130,8 +151,9 @@ The landing's runtime switches are in the environment. The driver must:
   timed ticks;
 - with `--profile`, fence the device after every stage so each stage has a wall. That wall is an attribution, not the
   production wall: the fence serializes host issue with device work. `impl/profile.TimedOps` times Python-issued ops
-  and so times nothing on this path;
-- for diagonal linears, use the streamed-weights path (§3).
+  and so times nothing on this path. `--profile-every K` fences every K-th tick only, so one run holds fenced and
+  unfenced ticks (each tick's record says which); `run_gpu.sh` passes `PROFILE_EVERY` (default 2);
+- refuse diagonal linears above `--pt-budget-gb` (§3).
 
 `record.json`, one object per arm:
 - `build_id`, and the plan's `axes=` and `runtime=` lines;
@@ -150,6 +172,7 @@ The landing's runtime switches are in the environment. The driver must:
   `cap_<…>.capture.log` and `cap_<…>.fake.json` (the fake's report of the capture tick) beside it
 - `$OUT/bootstrap_placements/plan_<arm>/`: `block_<b>_placement.json` (stamped), `PLAN_CMD.txt`, `plan_rot_steps.json`,
   `summary.txt`, `compile_check.txt` / `.json`, `plan.log`
+- `$OUT/prepare_<arm>/`: `record.json`, `prepare.log` (the driver's CPU part)
 - `$OUT/run_<arm>/`: `record.json`, `run.log`, `nvsmi.csv` (500 ms samples of memory, utilisation and power),
   `build_id.txt`
 
@@ -171,8 +194,7 @@ The landing's runtime switches are in the environment. The driver must:
 
 ## 7. Not runnable yet
 
-- the planned driver (§4);
-- every `LANDING=high` arm: a capture Config carrying StC-first, and the forced-exit-refresh planner fix (§3);
+- a device run of the planned driver (§4: written, its CPU part verified [S12]);
 - the lockstep arms: K-stream captures (§3);
 - the diagonal arms on the GPU: the streamed-weights path in the driver (§3);
 - `SPARSE_SLOTS=512,32,1`: no 32-slot landing in the runtime (§3).

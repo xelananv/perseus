@@ -288,8 +288,10 @@ Two independent ways on edge cases (`tests/`; `VERIFICATION` of the fork, carrie
 | the driver | the four arms; the axes in the report; refusals | the errors it computes | its counts against independent tallies; the hashes | `test_run_fake.py` |
 | the scale folds | exponents 0, mid, 14; brute force | bit-for-bit factors | the whole model with folds vs the mirror and the unfolded closed form | `test_scales.py` |
 
-156 tests (140 at the synthetic shape, 16 marked `slow_shape` at ring 2^16). The fork's tests of its
-GPU runner, planner wrapper, Colab build, decode policy and tick meter are not carried over: those modules
+156 tests (140 at the synthetic shape, 16 marked `slow_shape` at ring 2^16), plus the planned driver's: 14
+CPU (`tests/test_planned_contract.py`, one of them `slow_shape`: a 1-block PCMM capture at the model's width
+planned and bound) and 3 marked `gpu` (`tests/test_planned_gpu.py`, skipped without the device build). The
+fork's tests of its GPU runner, planner wrapper, Colab build and tick meter are not carried over: those modules
 belong to the fork's C++ runtime; on this branch the device path is `impl.driver.PlannedRun` (below). Two
 further checks run at the model's shape with the published checkpoint (`tests/test_model_shape.py`, skipped
 without `FHE_SSM_WEIGHTS` / `FHE_SSM_SEEDS` / `FHE_SSM_CONFIG`): the default's 1,968 split and op counts,
@@ -307,15 +309,108 @@ pinned, and a PCMM capture whose every finish names its linear.
 2. **A planned run.** The device path on this branch is `impl.driver.PlannedRun` / `Recorder`
    (`driver.py:444-598`): every stage recorded once on the CPU twin, compiled with its plan, replayed;
    `FheSsmModel` supplies the stages (`token_stages`), its carried state is named for the planner
-   (`cache.<name>-lvl=<level>`), `rotation_audit` lists the keys the band must hold. The planned driver is
-   the next batch's work: `stage_caches` returning the two carried ciphertexts with their keys, a
-   `PlannedRun` subclass with a pair-packing `input_ct` and a complex decode, the schedule passed through,
-   the PCMM linears declared and uploaded by name, a key bundle (the layout's rotation keys and, for
-   PCMM, the ring-switch keys) and a warm-up.
+   (`cache.<name>-lvl=<level>`) and handed over as its K/V (`stage_caches`), `rotation_audit` lists the
+   keys the band must hold. The driver is `run_planned.py` / `planned.py` (next section); its setup is
+   CPU-verified, its session is not.
 3. **PCMM's landing, cap and band shift**, and the refresh landing of this runtime, are measured there;
    until then every level in the table is the fake's.
 4. **The planned refresh counts per axis** (the question the axes exist for) are plan outputs, not eager
    counts.
+
+## Running under a plan on a GPU
+
+`run_planned.py` runs the model under a plan on the device path (`planned.py`: `PlannedSsmRun`, an
+`impl.driver.PlannedRun`; `SsmRecorder`, its CPU twin's recorder). The model is built on the capture
+recorder with the same flags as the capture the plan was cut from (run_fake's model and axis flags, the
+same spellings; `--levels preset` is the default here), the probe ticks are recorded on the twin, the
+reference tick's stream (`--ref-token 1`: it reads a carried state, as the capture's tick 1 did) is
+compiled against the plan with `--schedule program|siblings`, the carried state of every block becomes
+two registers (`cache.s`, `cache.n_prev`), the stream is checked static across the probes (no dynamic
+step, equal plaintexts), the session opens, the PCMM planes are uploaded by name, every plaintext is
+staged once, one untimed warm-up tick runs on random public tokens (it captures the CUDA graphs), then
+`--ticks T` timed ticks from zero state, each decrypted and scored against `ref.ExactModel` (`relErrRms`
+of the reply, the worst conversation, the tied head's logits and top-1 agreement), the record rewritten
+after every tick. `tools/fhe_ssm/run_gpu.sh run ARM` invokes it as
+`--weights W --seeds S --config C --levels preset --plan DIR --ticks T --profile --keys inproc|bundle
+<the arm's capture flags> [--schedule siblings] --out record.json`.
+
+```bash
+# the CPU part on any build: record the twin, compile (check) against the plan, report; no session
+python -m perseus.examples.fhe_ssm.run_planned <model flags> --plan PLAN --prepare-only [--lean] --out prep.json
+# the key request (the model's needs; on the device build the session's exact pc_client KeySpec too)
+python -m perseus.examples.fhe_ssm.run_planned <model flags> --plan PLAN --keyspec keyspec.json
+# the client role (device build): a secret and the bundle DIR/keys.pckb; client_secret.bin stays beside it
+python -m perseus.examples.fhe_ssm.run_planned --weights w --seeds s --config c --keygen DIR --keyspec-file keyspec.json
+# a timing run with in-process keys (INSECURE: the session holds the secret), the published tokens
+python -m perseus.examples.fhe_ssm.run_planned <model flags> --linear pcmm --pcmm-wbits 24 --plan PLAN \
+    --ticks 148 --tokens tokens.json [--free-run] --profile --insecure-test-keys --out record.json
+# a run on a client's bundle: no secret in the session; the reply decrypted by the client's secret, or exported
+python -m perseus.examples.fhe_ssm.run_planned <model flags> --linear pcmm --plan PLAN --ticks 8 --keys DIR --out record.json
+```
+
+**Keys.** A device run names its keys or does not run. `--keys DIR` opens the session on the client's
+bundle `DIR/keys.pckb` (`Session.from_bundle`: no secret on the server; the bundle must answer this
+session's own key request, which the runtime checks key for key at import; the driver checks the plan
+contract, the chain and the key kinds first: the layout's 62 rotation steps (`filling.rotation_steps(2^15,
+1024)`: 31 baby steps `j t`, 31 giant steps `k b t`, the norm ladder's `t … N/2` among them) plus the
+conjugation and relinearization keys, and PCMM's ring-switch key set for `t = 32` when `--linear pcmm*`).
+With `DIR/client_secret.bin` (written by `--keygen`) the reply is exported as a frame and decrypted by
+`_pc.Client` on the client's side of the process, so a bundle run is scored too; without it the frames
+land in `<out>.replies/` and the fidelity fields are absent. `--keys bundle` reads `DIR` from
+`$FHE_SSM_KEYS`. `--insecure-test-keys` (= `--keys inproc`, what `run_gpu.sh`'s `KEYS=inproc` passes)
+generates the keys in process and keeps the secret in the session: a timing run only, loudly marked in the
+log and the record (`keys.mode = "insecure-inproc"`). `--keyspec` writes the request: the model's own
+needs on every build, and on the device build the session's `Session.key_manifest` (the exact
+`pc_client::KeySpec`, after the programs are compiled), which `--keygen` answers.
+
+**What `--profile` measures.** A device fence (`fhe.device_sync()`) after every stage's `Program.run`, so
+each stage has a wall (`stages[].wall_s`, with the Rust replayer's `host_us` / `launch_us` and whether the
+stage was captured, replayed or run eagerly); the tick's `seconds` then includes the fences, an
+attribution and not the production wall (issue is serialized with device work). `--profile-every K`
+fences every K-th tick only, so one run holds both kinds (`fenced` per tick). Every tick also records the
+deltas of `Session.planned_stats()` (runs, host and launch microseconds, graph captures / replays / eager
+runs, refresh pairs as one or split, fused product-adds, StC-first cache misses), the free device memory
+(`fhe.mem_info()`) and the reply's level; the refresh count per tick is the compiled programs'
+(`n_bootstraps`, the plan's count: the runtime fires every site of a program it runs and keeps no
+separate counter). `impl.profile.TimedOps` times Python-issued ops and so measures nothing on this path.
+The header holds the build id (commit, the extension's digest, nvcc, the arch), the plan's lines, the
+capture md5 check, every flag, the environment's switches, the file hashes and, after setup, the session's
+`mem_report`, `setup_seconds`, the registers, the uploaded PCMM linears.
+
+**Refusals.** `--schedule lockstep` and `--streams N > 1`: this port captures one ciphertext set per
+stage (k = 1), a lockstep compile would reorder nothing. No `--keys` and no `--insecure-test-keys`. A
+bundle directory without `keys.pckb`, or a bundle for another plan contract or chain. A plan whose capture
+md5 (`PLAN_CMD.txt`'s `graph=` line) differs from the capture at hand (`--capture DIR`, else the plan's
+own path when it exists). A plan stamped under another Config than the twin's (another `--levels`). A
+model whose stream is not static (never this model). **Diagonal linears on the device path**
+(`--linear diagonal` and `pcmm-trunk`): `PlannedRun` keeps one resident plaintext slot per distinct
+plaintext (`pt_slots = len(pt_levels) + 8`, `driver.py:731`; a slot is `pt_rows` rows of N 32-bit words, 7
+MiB at 28 rows) and the reference circuit reads 344,064 diagonal plaintexts per tick (about 2.3 TiB), so
+the driver refuses above `--pt-budget-gb` (40) with the count; the streamed-weights path
+(`StreamedPlannedRun`, `Session(streams=)`, `CoeffSum`) or the device diagonal encoder is separate work.
+The `--linear pcmm` arms are resident (about 1,200 per-channel constants per tick) and run.
+
+**What the CPU verifies and what is GPU-only.** On the CPU-only `perseus._pc` (no `Session` /
+`Program`), `--prepare-only` records the twin, writes the reference stream as a graph dir and compiles it
+through `tools/fhe_ssm/compile_check` (the same `compile_dir` call as `Program.compile`, without the
+driver's `live_out` / `input_metas`: the carried inputs take the compiler's seeds), standing
+`CheckedProgram`s in for the programs; the report holds the check errors per program, the registers, the
+carried names, the static-stream verdict, the plaintext budget, the PCMM declarations against the
+finishes, the rotation steps against the plan's scope. `tests/test_planned_contract.py` runs that at the
+synthetic shape against a plan the stock recipe makes of a synthetic capture (program and siblings
+schedules, lean), the pair packing on the fake against the twin's, the key needs, the recorder's
+registration of the named state against upstream's, and the refusals. GPU-only (`tests/test_planned_gpu.py`,
+`@pytest.mark.gpu`): the session, `Session.key_manifest`, the bundle import, the PCMM service, the
+reply's error on a device, every timing. The twin's recording at the model shape takes minutes per tick
+(structure only; the capture with values took 538 s): the setup records two ticks. On a small machine
+`--lean` (with `--prepare-only`) keeps plaintext digests instead of values, streams each block's graph of
+the reference tick to the work dir at stage end and reduces the other tick's blocks to a stream digest
+(`stream_info`: the same identity `diff_block` compares): a block of the model holds about 280 MB of node
+dicts, 25 stages and two ticks would not fit; a lean prepare of the reference plan (the capture of
+`runs_A/cap_ref_preset`, its stock plan of 637 refreshes) on a 16 GB Mac: 25 programs, 716,245 ops (the
+capture's node count), 637 refresh sites, 0 check errors, 0 dynamic steps, 73 registers, 886 s under a 1.5 GB
+footprint. A PCMM arm records with values on every path (`impl.pcmm`'s fake computes its products on the
+slot vectors).
 
 ## Upstream APIs this package depends on (at a3dff85)
 
@@ -333,7 +428,10 @@ pinned, and a PCMM capture whose every finish names its linear.
 | the capture contract, the presets | `perseus/plan/contract.py:72` `capture_contract`; `perseus/config/__init__.py:29` `preset` (`_pc.Config.preset("n32_gpt2_decode")`) |
 | the PCMM key path on a device | `crates/pc-py/src/session.rs:189, 745-764, 862`; `crates/pc-py/src/matmul.rs:303`; `crates/pc-client/src/client.rs:190-200` |
 
-The port adds files under `python/perseus/examples/fhe_ssm/` only; no upstream file is edited.
+The port adds files under `python/perseus/examples/fhe_ssm/` and `tools/fhe_ssm/`; the upstream files it
+changes as fixes to the base are listed with their reasons in `tools/fhe_ssm/UPSTREAM_CHANGES.md` (among
+them `impl/fakecap.py`: the structure-only recorder's one kept slot is a copy, not a slice of the full
+product vector, which the slice kept alive at 256 KB per op).
 `LADDER_RADIX_BITS=0` is exported before a session or a fake is made (`port_env`): the rotate-and-sum
 ladders run plain on both routes (the fake would otherwise hoist radix groups the C++ does not).
 

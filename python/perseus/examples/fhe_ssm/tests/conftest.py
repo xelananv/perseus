@@ -20,11 +20,16 @@ def pytest_configure(config):
 @pytest.fixture(autouse=True)
 def _plain_ladder(monkeypatch):
     """``port_env``'s value inside each test, undone after it: set once for the whole run it would
-    also switch off the radix ladder in the repository's own tests collected in the same run."""
+    also switch off the radix ladder in the repository's own tests collected in the same run. The capture
+    recorder's class-wide values mode (``CapCt.novec``, set by ``impl.driver.Recorder.token``) is reset too."""
+    from perseus.impl import fakecap
+
     saved = dict(os.environ)
     monkeypatch.setenv("LADDER_RADIX_BITS", LADDER_RADIX_BITS)
+    fakecap.CapCt.novec = False
     try:
         yield
     finally:
+        fakecap.CapCt.novec = False
         os.environ.clear()
         os.environ.update(saved)

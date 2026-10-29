@@ -9,23 +9,27 @@
 #   bash tools/fhe_ssm/run_gpu.sh arms             the axis arms and what each sets
 #   bash tools/fhe_ssm/run_gpu.sh capture ARM      the CPU-twin capture of ARM (no GPU; reused when present)
 #   bash tools/fhe_ssm/run_gpu.sh plan ARM         tools/fhe_ssm/make_plan.sh on that capture (+ the compile check)
+#   bash tools/fhe_ssm/run_gpu.sh prepare ARM      the driver's CPU part (--prepare-only: record, compile check, report)
 #   bash tools/fhe_ssm/run_gpu.sh run ARM          the planned run: $DRIVER --ticks $TICKS --profile, nvidia-smi sampled
-#   bash tools/fhe_ssm/run_gpu.sh smoke            capture + plan + run of `ref` at BLOCKS=1 (the first device contact)
-#   bash tools/fhe_ssm/run_gpu.sh matrix [ARM...]  capture + plan + run per arm, strictly one after another
+#                                                  (PCMM arms only: the driver refuses diagonal linears on a device)
+#   bash tools/fhe_ssm/run_gpu.sh smoke            capture + plan + run of `pcmm24` at BLOCKS=1 (the first device contact)
+#   bash tools/fhe_ssm/run_gpu.sh matrix [ARM...]  capture + plan + run (prepare for a CPU-only arm), one arm at a time
 #
 # Environment: OUT (default <worktree>/.cache/fhe_ssm/gpu_<UTC date>; every product lands there, one dir per arm),
 # DATA (a directory holding the model's weights .npz, seeds .json and config .json; WEIGHTS / SEEDS / CONFIG override
 # each), DRIVER (the planned driver's python module, default perseus.examples.fhe_ssm.run_planned: its contract is in
-# RUNSHEET_GPU.md §4), TICKS (2), BLOCKS (all), GPU (0), KEYS (inproc | bundle), PY (<worktree>/.venv/bin/python),
-# PERSEUS_CORE_ARCH (build: default from nvidia-smi's compute capability), PC_NVCC_JOBS (build: default 8).
-# Nothing here edits a tracked file; captures, plans and records go under OUT.
+# RUNSHEET_GPU.md §4), TICKS (2), BLOCKS (all), GPU (0), KEYS (inproc: in-process keys, a timing run only | bundle: the
+# client's key directory in FHE_SSM_KEYS | that directory), PROFILE_EVERY (2: a stage fence on every 2nd tick, so one run
+# holds fenced and unfenced ticks; 1 = every tick), PREPARE_EXTRA (more `prepare` flags, e.g. --lean on a small host),
+# PY (<worktree>/.venv/bin/python), PERSEUS_CORE_ARCH (build: default from nvidia-smi's compute capability),
+# PC_NVCC_JOBS (build: default 8). Nothing here edits a tracked file; captures, plans and records go under OUT.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=$(git -C "$HERE" rev-parse --show-toplevel)
 PY=${PY:-$W/.venv/bin/python}
 OUT=${OUT:-$W/.cache/fhe_ssm/gpu_$(date -u +%Y%m%d)}
 DRIVER=${DRIVER:-perseus.examples.fhe_ssm.run_planned}
-TICKS=${TICKS:-2}; BLOCKS=${BLOCKS:-}; GPU=${GPU:-0}; KEYS=${KEYS:-inproc}
+TICKS=${TICKS:-2}; BLOCKS=${BLOCKS:-}; GPU=${GPU:-0}; KEYS=${KEYS:-inproc}; PROFILE_EVERY=${PROFILE_EVERY:-2}
 mkdir -p "$OUT"
 log() { echo "[run_gpu $(date -u +%H:%M:%S)] $*" | tee -a "$OUT/session.log"; }
 die() { log "STOP: $*"; exit 1; }
@@ -46,12 +50,12 @@ resolve_data() {   # WEIGHTS / SEEDS / CONFIG, else the first match of each in D
 # ---- the arms: capture flags | make_plan.sh environment | run flags
 # The capture flags are run_fake.py's (python/perseus/examples/fhe_ssm/run_fake.py); the run repeats them so the
 # driver rebuilds the same model on its CPU twin. LANDING=high's runtime switches (CAPENV) are exported to the capture
-# and the run, but they do NOT reach the port's capture today: fakes.make_capture_session builds its Config from the
-# ceiling, the landing and the unit only (python/perseus/examples/fhe_ssm/fakes.py:45-49, 139), so its capture_config.json
-# has no stc_first / raise_drop and its own refreshes land in the shipped order. `capture` refuses such a capture for a
-# LANDING=high arm. Next work: a capture Config that carries bts.stc_first=2 and bts.raise_drop=512:1.
+# and the run; the port's session Config takes them from the environment (fakes.runtime_config, fakes.LANDING_SWITCHES
+# in python/perseus/examples/fhe_ssm/fakes.py), so a high capture's capture_config.json carries bts.stc_first=2 and
+# bts.raise_drop=512:1 and its own dense refreshes land StC-first. `capture` still refuses a LANDING=high capture whose
+# stamp lacks them (a capture made without the switches exported, or by a port without that Config).
 ARMS="ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24 pcmm24 best lockstep2 lockstep4"
-arm() {   # sets CAP, PLANENV, RUNF, NOTE for arm $1
+arm() {   # sets CAP, PLANENV, RUNF, NOTE, DEVICE for arm $1
     CAP=""; PLANENV="LANDING=stock"; RUNF=""; NOTE=""
     case "$1" in
         ref)        NOTE="the reference: the shipped circuit, this runtime's landings without StC-first (diagonal linears)" ;;
@@ -73,12 +77,15 @@ arm() {   # sets CAP, PLANENV, RUNF, NOTE for arm $1
     esac
     case "$PLANENV" in *LANDING=high*) CAPENV="FIDESLIB_BTS_STC_FIRST=2 FIDESLIB_BTS_STC_FIRST_ROUTES=dense FIDESLIB_BTS_STC_FIRST_CF=13 FIDESLIB_BTS_RAISE_DROP=512:1 AUTO_BTS_LEVEL=44" ;;
                        *) CAPENV="FIDESLIB_BTS_STC_FIRST=0" ;; esac
-    # Every LANDING=high arm is blocked until the port's capture Config carries bts.stc_first=2 / raise_drop=512:1
-    # (header comment): without it the capture runs for 11 min and is then refused. HIGH_CAPTURE_OK=1 lifts the
-    # block once that Config exists (the post-capture check below still guards the file that was written).
+    # HIGH_CAPTURE_OK=0 blocks every LANDING=high arm before its 11-minute capture (for a checkout whose capture Config
+    # does not take the switches); the default 1 runs them, and the post-capture check in `capture` guards the stamp.
     case "$PLANENV" in *LANDING=high*)
-        [ "${HIGH_CAPTURE_OK:-0}" = 1 ] || NOTE="BLOCKED: LANDING=high needs a capture Config with stc_first=2 / raise_drop=512:1 (set HIGH_CAPTURE_OK=1 when the port writes it); $NOTE" ;;
+        [ "${HIGH_CAPTURE_OK:-1}" = 1 ] || NOTE="BLOCKED (HIGH_CAPTURE_OK=0): LANDING=high needs a capture Config with stc_first=2 / raise_drop=512:1; $NOTE" ;;
     esac
+    # DEVICE=1: every linear is PCMM. The driver refuses a diagonal linear on a device: a planned session keeps every
+    # plaintext it reads resident, and the diagonals are 344,064 per tick (about 2.3 TiB at 28 rows; its --pt-budget-gb).
+    # Such an arm runs its CPU part only (capture, plan, prepare) until the streamed-weights path or a device encoder.
+    case "$CAP" in *"--linear pcmm --"*|*"--linear pcmm") DEVICE=1 ;; *) DEVICE=0 ;; esac
 }
 capname() {   # the capture an arm uses: arms that differ only at plan or run time share one
     arm "$1"
@@ -144,7 +151,7 @@ bench)
         > "$OUT/bench_bts.txt" 2>&1 || { tail -20 "$OUT/bench_bts.txt"; die "pc-bench failed"; }
     tail -25 "$OUT/bench_bts.txt"; log "bench: $OUT/bench_bts.txt (set PLAN_BTS_MS from it for ILP_OBJECTIVE=ms); $(build_id)" ;;
 arms)
-    for a in $ARMS; do arm "$a"; printf '%-12s capture[%s] plan[%s] run[%s] -> %s  %s\n' "$a" "$CAP" "$PLANENV" "$RUNF" "$(capname "$a")" "$NOTE"; done ;;
+    for a in $ARMS; do arm "$a"; printf '%-12s device[%s] capture[%s] plan[%s] run[%s] -> %s  %s\n' "$a" "$([ $DEVICE = 1 ] && echo yes || echo cpu-only)" "$CAP" "$PLANENV" "$RUNF" "$(capname "$a")" "$NOTE"; done ;;
 capture)
     a=${1:?arm}; arm "$a"; c="$OUT/$(capname "$a")"
     case "$NOTE" in BLOCKED*) die "$a: $NOTE" ;; esac
@@ -157,7 +164,7 @@ capture)
         > "$OUT/$(capname "$a").capture.log" 2>&1 || { tail -20 "$OUT/$(capname "$a").capture.log"; die "capture $a failed"; }
     case "$PLANENV" in *LANDING=high*)
         "$PY" -c "import json, sys; b = json.load(open(sys.argv[1]))['bts']; sys.exit(0 if int(b.get('stc_first') or 0) == 2 and b.get('raise_drop') == '512:1' else 1)" "$c.part/capture_config.json" \
-            || die "capture $a: capture_config.json lacks stc_first=2 / raise_drop=512:1, the port's capture cannot make a LANDING=high capture yet (header comment); kept at $c.part" ;;
+            || die "capture $a: capture_config.json lacks stc_first=2 / raise_drop=512:1, the capture did not take the LANDING=high switches (fakes.LANDING_SWITCHES; header comment); kept at $c.part" ;;
     esac
     rm -rf "$c"; mv "$c.part" "$c"
     log "capture $a: done in $(( $(date +%s) - t0 )) s" ;;
@@ -170,12 +177,28 @@ plan)
     grep -q "compile check FAILED" "$OUT/bootstrap_placements/plan_$a/summary.txt" && die "plan $a does not bind (compile check)"
     grep -q "compile check: skipped" "$OUT/bootstrap_placements/plan_$a/summary.txt" && die "plan $a was not gated: the compile check is missing (run_gpu.sh verify builds it)"
     log "plan $a: $OUT/bootstrap_placements/plan_$a" ;;
-run)
+prepare)
     a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a"
     [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
-    "$PY" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$DRIVER') else 1)" 2>/dev/null \
-        || die "no driver module $DRIVER yet (RUNSHEET_GPU.md §4 is its contract)"
-    case "$CAP" in *"--linear pcmm"*) ;; *) log "note: $a uses diagonal linears: the driver must stream them (RUNSHEET_GPU.md §3)";; esac
+    PYTHONPATH="$W/python" "$PY" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$DRIVER') else 1)" 2>/dev/null \
+        || die "no driver module $DRIVER (RUNSHEET_GPU.md §4 is its contract)"
+    resolve_data
+    r="$OUT/prepare_$a"; mkdir -p "$r"
+    log "prepare $a (CPU only): $CAPENV $DRIVER --plan $p --prepare-only $CAP $RUNF ${PREPARE_EXTRA:-}"
+    t0=$(date +%s)
+    ( cd "$W" && env CUDA_VISIBLE_DEVICES="" PYTHONPATH="$W/python" $CAPENV "$PY" -m "$DRIVER" $MODEL_ARGS --plan "$p" \
+        --prepare-only ${PREPARE_EXTRA:-} $CAP $RUNF --out "$r/record.json" ) > "$r/prepare.log" 2>&1
+    rc=$?
+    log "prepare $a: exit $rc in $(( $(date +%s) - t0 )) s; $r/record.json"
+    tail -8 "$r/prepare.log"
+    [ $rc = 0 ] || die "prepare $a failed ($r/prepare.log)" ;;
+run)
+    a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a"
+    [ "$DEVICE" = 1 ] || die "run $a: a diagonal linear does not run on the device path (the driver refuses it: 344,064 resident plaintexts per tick, about 2.3 TiB); its CPU part is run_gpu.sh prepare $a (RUNSHEET_GPU.md §3)"
+    [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
+    PYTHONPATH="$W/python" "$PY" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$DRIVER') else 1)" 2>/dev/null \
+        || die "no driver module $DRIVER (RUNSHEET_GPU.md §4 is its contract)"
+    [ "$KEYS" != bundle ] || [ -d "${FHE_SSM_KEYS:-}" ] || die "KEYS=bundle reads the client's key directory from FHE_SSM_KEYS: export it (or KEYS=<dir>)"
     gpu_free
     resolve_data
     r="$OUT/run_$a"; mkdir -p "$r"
@@ -183,10 +206,10 @@ run)
     nvidia-smi --query-gpu=timestamp,memory.used,utilization.gpu,power.draw --format=csv -lms 500 -i "$GPU" > "$r/nvsmi.csv" 2>/dev/null &
     smi=$!
     trap 'kill "$smi" 2>/dev/null; wait "$smi" 2>/dev/null' EXIT       # the sampler dies with the step, whatever ends it
-    log "run $a: $DRIVER --plan $p --ticks $TICKS --profile $CAP $RUNF --keys $KEYS"
+    log "run $a: $DRIVER --plan $p --ticks $TICKS --profile --profile-every $PROFILE_EVERY $CAP $RUNF --keys $KEYS"
     t0=$(date +%s)
     ( cd "$W" && env CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH="$W/python" $CAPENV "$PY" -m "$DRIVER" $MODEL_ARGS --plan "$p" --ticks "$TICKS" \
-        --profile --keys "$KEYS" $CAP $RUNF --out "$r/record.json" ) > "$r/run.log" 2>&1
+        --profile --profile-every "$PROFILE_EVERY" --keys "$KEYS" $CAP $RUNF --out "$r/record.json" ) > "$r/run.log" 2>&1
     rc=$?
     kill "$smi" 2>/dev/null; wait "$smi" 2>/dev/null; trap - EXIT
     peak=$(awk -F', ' 'NR>1 {gsub(/ MiB/,"",$2); if ($2+0>m) m=$2+0} END {print m+0}' "$r/nvsmi.csv")
@@ -195,13 +218,14 @@ run)
     [ $rc = 0 ] || die "run $a failed ($r/run.log)" ;;
 smoke)
     export BLOCKS=1
-    bash "$0" capture ref && bash "$0" plan ref && bash "$0" run ref ;;
+    bash "$0" capture pcmm24 && bash "$0" plan pcmm24 && bash "$0" run pcmm24 ;;
 matrix)
     [ $# -gt 0 ] || set -- ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24 pcmm24 best
     for a in "$@"; do
         arm "$a"; case "$NOTE" in BLOCKED*) log "skip $a: $NOTE"; continue ;; esac
-        bash "$0" capture "$a" && bash "$0" plan "$a" && bash "$0" run "$a" || log "arm $a stopped (above); continuing"
+        last=run; [ "$DEVICE" = 1 ] || last=prepare
+        bash "$0" capture "$a" && bash "$0" plan "$a" && bash "$0" "$last" "$a" || log "arm $a stopped (above); continuing"
     done ;;
 *)
-    sed -n '2,24p' "$0"; exit 2 ;;
+    sed -n '2,25p' "$0"; exit 2 ;;
 esac

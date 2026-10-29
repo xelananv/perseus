@@ -7,10 +7,15 @@ effective level and the reactive refresh fires on that level reaching the ceilin
 a bootstrap lands at degree 2 at the dense landing of ``quirks.fakecap_landings``, a hint fires on the
 effective level. ``RuntimeFakeFhe`` is the fake in that mode (plus the reactive check after a subtraction).
 ``levels="fork"`` = ceiling 46 / landing 34 (the session whose fake counts the fork's GPU runs reproduced);
-``"preset"`` = the n32 GPT-2 preset's 44 / 32. README.md: the evidence and the caveat.
+``"preset"`` = the n32 GPT-2 preset's 44 / 32. README.md: the evidence and the caveat. The landing's runtime
+switches (``LANDING_SWITCHES``: the dense route's StC-first order, the raise drop) come from the environment as
+in upstream's GPT-2 capture, so a capture records the refreshes of the runtime it is planned for.
 """
 
 from __future__ import annotations
+
+import os
+from collections.abc import Mapping
 
 from perseus import _pc  # type: ignore[attr-defined]
 from perseus.impl import fake, fakecap
@@ -42,17 +47,78 @@ def level_preset(levels: str) -> tuple[int, int]:
     return int(cfg["bts.auto_bts_level"]), int(dense.split(":")[1])
 
 
-def runtime_config(limit: int, bts_out: int, unit: int):
-    """The fake's Config (``fake.fake_config``) with the dense landing at ``bts_out``."""
+#: The runtime switches that move where a session's own refreshes land, as legacy env names (the typed fields
+#: ``bts.stc_first``, ``stc_first_routes``, ``stc_first_staged_only``, ``stc_first_cf``, ``raise_drop``): the
+#: recorder reads the first three to pick the dense route's order (``fakecap.CapFhe.stc_first``), the compile
+#: reads ``raise_drop`` for each route's default drop. ``tools/fhe_ssm/make_plan.sh`` LANDING=high runs
+#: ``FIDESLIB_BTS_STC_FIRST=2 FIDESLIB_BTS_STC_FIRST_ROUTES=dense FIDESLIB_BTS_STC_FIRST_CF=13
+#: FIDESLIB_BTS_RAISE_DROP=512:1``.
+LANDING_SWITCHES = (
+    "FIDESLIB_BTS_STC_FIRST",
+    "FIDESLIB_BTS_STC_FIRST_ROUTES",
+    "FIDESLIB_BTS_STC_FIRST_STAGED_ONLY",
+    "FIDESLIB_BTS_STC_FIRST_CF",
+    "FIDESLIB_BTS_RAISE_DROP",
+)
+#: the fakecap Shadow's StC-first drop when ``quirks.fakecap_stc_drop`` is unset (``crates/pc-py/src/shadow.rs``)
+STC_DROP = 6
+
+
+def runtime_config(limit: int, bts_out: int, unit: int, env: Mapping[str, str] | None = None):
+    """The fake's Config (``fake.fake_config``) with the dense landing at ``bts_out``, plus every
+    ``LANDING_SWITCHES`` variable set (non-empty) in ``env`` (default ``os.environ``), typed by
+    ``Config.with_env`` as upstream's capture types its environment (``fakecap.session_config``). With none
+    set it is the four-field Config field for field. ``AUTO_BTS_LEVEL``, when set, must equal ``limit``: the
+    ceiling is the levels setting's, and the environment saying another is a mismatch, not an override."""
+    env = os.environ if env is None else env
+    ceiling = env.get("AUTO_BTS_LEVEL", "")
+    if ceiling and int(ceiling) != int(limit):
+        raise ValueError(f"AUTO_BTS_LEVEL={ceiling} in the environment, but the session's ceiling is {limit}")
     cfg = fake.fake_config(limit, bts_out, unit)
     cfg["quirks.fakecap_landings"] = landings(bts_out)
-    return cfg
+    switches = {k: env[k] for k in LANDING_SWITCHES if env.get(k, "")}
+    return cfg.with_env(switches) if switches else cfg
+
+
+def stc_first_configured(cfg) -> bool:
+    """Whether ``cfg`` runs a dense refresh in the StC-first order (``fakecap.CapFhe``'s rule)."""
+    return (
+        (cfg["bts.stc_first"] or 0) > 0
+        and not cfg["bts.stc_first_staged_only"]
+        and "dense" in (cfg["bts.stc_first_routes"] or ["dense"])
+    )
 
 
 class RuntimeFakeFhe(fake.FakeFhe):
-    """``FakeFhe`` under the runtime's level rules (the Shadow's ``fakecap`` mode)."""
+    """``FakeFhe`` under the runtime's level rules (the Shadow's ``fakecap`` mode). A Config with the
+    StC-first order on (``stc_first_configured``) refreshes dense in that order and encodes fresh inputs at
+    its landing, as the capture recorder does (``fakecap.CapFhe.inner_bootstrap``, ``bootstrap_output_level``)."""
 
     MODE = "fakecap"
+
+    def __init__(self, *a, **k):
+        super().__init__(*a, **k)
+        cfg = self.config
+        self._stc_first_cfg = stc_first_configured(cfg)
+        drop = cfg["quirks.fakecap_stc_drop"]
+        self._stc_drop = STC_DROP if drop is None else int(drop)
+
+    def stc_first(self) -> bool:
+        """The StC-first order for the next dense refresh: the Config's and ``bootstrap.stc_first``'s scope."""
+        if not self._stc_first_cfg:
+            return False
+        from perseus.impl import bootstrap as _pyb
+
+        return bool(_pyb._stc_first["on"])
+
+    def bootstrap_output_level(self):
+        return self._bts_out - (self._stc_drop if self.stc_first() else 0)
+
+    def bootstrap(self, a, route=None):
+        """A refresh; a dense one (``route`` None) on the StC-first route when the Config runs that order."""
+        if route is None and self.stc_first():
+            route = _pc.Route(slots=0, stc_first=True)
+        super().bootstrap(a, route)
 
     def maybe_bootstrap(self, a):
         """The reactive refresh after a product or a ciphertext subtraction, counted as such."""
@@ -84,9 +150,11 @@ def make_runtime_fake(
     rot_steps=(),
     complex_payload=False,
     sparse_slots=(512, 1),
+    env=None,
 ):
     """``fake.make_fake`` with the runtime's rules: (fhe, inf). Composite chains only (the
-    plaintext-add rule of a one-prime level depends on the plaintext's level, not modelled)."""
+    plaintext-add rule of a one-prime level depends on the plaintext's level, not modelled). ``env``:
+    where the landing's switches are read (``runtime_config``; default ``os.environ``)."""
     if unit < 2:
         raise ValueError("the runtime rules here are those of a composite chain (unit >= 2)")
     port_env()
@@ -99,7 +167,7 @@ def make_runtime_fake(
         slots=N,
         complex_payload=complex_payload,
         sparse_slots=sparse_slots,
-        config=runtime_config(limit, bts_out, unit),
+        config=runtime_config(limit, bts_out, unit, env),
     )
     return fhe, fake.FakeInf(fhe, N, hid, dim, H, H_real, E, E_real)
 
@@ -124,9 +192,12 @@ def make_capture_session(
     unit=2,
     rot_steps=(),
     complex_payload=True,
+    env=None,
 ):
     """The capture recorder (``perseus.impl.fakecap``: the runtime's rules plus graph.json per stage)
-    at this model's dims and levels: (fhe, inf); the core is ``fakecap.core``."""
+    at this model's dims and levels: (fhe, inf); the core is ``fakecap.core``. Its Config, which the
+    capture stamps as ``capture_config.json``, is ``runtime_config`` with the landing's switches from
+    ``env`` (default ``os.environ``)."""
     port_env()
     dims = Dims(N, d, d, 1, 1, d_ffn, d_ffn)
     return fakecap.make_session(
@@ -136,5 +207,5 @@ def make_capture_session(
         bts_out=bts_out,
         unit=unit,
         complex_payload=complex_payload,
-        config=runtime_config(limit, bts_out, unit),
+        config=runtime_config(limit, bts_out, unit, env),
     )
