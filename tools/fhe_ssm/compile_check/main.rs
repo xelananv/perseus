@@ -8,11 +8,40 @@
 //! the driver's `live_out` / `input_metas`, carried inputs take the compiler's seeds. Per block: refresh sites by kind
 //! and route, launches, refresh launches, pairs, the level check's pins and errors. Exit 0 when every block compiles
 //! with 0 check errors, 1 otherwise, 2 on usage. Not checked: the contract against a live session, anything on device.
+use pc_config::Config;
 use pc_program::compile::batch::Schedule;
 use pc_program::compile::{compile_dir, CompileOpts};
+use pc_program::plan::PlanDir;
 use pc_program::program::SiteKind;
 use std::collections::BTreeMap;
 use std::path::Path;
+
+/// The chain preset a plan names: the last `CHAIN_PRESET=` token of its `runtime=` line, else a block stamp's
+/// `chain.preset` (the plan's own Config, as `PlanDir::config` builds it), else None (n32, the runtime's default).
+fn plan_chain(pd: &Path) -> Option<String> {
+    let dir = match PlanDir::open(pd) {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("compile_check: {e}");
+            std::process::exit(1)
+        }
+    };
+    if let Some((_, v)) = dir.cmd.runtime.iter().rev().find(|(k, _)| k.as_str() == "CHAIN_PRESET") {
+        return Some(v.clone());
+    }
+    for (_, _, path) in &dir.blocks {
+        let Ok(bytes) = std::fs::read(path) else { continue };
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(&bytes) else { continue };
+        if let Some(stamp) = v.get("config") {
+            if let Ok(cfg) = serde_json::from_value::<Config>(stamp.clone()) {
+                if let Some(p) = cfg.chain.preset.clone() {
+                    return Some(p);
+                }
+            }
+        }
+    }
+    None
+}
 
 fn usage() -> ! {
     eprintln!("usage: compile_check <plan_dir> <graph_dir> [--schedule program|siblings|lockstep] [--no-batch] [--json <out.json>]");
@@ -48,6 +77,14 @@ fn main() {
         usage();
     }
     let (pd, gd) = (Path::new(&pos[0]), Path::new(&pos[1]));
+    // the chain: this model's plaintext rows and levels are the n32 chain's (54 primes); a plan whose stamp or
+    // runtime= line names another preset would compile on that chain (51 limbs on n32a4) and report counts that
+    // bind nothing here, so it is refused before anything is compiled
+    let chain = plan_chain(pd);
+    if let Some(c) = chain.as_deref().filter(|c| *c != "n32") {
+        eprintln!("compile_check: the plan names chain preset {c:?}; this model runs on n32 only");
+        std::process::exit(2)
+    }
     let t = std::time::Instant::now();
     let opts = CompileOpts { keep_going: true, no_batch, schedule, ..Default::default() };
     let dc = match compile_dir(pd, gd, &opts) {
@@ -58,6 +95,7 @@ fn main() {
         }
     };
     println!("compile_check {} x {} (schedule {schedule:?}, no_batch {no_batch}): {} programs", pd.display(), gd.display(), dc.programs.len());
+    println!("  chain preset: {}", chain.as_deref().unwrap_or("n32 (the default)"));
     println!("  block | sites placed/hint/delib | routes | launches bts_launches pairs k_max | pins exact richer | arena MB | errors");
     let mut tot: BTreeMap<&str, usize> = BTreeMap::new();
     let mut routes_tot: BTreeMap<String, usize> = BTreeMap::new();

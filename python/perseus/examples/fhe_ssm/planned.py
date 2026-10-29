@@ -410,6 +410,9 @@ class PlannedSsmRun(PlannedRun):
         n_conv = model.capacity if conversations is None else int(conversations)
         if not 1 <= n_conv <= model.capacity:
             raise ValueError(f"{n_conv} conversations for a capacity of {model.capacity}")
+        chain = config["chain.preset"] if config is not None else None
+        if chain not in (None, "n32"):  # the plaintext rows below are sized with N32_Q_PRIMES
+            raise ValueError(f"the session Config names chain preset {chain!r}; this model runs on n32 only")
         super().__init__(
             recorder,
             plan_dir,

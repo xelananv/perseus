@@ -390,6 +390,25 @@ def test_a_plan_on_another_chain_is_refused(synthetic_plan, tmp_path):
                     str(tmp_path / "x.json"),
                 ]
             )
+    # a quoted runtime token reads differently to the runtime (whitespace split) and to this driver (shlex)
+    plan = tmp_path / "plan_quoted"
+    shutil.copytree(synthetic_plan["plan"], plan)
+    cmd = plan / "PLAN_CMD.txt"
+    cmd.write_text(
+        "\n".join(
+            x + ' KV_ARENA_GB="0 CHAIN_PRESET=n32a4 "' if x.startswith("runtime=") else x
+            for x in cmd.read_text().splitlines()
+        )
+        + "\n"
+    )
+    with pytest.raises(SystemExit, match="quote"):
+        run_planned.session_config(str(plan))
+    # the run object itself refuses a Config on another chain, whoever built it
+    from perseus import config as pconfig
+
+    other = pconfig.preset(run_planned.PRESET).with_env({"CHAIN_PRESET": "n32a4"})
+    with pytest.raises(ValueError, match="chain preset 'n32a4'"):
+        planned.PlannedSsmRun(None, "x", other, [], None, model=small_model()[3], work_dir=str(tmp_path))
 
 
 def test_keyspec_on_the_cpu_build_emits_the_models_needs(synthetic_plan, tmp_path):

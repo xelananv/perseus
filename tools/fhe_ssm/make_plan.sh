@@ -128,6 +128,12 @@ fi
 [ "$PAIR" = 1 ] && [ "$LANDING" != high ] && echo "make_plan: PAIR=1 without LANDING=high forms no pair (pairs need StC-first: crates/pc-program/src/compile/mod.rs:509-514)" >&2
 [ -n "$SPARSE_B_K" ] && RUNTIME="$RUNTIME FIDESLIB_BTS_SPARSE_B_K=$SPARSE_B_K"
 [ -n "${RUNTIME_EXTRA:-}" ] && RUNTIME="$RUNTIME $RUNTIME_EXTRA"
+# the chain is a runtime Config field (CHAIN_PRESET): this model's plaintext rows and levels are n32's, so a runtime
+# line naming any preset is refused here, before the planner and the compile check could run on another chain; a
+# quote is refused too (the Rust parser splits the line on whitespace, the Python one with shlex: a quoted token
+# would read differently on the two sides: crates/pc-program/src/plan.rs vs python/perseus/config/__init__.py)
+case " $RUNTIME " in *" CHAIN_PRESET="*) echo "make_plan: the runtime line names a chain preset (CHAIN_PRESET=...); this model plans on n32 only: drop it" >&2; exit 2 ;; esac
+case "$RUNTIME" in *\"*|*\'*) echo "make_plan: a quote in the runtime line; the runtime and the driver would parse it differently: drop it" >&2; exit 2 ;; esac
 SCHEDULE=${SCHEDULE:-$([ "$PAIR" = 1 ] && echo siblings || echo program)}
 # every PLAN_* the caller exported is part of the recipe too (the planner reads several straight from the env);
 # PLAN_ROOT is where the plan lands, not a planner input: it stays out of the recipe line (a machine path otherwise)

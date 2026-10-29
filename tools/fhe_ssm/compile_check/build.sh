@@ -30,6 +30,7 @@ path = "src/main.rs"
 
 [dependencies]
 pc-program = { path = "$W/crates/pc-program" }
+pc-config = { path = "$W/crates/pc-config" }
 serde_json = $SJ
 
 [workspace]

@@ -529,6 +529,12 @@ def session_config(plan: str):
     ``PlanDir::config`` reads a plan the same way). The chain is a runtime Config field (``chain.preset``,
     ``CHAIN_PRESET``): a runtime line that names another chain builds the session, its shadow and its key manifest
     on that chain, while this model's plaintext rows and levels are the n32 chain's; such a plan is refused."""
+    raw = plan_cmd_lines(plan).get("runtime", "")
+    if any(q in raw for q in "\"'"):
+        raise SystemExit(
+            f"{plan}: a quote in its runtime= line; the runtime splits that line on whitespace and this driver "
+            "with shlex, so a quoted token would read differently on the two sides"
+        )
     cfg = config.plan_runtime(plan, CHAIN, base=config.preset(PRESET))
     chain = cfg["chain.preset"]
     if chain not in (None, CHAIN):
