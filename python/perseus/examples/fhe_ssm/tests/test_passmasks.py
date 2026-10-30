@@ -304,11 +304,15 @@ def test_copies_must_hold_their_sources_token():
 def test_the_registers_rules_across_passes():
     seq = cfg_of([Segment.seq(0, 64, 0, "fresh", "L")])
     seq_c = cfg_of([Segment.seq(0, 64, 0, "carry", "L")])
-    # carry on a register nothing wrote
-    with pytest.raises(ValueError, match="no pass wrote"):
-        run_tracker([cfg_of(conv_all())])
+    # carry on a register no pass wrote: start()'s zeros (today's first tick), for a conv and for a whole seq home
+    assert run_tracker([cfg_of(conv_all())]) == [[None] * 64]
+    assert run_tracker([seq_c]) == [[None]]
+    # but not a seq whose home is partly written by another stream
+    part = cfg_of(
+        [Segment.seq(0, 32, 0, "fresh", "A"), *(Segment.conv(q, "fresh", f"c{q}") for q in range(32, 64))]
+    )
     with pytest.raises(ValueError, match="no previous pass"):
-        run_tracker([seq_c])
+        run_tracker([part, cfg_of([Segment.seq(0, 64, 0, "carry", "B")])])
     # a continuing seq whose home is not inside its previous home (a home only shrinks)
     narrow = cfg_of(
         [Segment.seq(32, 64, 32, "fresh", "L"), *(Segment.conv(q, "fresh", f"c{q}") for q in range(32))]
@@ -435,6 +439,7 @@ def test_churn_and_tick():
     assert cfgs[4].mask_key() == cfgs[5].mask_key()
     ticks = passmasks.scenario("tick", vocab=64, conversations=10)
     assert len(ticks) == 6
+    assert len({c.mask_key() for c in ticks}) == 1  # one configuration throughout, as today's tick
     assert ticks[1].live_slots() == list(range(10))
     assert all(s.parked_from == 0 for s in ticks[1].segments if not s.live)
     for spec in ("tick", "prefill:320", "doc:258:64", "mixed", "churn"):

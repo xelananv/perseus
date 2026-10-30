@@ -19,10 +19,11 @@ lane-slots per channel group, the same partition in every channel. A configurati
 ``Tracker`` follows which stream last wrote each lane-slot's register and refuses what the masks cannot honour
 (``validate`` refuses a malformed pass on its own): an overlapping or incomplete partition, an odd home bound, a
 continuing ``seq`` whose home is not inside its previous home, ``carry`` on a register another stream wrote, a parked
-lane-slot wrote, nothing wrote yet, or a ``seq`` that still continues wrote; a finished segment's home lanes may turn
-``conv carry`` (the hand-over: every home lane-slot, padding included, holds the segment's final state after its last
-pass). Not representable (stated gaps): a segment that widens, a conversation's state handed to a multi-lane segment,
-a segment ending on a real axis.
+lane-slot wrote, or a ``seq`` that still continues wrote; a finished segment's home lanes may turn ``conv carry`` (the
+hand-over: every home lane-slot, padding included, holds the segment's final state after its last pass). A register
+no pass wrote holds ``FheSsmModel.start()``'s encryption of zero: ``carry`` there enters from the zero state, as
+today's first tick does (a ``seq`` only when no lane-slot of its home was written). Not representable (stated gaps):
+a segment that widens, a conversation's state handed to a multi-lane segment, a segment ending on a real axis.
 
 **The lane-slot order.** The client packs the ``2t`` rows of a pass in ``q`` order; today's packing puts row ``r`` on
 lane ``r mod t``, axis ``r div t`` (``geometry.PairGeometry.encode_rows``), so one permutation ``pi(q) = t (q mod 2) +
@@ -341,6 +342,8 @@ class Tracker:
         self.passes = 0
 
     def resolve(self, cfg: PassConfig) -> list[str | None]:
+        """The entry stream per segment: the segment's own (it continues), a finished seq's (the hand-over), or None
+        (zeros: ``fresh``, or ``carry`` on registers no pass wrote)."""
         validate(cfg)
         if cfg.lane_slots != self.n:
             raise ValueError(f"a pass of {cfg.lane_slots} lane-slots on registers of {self.n}")
@@ -352,6 +355,9 @@ class Tracker:
                 continue
             if seg.kind == "seq":
                 mine = Writer("seq", seg.stream)
+                if all(self.writer[q] is None for q in range(seg.h0, seg.h1)):
+                    src.append(None)  # start()'s zeros
+                    continue
                 if any(self.writer[q] != mine for q in range(seg.h0, seg.h1)):
                     prev = self.homes.get(str(seg.stream))
                     was_seq = prev is not None and any(w == mine for w in self.writer)
@@ -370,7 +376,8 @@ class Tracker:
             w = self.writer[seg.q0]
             where = f"segment {k}: conv {seg.stream!r} carries on lane-slot {seg.q0}"
             if w is None:
-                raise ValueError(f"{where}, whose register no pass wrote (use fresh)")
+                src.append(None)  # start()'s zeros: today's first tick
+                continue
             if w.kind == "parked":
                 raise ValueError(f"{where}, whose register a parked copy wrote")
             if w.kind == "conv":
@@ -724,15 +731,16 @@ def _conv_pass(
 
 
 def tick(n: int, toks: _Tokens, passes: int = 6, conversations: int | None = None) -> list[PassConfig]:
-    """``passes`` ticks of ``conversations`` (default all ``n``) conversations on lane-slots ``0 .. c - 1`` (fresh in
-    pass 0, carried after), the rest parked copies of lane-slot 0: today's tick in ``q`` order."""
+    """``passes`` ticks of ``conversations`` (default all ``n``) conversations on lane-slots ``0 .. c - 1``, every pass
+    ``conv carry`` (pass 0 from ``start()``'s zeros, as today's first tick), the rest parked copies of lane-slot 0:
+    today's tick in ``q`` order, one configuration throughout."""
     c = n if conversations is None else int(conversations)
     if not 1 <= c <= n:
         raise ValueError(f"{c} conversations on {n} lane-slots")
     out = []
     for p in range(int(passes)):
         drawn = toks.draw(c)
-        live = {q: ("fresh" if p == 0 else "carry", f"c{q}") for q in range(c)}
+        live = {q: ("carry", f"c{q}") for q in range(c)}
         out.append(_conv_pass(n, live, 0, dict(enumerate(drawn)), f"tick.{p}"))
     return out
 
