@@ -83,14 +83,17 @@ def cm_gate(ops: Ops, k, r, w, j: int = 0):
 def pass_shift(ops: Ops, geo: Geometry, n, cn, pk):
     """The token shift of a pass: ``um[q] = mix n[q] + (1 - mix) n_prev[q]`` with ``n_prev[q] = n[q - 1]`` inside a
     sequence and the carried ``C_n[q]`` (or 0, fresh) elsewhere, as six products (passmasks.py: ``mix + U_0`` one
-    mask), one rotation by -1, three conjugations; depth 1 (``um`` at today's level)."""
+    mask), one rotation by -1, three conjugations; depth 1 (``um`` at today's level). Each product pair (a mask and
+    its conjugate half) is summed before it joins the total, as the lane kernel sums its pairs: on a lane whose two
+    axes read the register differently the pair is ``(1 - mix)/2 (C + conj C)``, whose real part doubles one rounded
+    product exactly, so the tick configuration rounds as today's ``mix (.) n + (1 - mix) (.) n_prev``."""
     with geo.step("tm.shift"):
         nv, cv = pk.enter(n), pk.enter(cn)
         r = pk.rot1(ops, nv)
         nc, rc, cc = ops.conjugate(nv), ops.conjugate(r), ops.conjugate(cv)
-        um = pk.mult(ops, nv, "sh/mixU0")
-        for ct, name in ((nc, "sh/U0c"), (r, "sh/U1"), (rc, "sh/U1c"), (cv, "sh/V"), (cc, "sh/Vc")):
-            um = ops.add(um, pk.mult(ops, ct, name))
+        um = ops.add(pk.mult(ops, nv, "sh/mixU0"), pk.mult(ops, nc, "sh/U0c"))
+        um = ops.add(um, ops.add(pk.mult(ops, r, "sh/U1"), pk.mult(ops, rc, "sh/U1c")))
+        um = ops.add(um, ops.add(pk.mult(ops, cv, "sh/V"), pk.mult(ops, cc, "sh/Vc")))
         return pk.leave(um)
 
 

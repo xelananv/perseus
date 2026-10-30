@@ -368,8 +368,9 @@ def test_k1_and_the_shift_after_block_0_against_pass_(monkeypatch):
 @pytest.mark.parametrize("conversations", [NQ, 10, 1])
 def test_tick_configuration_equals_pass_kernels_off(conversations):
     """``--pass-kernels on`` in the tick configuration against ``off`` on the same conversations (conversation k on
-    lane-slot k, today on row k): every extra term multiplies an exact zero mask, so the replies agree to the last
-    bit (asserted <= 1e-13 and finite); fewer conversations park the rest (copies of lane-slot 0, run fresh)."""
+    lane-slot k, today on row k): every extra term multiplies an exact zero mask, and a lane with one live and one
+    parked axis (one conversation) sums its shift pair before the total, so the replies agree to the last bit;
+    fewer conversations park the rest (copies of lane-slot 0, run fresh)."""
     params = params_of()
     cfgs = scenario("tick:3", params, conversations=conversations)
     _f, _m, on = labeled_pass(params, cfgs)
@@ -378,6 +379,7 @@ def test_tick_configuration_equals_pass_kernels_off(conversations):
     for (_c, got_on, _r), (_c2, got_off) in zip(on, off, strict=True):
         assert np.isfinite(got_on).all()
         assert ref.rel_err_rms(got_on[:conversations], got_off) <= 1e-13
+        np.testing.assert_array_equal(got_on[:conversations], got_off)
 
 
 def test_the_lane_slot_order_round_trips():
