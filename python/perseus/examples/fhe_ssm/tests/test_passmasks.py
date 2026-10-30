@@ -249,6 +249,13 @@ def test_the_conj_halves_and_the_one_axis_lane():
     # lane 22 = lane-slots 44 (padding) and 45 (B's carried first position)
     assert np.abs(co["sh/Vc"][22]).max() > 0
     seq = passmasks.coefficients(CASES["seq fresh [0,64)"], bp.a, bp.mix)
+    # offset 0 inside a sequence: the real axis (position 2j) never reads the imaginary one (the later position 2j + 1,
+    # c_eo = 0), the imaginary reads the real (c_oe = (1 - a) a): Im P_0 = Im P'_0 = c_oe / 2, Re P'_0 = 0
+    np.testing.assert_array_equal(seq["k1/P"][0].imag, seq["k1/Pc"][0].imag)
+    np.testing.assert_allclose(
+        seq["k1/P"][0].imag, 0.5 * (1 - bp.a) * bp.a * np.ones((T, 1)), rtol=1e-15, atol=0
+    )
+    assert not seq["k1/Pc"][0].real.any()
     assert np.abs(seq["k1/Pc"][0]).max() > 0
     assert np.abs(seq["k1/Pc"][31]).max() > 0
     assert not seq["k1/P"][1:, 0].any()  # lane 0 has no lane below it
