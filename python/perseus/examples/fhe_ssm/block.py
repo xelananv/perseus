@@ -110,7 +110,7 @@ def pass_scan(ops: Ops, geo: Geometry, x, c, pk):
 
 
 def carry_prep(ops: Ops, geo: Geometry, st: BlockState, pk):
-    """K2, before the canonical carry: every lane of a sequence's home gets the segment's final state (its last
+    """K2, after the time mix (``ssm_block``): every lane of a sequence's home gets the segment's final state (its last
     position's ``S`` and ``n``, on the imaginary axis of the home's last lane) on both axes, a conversation's
     lane-slots keep their own. Every 1/2 rides a mask (a scalar product costs a level)::
 
@@ -193,11 +193,16 @@ def channel_mix(ops: Ops, geo: Geometry, h, w, form: str, pack_stats: str = "off
 def ssm_block(
     ops: Ops, geo: Geometry, h, w, st: BlockState, form: str = "perseus", pack_stats: str = "off", pk=None
 ):
-    """One block; with the pass kernels (``pk``) the block ends with the carry prep (``carry_prep``)."""
-    h = channel_mix(ops, geo, time_mix(ops, geo, h, w, st, form, pack_stats, pk), w, form, pack_stats)
+    """One block; with the pass kernels (``pk``) the carry prep (``carry_prep``) runs between the time mix and the
+    channel mix: ``S`` and ``n`` are final after the time mix, and the block's last op stays the residual's add. The
+    planner chains block ``b + 1``'s entry level from block ``b``'s last op that is not a deliberate refresh
+    (``plan/placer/emit.py``, ``exit_var``); with the carry prep last, that op was the carry prep's final add and every
+    later block was planned from that value's level instead of the residual's. The carried values wait for the
+    canonical carry through the channel mix (two ciphertexts held, no op added)."""
+    h = time_mix(ops, geo, h, w, st, form, pack_stats, pk)
     if pk is not None:
         carry_prep(ops, geo, st, pk)
-    return h
+    return channel_mix(ops, geo, h, w, form, pack_stats)
 
 
 def carry(ops: Ops, geo: Geometry, st: BlockState):

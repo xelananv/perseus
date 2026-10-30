@@ -25,7 +25,8 @@ gives up is printed beside the merge: per block the nodes whose ``output_max_coe
 chosen capture's (the coefficient maximum is the planner's CF key when captured, ``btserr.choose_site``) and the largest
 such ratio. A capture whose structure differs from the base's is refused (the merged plan would bind one of them only;
 the partial output is removed). The per-block lines follow ``merge_mags.py``'s ("grew": nodes whose record came from
-another capture than the base, with the ratio of the chosen ``output_max_abs`` to the base's).
+another capture than the base, with the ratio of the chosen ``output_max_abs`` to the base's; a node that is an exact
+zero in the base, a product by a mask that is zero in the base's configuration, is counted apart and has no ratio).
 
 **The margins** (``margins``): for every refresh site of a plan (its placements, its fired hints, and the graph's
 deliberate refreshes: the carry), each capture's ``output_max_abs`` and ``output_max_coeff`` of the site's producer
@@ -123,7 +124,7 @@ def _merge_block(blocks: list[list[dict]], labels: list[str]) -> tuple[list[dict
     """One block's merged nodes (``blocks[0]``'s list, overwritten in place) and its record."""
     nodes = blocks[0]
     took = dict.fromkeys(labels, 0)
-    grown, coeff_lost = [], []
+    grown, coeff_lost, from_zero = [], [], 0
     for i, n in enumerate(nodes):
         cand = [g[i] for g in blocks]  # cand[0] is n itself: read everything before n is overwritten
         k = _chosen(cand)
@@ -136,7 +137,10 @@ def _merge_block(blocks: list[list[dict]], labels: list[str]) -> tuple[list[dict
             coeff_lost.append((ct / max(cm, 1e-300), n["output"], labels[top]))
         if k:
             b0 = float(n.get("output_max_abs") or 0.0)
-            grown.append((float(src["output_max_abs"]) / max(b0, 1e-300), n["output"], labels[k]))
+            if b0 > 0.0:
+                grown.append((float(src["output_max_abs"]) / b0, n["output"], labels[k]))
+            else:
+                from_zero += 1  # an exact zero in the base (a mask zero in its configuration): no ratio
             for s in STATS:
                 if s in src:
                     n[s] = src[s]
@@ -146,7 +150,8 @@ def _merge_block(blocks: list[list[dict]], labels: list[str]) -> tuple[list[dict
     coeff_lost.sort(reverse=True)
     rec = {
         "nodes": len(nodes),
-        "grew": len(grown),
+        "grew": len(grown) + from_zero,
+        "grew_from_zero": from_zero,
         "largest": [{"output": v, "ratio": r, "from": lab} for r, v, lab in grown[:3]],
         "records_from": took,
         "coeff_above_chosen": len(coeff_lost),
@@ -161,7 +166,7 @@ def _merge_line(blk: str, rec: dict) -> str:
     def few(xs):
         return ", ".join(f"{x['output']} x{x['ratio']:.3g} ({x['from']})" for x in xs)
 
-    line = f"{blk}: {rec['nodes']} nodes, {rec['grew']} grew"
+    line = f"{blk}: {rec['nodes']} nodes, {rec['grew']} grew ({rec['grew_from_zero']} from an exact zero in the base)"
     if rec["largest"]:
         line += "; largest " + few(rec["largest"])
     line += f"; coefficient max above the chosen record's at {rec['coeff_above_chosen']}"

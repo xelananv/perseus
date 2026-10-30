@@ -310,7 +310,13 @@ def test_merge_takes_the_largest_record_whole(tmp_path):
     assert rec["blocks"]["block_0"]["records_from"] == {"A": 1, "B": 1, "C": 1}
     assert rec["blocks"]["block_0"]["grew"] == 2
     assert rec["blocks"]["block_0"]["largest"][0] == {"output": "v_1", "ratio": 4.0, "from": "B"}
-    assert lines[0].startswith("block_0: 3 nodes, 2 grew; largest v_1 x4 (B), v_2 x1.25 (C)")
+    assert lines[0].startswith(
+        "block_0: 3 nodes, 2 grew (0 from an exact zero in the base); largest v_1 x4 (B), v_2 x1.25 (C)"
+    )
+    # an exact zero in the base grows without a ratio
+    z = fake_capture(tmp_path / "z", {"block_0": [0.0, 2.0, 3.0], "block_1": [5.0]})
+    rz = passmerge.merge(z, [b], tmp_path / "mz", log=lambda _s: None)["blocks"]["block_0"]
+    assert (rz["grew"], rz["grew_from_zero"], [x["output"] for x in rz["largest"]]) == (1, 1, [])
     # a tie keeps the base's record
     t = fake_capture(tmp_path / "t", {"block_0": [1.0, 2.0, 3.0], "block_1": [5.0]})
     tt = json.loads((t / "block_0" / "graph.json").read_text())
@@ -366,6 +372,14 @@ def test_the_merged_stock_plan_compiles_against_every_configuration(caps, tmp_pa
     )
     plan = plan_of(merged, tmp_path, "syn_pass_stock")
     assert "check errors 0;" in (plan / "summary.txt").read_text()
+    # the planner chains block b + 1 from block b's last op that is not a deliberate refresh (emit.py exit_var): the
+    # residual's add, as today (with the carry prep last in the block, it was the carry prep's final add)
+    gm = passmerge.graphs(merged)
+    for b in range(L):
+        s = json.loads((plan / f"block_{b}_placement.json").read_text())["summary"]
+        exit_node = next(n for n in gm[f"block_{b}"] if n["output"] == s["exit_var"])
+        assert exit_node["step"] == f"blk{b}.cm.v", exit_node["step"]
+        assert exit_node["op_type"] == "add"
     for lab in LABELS:
         js = tmp_path / f"cc_{lab}.json"
         p = subprocess.run(
