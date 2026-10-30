@@ -63,8 +63,9 @@ from perseus.impl import fake, fakecap
 #: lane j reads lane j - s (the scan, the token shift) / lane j + s (the carry prep's broadcast)
 CAUSAL, ANTICAUSAL = -1, 1
 SIGNS = (CAUSAL, ANTICAUSAL)
-#: the attribute ``use_pass_hook`` sets on a session's ``inf``
+#: the attribute ``use_pass_hook`` sets on a session's ``inf``, and the fake branch's product counter beside it
 HOOK = "mult_pass"
+COUNTER = "pass_products"
 
 
 def bsgs_split(t: int) -> tuple[int, int]:
@@ -162,22 +163,26 @@ def bsgs_numpy(x, M, Mc, sign: int, nb: int, ng: int) -> np.ndarray:
     """``LaneKernel.apply``'s arithmetic on a numpy slot vector: ``M[s]`` / ``Mc[s]`` are the pre-rotated plaintexts
     (``Mc`` None: no conjugate half), babies ``rot(., sign b)``, giants ``rot(., sign NB g)``. Each product is
     ``ciphertext * plaintext`` in that order, as the fake computes it (``FakeInf._mult_pt``): numpy's complex multiply
-    fuses one of the two cross products of the imaginary part, so ``a * b`` and ``b * a`` can differ in the last bit."""
+    is not commutative bit for bit (``a * b`` and ``b * a`` differed in the last bit on numpy 2.5.4)."""
     x = np.asarray(x, dtype=np.complex128)
     halves = [x] if Mc is None else [x, np.conj(x)]
     babies = [[np.roll(v, -sign * b) for b in range(nb)] for v in halves]
-    total = None
+    total: np.ndarray | None = None
     for g in range(ng):
-        acc = None
+        acc: np.ndarray | None = None
         for b in range(nb):
             s = nb * g + b
             p = babies[0][b] * M[s]
             if Mc is not None:
                 p = p + babies[1][b] * Mc[s]
             acc = p if acc is None else acc + p
+        if acc is None:
+            raise ValueError(f"a giant group of {nb} babies is empty")
         if g:
             acc = np.roll(acc, -sign * nb * g)
         total = acc if total is None else total + acc
+    if total is None:
+        raise ValueError(f"no giant group ({ng})")
     return total
 
 
@@ -237,7 +242,7 @@ class LaneKernel:
 def pass_mult_fake(ops, ct, mask_id: str, vec):  # noqa: ARG001 (the hook's signature)
     """The numpy fake's branch: the product with the current values, encoded at use, no key; counted on the inf
     (``inf.pass_products``) for the driver's census."""
-    ops.inf.pass_products = getattr(ops.inf, "pass_products", 0) + 1
+    setattr(ops.inf, COUNTER, getattr(ops.inf, COUNTER, 0) + 1)
     return ops.mult_pt(ct, vec)
 
 
@@ -252,7 +257,7 @@ def use_pass_hook(inf) -> None:
         )
     if isinstance(inf, fake.FakeInf):
         setattr(inf, HOOK, pass_mult_fake)
-        inf.pass_products = 0
+        setattr(inf, COUNTER, 0)
         return
     raise TypeError(f"the pass hook runs on the fake or the capture recorder, not on {type(inf)!r}")
 

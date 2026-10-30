@@ -230,7 +230,9 @@ def test_lane_kernel_on_the_fake_equals_numpy_and_counts(sign, conj_half):
     x = fake.FakeCt(xv.copy(), 36, 2)
 
     def mult(o, ct, s, half):
-        return o.mult_pt(ct, (Mc if half else M)[s])
+        table = Mc if half else M
+        assert table is not None
+        return o.mult_pt(ct, table[s])
 
     y = kern.apply(ops, x, mult)
     nb, ng = passkernel.bsgs_split(T)
@@ -246,7 +248,7 @@ def test_lane_kernel_on_the_fake_equals_numpy_and_counts(sign, conj_half):
     steps = kern.rotation_steps(N)
     assert steps == {(sign * k) % N for k in (1, 2, 3, 4, 5, 6, 7, 8, 16, 24)}
     # the numpy ops (the mirror's) run the same kernel to the same numbers
-    ny = kern.apply(NumpyOps(), xv.copy(), lambda o, ct, s, half: o.mult_pt(ct, (Mc if half else M)[s]))
+    ny = kern.apply(NumpyOps(), xv.copy(), mult)
     np.testing.assert_array_equal(ny, y.vec)
 
 
