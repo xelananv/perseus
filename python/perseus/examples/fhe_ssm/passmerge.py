@@ -3,7 +3,7 @@
 capture a plan is cut on; the per-site margins of a plan against them.
 
     python -m perseus.examples.fhe_ssm.passmerge diff A B
-    python -m perseus.examples.fhe_ssm.passmerge merge OUT BASE EXTRA [EXTRA ...] [--labels L0 L1 ...] [--json F]
+    python -m perseus.examples.fhe_ssm.passmerge merge OUT BASE EXTRA [EXTRA ...] [--labels L0 L1 ...] [--rule record|max_each] [--json F]
     python -m perseus.examples.fhe_ssm.passmerge margins PLAN MERGED LABEL=CAPTURE [...] [--kappa 2] [--json F]
 
 **One op stream.** Under ``--pass-kernels on`` every configuration issues the same products, rotations and refreshes
@@ -20,10 +20,14 @@ then per node every statistic taken from the capture with the largest ``output_m
 earliest extra): one capture's record of one value, so ``output_mean`` / ``output_max_dev`` / the coefficient maxima stay
 consistent with the slot maximum the planner sizes the refresh by (``placer/refresh.py``: ``max_abs``, ``max_coeff``,
 ``max_coeff_ac``, ``mean``, ``max_dev`` of the site's producer). Upstream's ``scripts/utils/merge_mags.py`` maxes each
-``output_max_*`` field separately and keeps the base's ``output_mean``; this rule keeps a node's record whole. What it
-gives up is printed beside the merge: per block the nodes whose ``output_max_coeff`` in another capture exceeds the
-chosen capture's (the coefficient maximum is the planner's CF key when captured, ``btserr.choose_site``) and the largest
-such ratio. A capture whose structure differs from the base's is refused (the merged plan would bind one of them only;
+``output_max_*`` field separately and keeps the base's ``output_mean``; the ``record`` rule keeps a node's record whole.
+What it gives up is printed beside the merge: per block the nodes whose ``output_max_coeff`` in another capture exceeds
+the chosen capture's (the coefficient maximum is the planner's CF key when captured, ``btserr.choose_site``) and the
+largest such ratio. Measured at the model shape on the diagonal arm's stock plan, what it gives up is not small: a
+fired hint's coefficient maximum under the continuing-chunk configuration reached 5.0 times the record's times κ
+(``blk22.tm.out``), so the ``max_each`` rule (``RULES``) is the one the plans are cut on: every magnitude statistic
+its maximum over the captures, the signed mean the largest-slot record's. A capture whose structure differs from the
+base's is refused (the merged plan would bind one of them only;
 the partial output is removed). The per-block lines follow ``merge_mags.py``'s ("grew": nodes whose record came from
 another capture than the base, with the ratio of the chosen ``output_max_abs`` to the base's; a node that is an exact
 zero in the base, a product by a mask that is zero in the base's configuration, is counted apart and has no ratio).
@@ -120,8 +124,23 @@ def _chosen(nodes: Sequence[dict]) -> int:
     return k
 
 
-def _merge_block(blocks: list[list[dict]], labels: list[str]) -> tuple[list[dict], dict]:
-    """One block's merged nodes (``blocks[0]``'s list, overwritten in place) and its record."""
+#: the merge rules: ``record`` keeps every statistic of the capture with the largest ``output_max_abs`` (one capture's
+#: record of one value); ``max_each`` takes the maximum of every magnitude statistic over the captures separately
+#: (``output_max_abs``, ``output_max_dev``, ``output_max_coeff``, ``output_max_coeff_ac``: upstream's ``merge_mags.py``
+#: rule) and the signed ``output_mean`` of that largest-slot record, so a site the planner sizes by the coefficient
+#: maximum (a dense refresh in the shipped order, where the bootstrap's sine sees the coefficients) is sized for the
+#: configuration whose coefficients are largest even when another configuration's slots are: nothing is given up
+RULES = ("record", "max_each")
+#: the statistics ``max_each`` takes the maximum of (every one but the signed mean)
+MAXED = ("output_max_abs", "output_max_dev", "output_max_coeff", "output_max_coeff_ac")
+
+
+def _merge_block(
+    blocks: list[list[dict]], labels: list[str], rule: str = "record"
+) -> tuple[list[dict], dict]:
+    """One block's merged nodes (``blocks[0]``'s list, overwritten in place) and its record, under ``rule``."""
+    if rule not in RULES:
+        raise ValueError(f"rule must be one of {RULES}, got {rule!r}")
     nodes = blocks[0]
     took = dict.fromkeys(labels, 0)
     grown, coeff_lost, from_zero = [], [], 0
@@ -133,7 +152,7 @@ def _merge_block(blocks: list[list[dict]], labels: list[str]) -> tuple[list[dict
         cm = float(src.get("output_max_coeff") or 0.0)
         top = max(range(len(cand)), key=lambda j: float(cand[j].get("output_max_coeff") or 0.0))
         ct = float(cand[top].get("output_max_coeff") or 0.0)
-        if ct > cm:
+        if ct > cm and rule == "record":
             coeff_lost.append((ct / max(cm, 1e-300), n["output"], labels[top]))
         if k:
             b0 = float(n.get("output_max_abs") or 0.0)
@@ -141,11 +160,25 @@ def _merge_block(blocks: list[list[dict]], labels: list[str]) -> tuple[list[dict
                 grown.append((float(src["output_max_abs"]) / b0, n["output"], labels[k]))
             else:
                 from_zero += 1  # an exact zero in the base (a mask zero in its configuration): no ratio
-            for s in STATS:
-                if s in src:
-                    n[s] = src[s]
-                else:
-                    n.pop(s, None)
+        if rule == "record":
+            if k:
+                for s in STATS:
+                    if s in src:
+                        n[s] = src[s]
+                    else:
+                        n.pop(s, None)
+            continue
+        # max_each: the signed mean from the largest-slot record, every other statistic its maximum over the captures
+        if "output_mean" in src:
+            n["output_mean"] = src["output_mean"]
+        else:
+            n.pop("output_mean", None)
+        for s in MAXED:
+            vals = [float(c[s]) for c in cand if c.get(s) is not None]
+            if vals:
+                n[s] = max(vals)
+            else:
+                n.pop(s, None)
     grown.sort(reverse=True)
     coeff_lost.sort(reverse=True)
     rec = {
@@ -175,22 +208,28 @@ def _merge_line(blk: str, rec: dict) -> str:
     return line
 
 
-def _merge_one(caps: list[pathlib.Path], labels: list[str], blk: str, out: pathlib.Path) -> dict:
+def _merge_one(
+    caps: list[pathlib.Path], labels: list[str], blk: str, out: pathlib.Path, rule: str = "record"
+) -> dict:
     """Block ``blk`` of every capture: checked against the base's structure, merged, written under ``out``."""
     got = [load_block(c, blk) or [] for c in caps]
     for c, g in zip(caps[1:], got[1:], strict=True):
         n, first = _block_diff(got[0], g, 3)
         if n:
             raise ValueError(f"{c} differs from {caps[0]} outside the magnitudes ({blk}: {first})")
-    nodes, brec = _merge_block(got, labels)
+    nodes, brec = _merge_block(got, labels, rule)
     with open(out / blk / "graph.json", "w", encoding="utf-8") as f:
         json.dump({"version": 2, "nodes": nodes}, f)
     return brec
 
 
-def merge(base, extras: Sequence, out, labels: Sequence[str] | None = None, log=print) -> dict:
-    """The merged capture at ``out`` (a new directory) from ``base`` and ``extras`` (the module docstring); returns the
-    record that is also written as ``out/passmerge.json``."""
+def merge(
+    base, extras: Sequence, out, labels: Sequence[str] | None = None, log=print, rule: str = "record"
+) -> dict:
+    """The merged capture at ``out`` (a new directory) from ``base`` and ``extras`` (the module docstring) under
+    ``rule`` (``RULES``); returns the record that is also written as ``out/passmerge.json``."""
+    if rule not in RULES:
+        raise ValueError(f"rule must be one of {RULES}, got {rule!r}")
     base, out = pathlib.Path(base), pathlib.Path(out)
     caps = [base, *(pathlib.Path(e) for e in extras)]
     labels = list(labels) if labels else [p.name for p in caps]
@@ -209,11 +248,12 @@ def merge(base, extras: Sequence, out, labels: Sequence[str] | None = None, log=
     shutil.copytree(
         base, out, ignore=shutil.ignore_patterns("graph.json", "capture_pass.json", "passmerge.json")
     )
-    rec: dict = {"base": str(base), "captures": [str(c) for c in caps], "labels": labels, "rule": "max_abs record",
+    rec: dict = {"base": str(base), "captures": [str(c) for c in caps], "labels": labels,
+                 "rule": "max_abs record" if rule == "record" else "max of each statistic, the mean of the max_abs record",
                  "stats": list(STATS), "sources": stamps, "blocks": {}}  # fmt: skip
     try:
         for blk in blocks:
-            rec["blocks"][blk] = _merge_one(caps, labels, blk, out)
+            rec["blocks"][blk] = _merge_one(caps, labels, blk, out, rule)
             log(_merge_line(blk, rec["blocks"][blk]))
     except ValueError:
         shutil.rmtree(out, ignore_errors=True)
@@ -291,6 +331,12 @@ def main(argv=None) -> int:
     m.add_argument("base")
     m.add_argument("extra", nargs="+")
     m.add_argument("--labels", nargs="+", default=None)
+    m.add_argument(
+        "--rule",
+        default="record",
+        choices=RULES,
+        help="record: one capture's whole record per node; max_each: every statistic its maximum",
+    )
     m.add_argument("--json", default=None, help="also write the record here")
     g = sub.add_parser("margins", help="the per-site margin table of a plan")
     g.add_argument("plan")
@@ -309,7 +355,7 @@ def main(argv=None) -> int:
         print(f"total differences outside {', '.join(STATS)}: {n}")
         return 0 if n == 0 else 1
     if a.cmd == "merge":
-        rec = merge(a.base, a.extra, a.out, a.labels)
+        rec = merge(a.base, a.extra, a.out, a.labels, rule=a.rule)
         if a.json:
             pathlib.Path(a.json).write_text(json.dumps(rec, indent=1))
         return 0

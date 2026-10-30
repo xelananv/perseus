@@ -405,3 +405,29 @@ def test_the_pass_hook_branch_on_the_recorder_counts_its_products(caps):
     rep = json.loads((caps["dir"] / "tick.json").read_text())
     assert [t["pass_products"] for t in rep["ticks"]] == [L * 106, L * 106]
     assert passkernel.COUNTER == "pass_products"
+
+
+def test_merge_max_each_takes_every_statistics_maximum(tmp_path):
+    """The ``max_each`` rule: each magnitude statistic its maximum over the captures, the signed mean the largest-slot
+    record's; nothing given up (no coefficient above the chosen record)."""
+    a = fake_capture(tmp_path / "a", {"block_0": [1.0, 2.0, 3.0], "block_1": [5.0]})
+    b = fake_capture(tmp_path / "b", {"block_0": [4.0, 2.0, 1.0], "block_1": [5.0]})
+    bb = json.loads((b / "block_0" / "graph.json").read_text())
+    bb["nodes"][2]["output_max_coeff"] = 9.0  # the smaller-slot capture holds the larger coefficient maximum
+    bb["nodes"][2]["output_mean"] = -7.0
+    (b / "block_0" / "graph.json").write_text(json.dumps(bb))
+    lines: list[str] = []
+    rec = passmerge.merge(a, [b], tmp_path / "m", labels=["A", "B"], log=lines.append, rule="max_each")
+    g = passmerge.graphs(tmp_path / "m")["block_0"]
+    assert g[0]["output_max_abs"] == 4.0  # B's record (larger slots)
+    assert g[0]["output_max_coeff"] == 4.0 / 100
+    assert g[2]["output_max_abs"] == 3.0  # A's slots
+    assert g[2]["output_max_dev"] == 3.0 * 1.1
+    assert g[2]["output_max_coeff"] == 9.0  # B's coefficient maximum taken although A's slots are larger
+    assert g[2]["output_mean"] == 3.0 / 10  # the mean of the largest-slot record (A), not B's -7
+    assert rec["rule"].startswith("max of each statistic")
+    assert rec["blocks"]["block_0"]["coeff_above_chosen"] == 0
+    assert rec["blocks"]["block_0"]["coeff_largest"] == []
+    assert rec["blocks"]["block_0"]["records_from"] == {"A": 2, "B": 1}
+    with pytest.raises(ValueError, match="rule"):
+        passmerge.merge(a, [b], tmp_path / "m2", log=lambda _s: None, rule="other")
