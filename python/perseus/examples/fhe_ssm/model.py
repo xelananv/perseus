@@ -177,13 +177,21 @@ class FheSsmModel(ImplModel):
         """Conversations per ciphertext: 64 on pairs, 32 real, 1 in the decode layout."""
         return int(self.geo.capacity)
 
-    def start(self):
+    def start(self, state=None):
         """The initial state: zeros, landed by a bootstrap like every carried value (48
-        bootstraps per ciphertext for 24 blocks, once)."""
+        bootstraps per ciphertext for 24 blocks, once). ``state``: ``(s_rows, u_rows)``, per block the rows the two
+        registers hold instead (``(capacity, d)`` each; lane-slot order under the pass kernels, else the layout's row
+        order), encoded at the landing level and landed by the same bootstrap: the same op stream as the zeros (a
+        history run elsewhere, ``run_fake --inject-from-exact``)."""
         ops, zero = self.rt.ops, np.zeros((1, self.params.d))
+        if state is not None and not (len(state) == 2 and all(len(x) == self.n_layers for x in state)):
+            raise ValueError(f"start(state=...) takes (s_rows, u_rows) with {self.n_layers} blocks each")
         self.state = []
-        for _ in range(self.n_layers):
-            st = BlockState(self.geo.encode_rows(zero), self.geo.encode_rows(zero))
+        for b in range(self.n_layers):
+            if state is None:
+                st = BlockState(self.geo.encode_rows(zero), self.geo.encode_rows(zero))
+            else:
+                st = BlockState(self._encode(state[0][b]), self._encode(state[1][b]))
             ops.bootstrap(st.s)
             ops.bootstrap(st.n_prev)
             self.state.append(st)

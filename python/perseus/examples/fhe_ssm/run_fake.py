@@ -5,7 +5,8 @@
         --tokens 2 --blocks 24 [--newton-form ...] [--newton-sites ...] [--pack-stats ...] [--linear ...]
         [--pcmm-wbits ...] [--lane-mix ...] [--diag-hint ...] [--levels ...] [--rules ...] [--layout ...]
         [--payload ...] [--pair-route ...] [--conversations N] [--diag-source values|generated]
-        [--pass-kernels on [--scenario NAME | --lane-config FILE]] [--capture DIR [--capture-tick 1]] [--out F]
+        [--pass-kernels on [--scenario NAME | --lane-config FILE] [--inject-from-exact HISTORY]]
+        [--capture DIR [--capture-tick 1]] [--out F]
 
 Per tick: the reply's relative RMS error against the mirror and the exact forward, the refreshes (reactive /
 hints / carry / PCMM, and by step), the op counts, the levels. ``--capture DIR`` runs on the capture recorder
@@ -16,7 +17,18 @@ README the meaning of each flag.
 prefill:T | doc:T:readers | mixed | churn``, default ``tick``; passmasks.py), scored per lane-slot against
 ``ExactModel.pass_`` and ``MirrorModel.pass_`` (relErrRms over the live lane-slots, the worst lane-slot, top-1 of the
 tied head at every sequence's last position and every live conversation), with the op census of every block and the
-count of pass-mask products; the list, its generated tokens resolved, goes into the report.
+count of pass-mask products; the list, its generated tokens resolved, goes into the report. A capture under the pass
+kernels writes ``capture_pass.json`` beside its graphs: the configuration of the captured pass (name, segments,
+``mask_key``) and the history it entered from.
+
+``--inject-from-exact HISTORY`` (pass kernels): the registers start from a history instead of zeros. ``HISTORY`` is a
+JSON ``{"positions": T0, "streams": {stream: [T0 tokens]}, "source": "..."}`` naming every stream the first pass enters
+``carry``; the float64 reference runs each stream's ``T0`` tokens from the zero state (``ExactModel.sequences``) and its
+per-block scan state and normalized input are landed in the registers that stream's segment reads, as ``start()``
+lands its zeros (an encode at the landing level, then the bootstrap; ``FheSsmModel.start(state=...)``): on every
+lane-slot of a ``seq`` home (both axes of every home lane, the broadcast the carry prep leaves), on a ``conv``'s own
+lane-slot. The references continue from the same states (``Tracker.seed``, the mirror's rows), so the first pass is
+scored against the positions after the history: a chunk of a long document, a tick deep into 64 conversations.
 """
 
 from __future__ import annotations
@@ -40,7 +52,7 @@ from perseus.impl import fake, fakecap
 
 from . import diaggen, fakes, passkernel, passmasks
 from . import scales as scales_mod
-from .block import PACK_STATS
+from .block import PACK_STATS, BlockState
 from .geometry import LINEARS, PCMM_WBITS, ROUTES
 from .model import LAYOUTS, PASS_KERNELS, PAYLOADS, FheSsmModel
 from .norm import NEWTON_FORMS, NEWTON_SITES
@@ -227,6 +239,53 @@ def graph_census(graph_dir) -> dict:
     return {"blocks": blocks, "total": total}
 
 
+def history_states(params, cfg0: passmasks.PassConfig, hist: dict):
+    """The registers a history leaves (``--inject-from-exact``, the module docstring): ``(per_stream, (s_rows,
+    u_rows))``, ``per_stream[name] = (s per block, u per block)`` (``(d,)`` each, ``ExactModel.pass_``'s stream state)
+    and per block the ``(2t, d)`` lane-slot rows of the two registers (zero where the first pass carries nothing)."""
+    T0 = int(hist["positions"])
+    streams = {str(k): [int(x) for x in v] for k, v in hist["streams"].items()}
+    carried = [seg for seg in cfg0.segments if seg.entry == "carry"]
+    names = sorted({str(seg.stream) for seg in carried})
+    missing = [n for n in names if n not in streams]
+    extra = sorted(set(streams) - set(names))
+    if T0 < 1 or missing or extra:
+        raise ValueError(
+            f"the history names every stream the first pass carries ({names}), with positions >= 1: "
+            f"positions {T0}, missing {missing}, not carried {extra}"
+        )
+    bad = {n: len(v) for n, v in streams.items() if len(v) != T0}
+    if bad:
+        raise ValueError(f"every history stream holds {T0} tokens, got {bad}")
+    rows = np.stack([np.stack([params.emb_row(k) for k in streams[n]]) for n in names])
+    s_fin, u_fin, _ = ExactModel(params, 1).sequences(rows, chunk=max(1, 1200 // T0))
+    L, n, d = params.n_layers, cfg0.lane_slots, params.d
+    per_stream = {
+        nm: ([s_fin[i][j].copy() for i in range(L)], [u_fin[i][j].copy() for i in range(L)])
+        for j, nm in enumerate(names)
+    }
+    s_rows = [np.zeros((n, d)) for _ in range(L)]
+    u_rows = [np.zeros((n, d)) for _ in range(L)]
+    for seg in carried:
+        qs = range(seg.h0, seg.h1) if seg.kind == "seq" else range(seg.q0, seg.q0 + 1)
+        s_st, u_st = per_stream[str(seg.stream)]
+        for i in range(L):
+            s_rows[i][list(qs)] = s_st[i]
+            u_rows[i][list(qs)] = u_st[i]
+    return per_stream, (s_rows, u_rows)
+
+
+def history_record(hist: dict) -> dict:
+    """What a report keeps of a history: its length, streams, source and a digest of its tokens."""
+    body = json.dumps({str(k): [int(x) for x in v] for k, v in sorted(hist["streams"].items())}).encode()
+    return {
+        "positions": int(hist["positions"]),
+        "streams": sorted(str(k) for k in hist["streams"]),
+        "source": hist.get("source"),
+        "tokens_sha256": hashlib.sha256(body).hexdigest(),
+    }
+
+
 def run(
     params,
     token_ids,
@@ -254,19 +313,23 @@ def run(
     capture_tick=1,
     pass_kernels="off",
     pass_list=None,
+    inject=None,
     log=print,
 ):
     """``token_ids``: ``(ticks, conversations)`` (or ``(ticks,)`` for one conversation);
     ``scales``: the power-of-two folds per block (scales.py), or None; ``capture``: a graph dir; ``diag_source``:
     where the diagonal linears' plaintexts come from (``diaggen``: values, or generated from the matrices with the
     device's index arithmetic, the same op stream). ``pass_kernels="on"``: ``pass_list`` (``passmasks.PassConfig``
-    per pass) in place of ``token_ids`` (the module docstring)."""
+    per pass) in place of ``token_ids`` (the module docstring); ``inject``: a history (``--inject-from-exact``'s JSON,
+    parsed) the registers start from."""
     if pass_kernels == "on":
         if pass_list is None or token_ids is not None:
             raise ValueError("the pass kernels run a pass list (pass_list), not token ids")
         passmasks.validate_list(pass_list)
     elif pass_list is not None:
         raise ValueError("a pass list needs pass_kernels='on'")
+    if inject is not None and pass_kernels != "on":
+        raise ValueError("a history (inject) needs pass_kernels='on'")
     ids = None if token_ids is None else np.asarray(token_ids)
     if ids is not None and ids.ndim == 1:
         ids = ids[:, None]
@@ -312,7 +375,7 @@ def run(
     resolved: list[passmasks.PassConfig] = []
     if pass_kernels == "on":
         ticks, resolved, start_bootstraps = _run_passes(
-            model, fhe, params, pass_list, exact, mirror, pcmm_stats, log
+            model, fhe, params, pass_list, exact, mirror, pcmm_stats, log, inject
         )
     else:
         start_bootstraps = _run_ticks(model, fhe, params, ids, exact, mirror, pcmm_stats, ticks, log)
@@ -351,6 +414,18 @@ def run(
     }
     if pass_kernels == "on":
         rep["pass_list"] = passmasks.dump_list(resolved)
+        rep["inject"] = None if inject is None else history_record(inject)
+        if capture is not None and int(capture_tick) < len(resolved):
+            cfg = resolved[int(capture_tick)]
+            stamp = {
+                "capture_tick": int(capture_tick),
+                "pass": cfg.to_json(),
+                "describe": cfg.describe(),
+                "mask_key": json.loads(json.dumps(cfg.mask_key())),
+                "inject": rep["inject"],
+            }
+            with open(os.path.join(str(capture), "capture_pass.json"), "w", encoding="utf-8") as f:
+                json.dump(stamp, f, indent=1)
     if capture is not None:
         rep["capture"] = {"dir": str(capture), "tick": int(capture_tick), **graph_census(capture)}
         if "lane_mix" in rep["axes"] and rep["axes"]["lane_mix"] != "off":
@@ -409,15 +484,23 @@ def _top1(rows, emb) -> np.ndarray:
     return np.argmax(np.asarray(rows, dtype=np.float64) @ emb.T, axis=1)
 
 
-def _run_passes(model, fhe, params, pass_list, exact, mirror, pcmm_stats, log):
+def _run_passes(model, fhe, params, pass_list, exact, mirror, pcmm_stats, log, inject=None):
     """The passes of ``run`` under the pass kernels: per pass the configuration's generated tokens resolved from the
     previous reply, the ``2t`` rows assembled in lane-slot order, one ``model.step``, the references' ``pass_``, the
-    per-lane-slot scores, the per-block census. Returns ``(passes, the resolved list, the start's refreshes)``."""
+    per-lane-slot scores, the per-block census. ``inject``: the registers and both references start from that history
+    (``history_states``). Returns ``(passes, the resolved list, the start's refreshes)``."""
     emb = np.asarray(params.emb, dtype=np.float64)
     ticks, resolved = [], []
     prev_reply = None
+    state = None
+    if inject is not None:
+        per_stream, state = history_states(params, pass_list[0], inject)
+        exact.tracker = passmasks.Tracker(pass_list[0].lane_slots)
+        exact.tracker.seed(pass_list[0])
+        exact.streams.update(per_stream)
+        mirror.state = [BlockState(s.copy(), u.copy()) for s, u in zip(*state, strict=True)]
     with bootstraps_by_step(fhe, model.rt.ops) as by_step, stage_marks(model, fhe) as marks:
-        model.start()
+        model.start(state=state)
         start_bootstraps = fhe.n_bootstraps
         by_step.clear()
         for pos, cfg0 in enumerate(pass_list):
@@ -571,6 +654,9 @@ def main(argv=None):
                     help="a JSON list of pass configurations, one per pass (passmasks.PassConfig.to_json)")  # fmt: skip
     ap.add_argument("--scenario", default=None, metavar="NAME",
                     help="tick[:K] | prefill:T | doc:T:readers | mixed | churn (default tick under --pass-kernels on)")  # fmt: skip
+    ap.add_argument("--inject-from-exact", default=None, metavar="HISTORY",
+                    help="the registers start from this history's states on the float64 reference (JSON: positions, "
+                         "streams, source; every stream the first pass carries)")  # fmt: skip
     ap.add_argument("--ms-norm-k", type=float, default=5.5, help="sigma = -K b / a (--ms-norm)")
     ap.add_argument(
         "--newton-frac",
@@ -597,7 +683,7 @@ def main(argv=None):
             + "): this session's refreshes land by them, not by the reference circuit's table; the report stamps them",
             file=sys.stderr,
         )
-    if a.capture is not None and a.tokens <= a.capture_tick:
+    if a.capture is not None and a.pass_kernels == "off" and a.tokens <= a.capture_tick:
         raise SystemExit(f"--capture-tick {a.capture_tick} needs more than {a.capture_tick} ticks (--tokens)")
     norm_kw = {"k": a.ms_norm_k, "frac": a.newton_frac, "min_iters": a.newton_min_iters}
     params = load_model(
@@ -619,10 +705,16 @@ def main(argv=None):
                 conversations=a.conversations,
             )  # fmt: skip
         ids = None
-    elif a.lane_config is not None or a.scenario is not None:
-        raise SystemExit("--lane-config / --scenario need --pass-kernels on")
+        if a.capture is not None and len(pass_list) <= a.capture_tick:
+            raise SystemExit(f"--capture-tick {a.capture_tick} needs more than {a.capture_tick} passes")
+    elif a.lane_config is not None or a.scenario is not None or a.inject_from_exact is not None:
+        raise SystemExit("--lane-config / --scenario / --inject-from-exact need --pass-kernels on")
     else:
         ids = np.random.default_rng(a.seed).integers(0, params.vocab, size=(a.tokens, n))
+    inject = None
+    if a.inject_from_exact is not None:
+        with open(a.inject_from_exact, encoding="utf-8") as f:
+            inject = json.load(f)
     rep = run(
         params,
         ids,
@@ -647,10 +739,13 @@ def main(argv=None):
         capture_tick=a.capture_tick,
         pass_kernels=a.pass_kernels,
         pass_list=pass_list,
+        inject=inject,
     )
     if a.pass_kernels == "on":
         rep["scenario"] = None if a.lane_config is not None else (a.scenario or "tick")
         rep["lane_config"] = a.lane_config
+        if a.inject_from_exact is not None:
+            rep["inject"]["path"] = a.inject_from_exact
     rep["norm"] = {
         **norm_kw,
         "eps": params.norm_out.eps,

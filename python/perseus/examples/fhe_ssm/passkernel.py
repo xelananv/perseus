@@ -44,12 +44,22 @@ conjugation and no conjugate babies. ``direct`` / ``rows`` are the same term per
 **The pass hook** (the one call every pass-mask product goes through, installed like ``diaggen.use_source``'s):
 ``passmult(ops, ct, mask_id, vec)`` reads ``ops.inf.mult_pass``; ``use_pass_hook(inf)`` installs it. On the numpy fake
 (``fake.FakeInf``) the branch is ``ops.mult_pt(ct, vec)``: the current values, encoded at use, no key (a key would
-freeze the first configuration's values in the runtime's caches, ``fake.FakeInf._cached`` / ``FheOps._slot``). The
-capture recorder and the planned twin (``fakecap.CapInf``) need their own branch: the product
-``inf.fhe.mult(ct, fakecap.Pt(inf._full(vec), *inf._like(ct), Tag(), src=("pass", mask_id)))`` (what
-``CapInf.mult_pt`` records, without the value tag and with the mask id as the plaintext's source, the full vector
-kept in every mode). Until that branch exists ``use_pass_hook`` refuses a capture recorder, so no capture can record
-value-tagged pass masks. A mask id never holds a ``#`` (the driver files ``#`` names as generated diagonals).
+freeze the first configuration's values in the runtime's caches, ``fake.FakeInf._cached`` / ``FheOps._slot``). On
+the capture recorder and the planned twin (``fakecap.CapInf``) the branch is the product
+``inf.fhe.mult(ct, fakecap.Pt(inf._full(vec), *inf._like(ct), Tag(), src=("pass", mask_id)))`` (``pass_mult_recorder``:
+what ``CapInf.mult_pt`` records, without the value tag and with the mask id as the plaintext's source, the full vector
+kept in every mode, never the diagonal hook's one-slot copy). The graph node is ``mult`` with ``args.pt = {"kind":
+"pass", "level", "deg": 1, "name": mask_id}`` (``CapFhe._pt_args``), whatever the values: the compiler resolves the kind
+``pass`` at use (``crates/pc-program/src/compile/resolve.rs``, the default arm) and stores it under the block's
+``pt_N``. The output's tag: ``CapFhe.mult`` stamps ``tag::t_mult(ct tag, Tag())`` (``crates/pc-shadow/src/tag.rs``,
+the ``!b.known()`` arm of ``t_mult``; ``f_mult(., F_UNKNOWN) = F_UNKNOWN``): for a known ciphertext tag known, with
+period = slots, the ciphertext's support and field ``F_UNKNOWN``; for an unknown one unknown (the carried state, which
+the carry prep's own unknown-tagged products feed, and what the scan's state term reaches before the next value-tagged
+product). Either way the node has no ``pack_field`` and its stamp is the same in every configuration
+(``tests/test_pass_capture.py``). The planner and the compiler read a tag for a sparse route (a known period dividing
+the route's slots: neither period = slots nor an unknown tag has one) and for the real route (``pack_field`` REAL,
+which the split's conjugate link gives the norm and gate halves as today). A mask id never holds a ``#`` (the driver
+files ``#`` names as generated diagonals).
 """
 
 from __future__ import annotations
@@ -246,15 +256,26 @@ def pass_mult_fake(ops, ct, mask_id: str, vec):  # noqa: ARG001 (the hook's sign
     return ops.mult_pt(ct, vec)
 
 
+def pass_mult_recorder(ops, ct, mask_id: str, vec):
+    """The capture recorder's branch (``fakecap.CapInf``: the capture and the planned twin): the product as
+    ``CapInf.mult_pt`` records it, at the ciphertext's effective level and degree 1 (``CapInf._like``), but with an
+    unknown plaintext tag (``Tag()``: the stamp may not depend on the configuration's values) and the mask id as the
+    plaintext's source (``args.pt.kind == "pass"``, ``args.pt.name == mask_id``); the full vector in every mode (the
+    products' magnitudes are the plan's input; the twin's driver reads the values back by id). Counted as the fake's."""
+    inf = ops.inf
+    setattr(inf, COUNTER, getattr(inf, COUNTER, 0) + 1)
+    lv, dg = inf._like(ct)
+    pt = fakecap.Pt(inf._full(vec), lv, dg, fakecap.Tag(), src=("pass", mask_id))
+    return inf.fhe.mult(ct, pt)
+
+
 def use_pass_hook(inf) -> None:
-    """Install the pass hook on ``inf`` (the module docstring): the fake's branch on ``fake.FakeInf``; a capture
-    recorder (``fakecap.CapInf``) needs the recorder's branch, which this module does not build yet. The device never
-    runs the hook: its programs are compiled from the twin's recording."""
+    """Install the pass hook on ``inf`` (the module docstring): the recorder's branch on ``fakecap.CapInf``, the
+    fake's on ``fake.FakeInf``. The device never runs the hook: its programs are compiled from the twin's recording."""
     if isinstance(inf, fakecap.CapInf):  # a FakeInf subclass: checked first
-        raise NotImplementedError(
-            "the pass kernels on the capture recorder need the recorder's branch of the pass hook: "
-            "inf.fhe.mult(ct, fakecap.Pt(inf._full(vec), *inf._like(ct), Tag(), src=('pass', mask_id)))"
-        )
+        setattr(inf, HOOK, pass_mult_recorder)
+        setattr(inf, COUNTER, 0)
+        return
     if isinstance(inf, fake.FakeInf):
         setattr(inf, HOOK, pass_mult_fake)
         setattr(inf, COUNTER, 0)

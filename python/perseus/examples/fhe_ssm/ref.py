@@ -67,6 +67,53 @@ class ExactModel:
 
         return self._forward(np.asarray(rows, dtype=np.float64), shift, scan)
 
+    def sequences(self, rows, chunk: int = 0):
+        """The trainer's recurrence over whole sequences from the zero state: ``rows`` ``(B, T, d)``, the embedding rows of
+        ``B`` sequences of ``T`` positions; returns ``(s, u, out)``, per block the scan state and the normalized input
+        after the last position (``(B, d)`` each: what ``step`` holds after ``T`` calls on the ``B`` rows) and the replies
+        ``(B, T, d)``. The positions run together through ``_forward`` (a sequence's shift and scan in place of ``step``'s
+        registers), so each block's matrices are read once per call instead of once per position; per row the
+        arithmetic is ``step``'s statement for statement (the scan's own expression, position by position), up to the
+        summation order of a matrix product over many rows instead of one. ``chunk`` > 0: that many sequences per
+        ``_forward`` (an intermediate holds ``chunk T d_ffn`` floats)."""
+        R = np.asarray(rows, dtype=np.float64)
+        if R.ndim != 3 or R.shape[2] != self.p.d:
+            raise ValueError(f"sequences are (B, T, {self.p.d}) rows, got {R.shape}")
+        B, T, d = R.shape
+        L = self.p.n_layers
+        per = B if chunk <= 0 else int(chunk)
+        s_out = [np.empty((B, d)) for _ in range(L)]
+        u_out = [np.empty((B, d)) for _ in range(L)]
+        out = np.empty((B, T, d))
+        for c0 in range(0, B, per):
+            nb = min(B, c0 + per) - c0
+            fin_s: list[np.ndarray] = [np.empty(0)] * L
+            fin_u: list[np.ndarray] = [np.empty(0)] * L
+
+            def shift(i, u, nb=nb, fin_u=fin_u):
+                U = u.reshape(nb, T, d)
+                prev = np.zeros_like(U)
+                prev[:, 1:] = U[:, :-1]
+                fin_u[i] = U[:, -1].copy()
+                return prev.reshape(nb * T, d)
+
+            def scan(i, b, x, nb=nb, fin_s=fin_s):
+                X = x.reshape(nb, T, d)
+                S = np.empty_like(X)
+                sp = np.zeros((nb, d))
+                for t in range(T):
+                    sp = b.a * sp + (1.0 - b.a) * X[:, t]
+                    S[:, t] = sp
+                fin_s[i] = S[:, -1].copy()
+                return S.reshape(nb * T, d)
+
+            o = self._forward(R[c0 : c0 + nb].reshape(nb * T, d), shift, scan)
+            out[c0 : c0 + nb] = o.reshape(nb, T, d)
+            for i in range(L):
+                s_out[i][c0 : c0 + nb] = fin_s[i]
+                u_out[i][c0 : c0 + nb] = fin_u[i]
+        return s_out, u_out, out
+
     def pass_(self, cfg: passmasks.PassConfig, rows):
         """One pass of a lane configuration (the module docstring): the ``2t`` reply rows in lane-slot order. Checks
         the pass against the registers (``passmasks.Tracker``: raises on a refusal) before stepping anything."""

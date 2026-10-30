@@ -417,10 +417,12 @@ def test_the_refusals():
     _fhe, off = make(params)
     with pytest.raises(ValueError, match="pass_kernels='on'"):
         off.set_pass(scenario("tick:1", params)[0])
-    # the capture recorder needs its own branch of the pass hook
+    # the capture recorder takes its own branch of the pass hook (tests/test_pass_capture.py records with it)
     cfhe, cinf = fakes.make_capture_session(N, D, DFF)
-    with pytest.raises(NotImplementedError, match="recorder"):
-        FheSsmModel(cinf, params, core=fakecap.core, unit=cfhe.unit, pass_kernels="on")
+    FheSsmModel(cinf, params, core=fakecap.core, unit=cfhe.unit, pass_kernels="on")
+    assert getattr(cinf, passkernel.HOOK) is passkernel.pass_mult_recorder
+    with pytest.raises(TypeError, match="fake or the capture recorder"):
+        passkernel.use_pass_hook(object())
 
 
 # ── the driver ─────────────────────────────────────────────────────────────────────────────────

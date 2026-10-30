@@ -390,6 +390,24 @@ class Tracker:
             src.append(w.stream)  # the hand-over: the finished segment's final state
         return src
 
+    def seed(self, cfg: PassConfig) -> None:
+        """The registers ``cfg``'s carried segments read hold their own streams' states, landed from elsewhere (a history
+        run on the float64 reference, ``FheSsmModel.start(state=...)``): every carried ``seq`` writes its whole home,
+        every carried ``conv`` its lane-slot, as a previous pass of the same streams would have committed them; the
+        other registers keep their writers."""
+        validate(cfg)
+        if cfg.lane_slots != self.n:
+            raise ValueError(f"a pass of {cfg.lane_slots} lane-slots on registers of {self.n}")
+        for seg in cfg.segments:
+            if seg.entry != "carry":
+                continue
+            if seg.kind == "seq":
+                for q in range(seg.h0, seg.h1):
+                    self.writer[q] = Writer("seq", seg.stream)
+                self.homes[str(seg.stream)] = seg.home
+            else:
+                self.writer[seg.q0] = Writer("conv", seg.stream)
+
     def commit(self, cfg: PassConfig) -> None:
         for seg in cfg.segments:
             if seg.kind == "seq":
