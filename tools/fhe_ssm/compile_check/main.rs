@@ -8,15 +8,88 @@
 //! the driver's `live_out` / `input_metas`, carried inputs take the compiler's seeds. Per block: refresh sites, routes,
 //! launches, pairs, the level check, and the fused-sum census (`compile::diag::census`: sums by source and terms, the
 //! fused vars, plaintexts by form, store references named `<linear>#...`; 0 errors alone does not show the diagonals
-//! fused). Exit 0 when every block compiles with 0 check errors, 1 otherwise, 2 on usage. Not checked: anything on device.
+//! fused), and the limb census (`limbs ...` per block, `LIMBS ...` over every block: per op kind the ops, the sum of
+//! the limbs they run on and the key switches they imply; `mult_pt` / `coeff_sum` mean limbs are the encode and
+//! product cost profile of a plan). Exit 0 when every block compiles with 0 check errors, 1 otherwise, 2 on usage.
+//! Not checked: anything on device.
 use pc_config::Config;
 use pc_program::compile::batch::Schedule;
 use pc_program::compile::diag::census;
 use pc_program::compile::{compile_dir, CompileOpts};
 use pc_program::plan::PlanDir;
-use pc_program::program::SiteKind;
+use pc_program::program::{Kind, Program, SiteKind};
 use std::collections::BTreeMap;
 use std::path::Path;
+
+/// Q primes of the n32 chain (crates/pc-core/src/params.rs: 27 composite levels x 2 = 54); the chain guard below
+/// refuses any other preset, so a var at `level` primes dropped runs on `N32_Q - level` limbs.
+const N32_Q: u32 = 54;
+
+/// The limb census of one program: per op kind (a batch counted by its members), the ops, the sum over them of the
+/// limbs they run on (`N32_Q - level` of the op's first output, a refresh's its input), and the key switches they
+/// imply (a rotation one, a rotate_sum one per step, a ct x ct product or square one relinearization; a refresh's
+/// are inside its route). `terms` sums a fused sum's plaintexts. The encode and product cost of a weight product
+/// is proportional to its limbs, so `limbs / ops` of `mult_pt` and `coeff_sum` is a plan's cost profile: two plans
+/// with equal refresh counts can run their products on different limb counts when their landings differ.
+#[derive(Clone, Default)]
+struct LimbRow {
+    ops: usize,
+    limbs: u64,
+    ks: usize,
+    terms: usize,
+}
+
+fn limb_census(p: &Program) -> BTreeMap<String, LimbRow> {
+    let mut out: BTreeMap<String, LimbRow> = BTreeMap::new();
+    let lv = |v: u32| p.vars[v as usize].meta.level;
+    for op in &p.ops {
+        for m in op.members() {
+            let name = m.kind.name().to_string();
+            let level = match &m.kind {
+                Kind::Bootstrap(site) => p.bts_sites[*site as usize].input.level,
+                _ => m.outs.first().copied().or_else(|| m.ins.first().copied()).map(lv).unwrap_or(N32_Q),
+            };
+            let limbs = N32_Q.saturating_sub(level) as u64;
+            let (ks, terms) = match &m.kind {
+                Kind::Rotate(_) => (1, 0),
+                Kind::RotateSum(steps) => (steps.len(), 0),
+                Kind::Mult | Kind::Square => (1, 0),
+                Kind::CoeffSum { pts, .. } => (0, pts.len()),
+                _ => (0, 0),
+            };
+            let r = out.entry(name).or_default();
+            r.ops += 1;
+            r.limbs += limbs;
+            r.ks += ks;
+            r.terms += terms;
+        }
+    }
+    out
+}
+
+fn limb_line(c: &BTreeMap<String, LimbRow>) -> String {
+    c.iter()
+        .map(|(k, r)| {
+            let mean = if r.ops > 0 { r.limbs as f64 / r.ops as f64 } else { 0.0 };
+            let extra = match (r.ks, r.terms) {
+                (0, 0) => String::new(),
+                (ks, 0) => format!(" ks {ks}"),
+                (0, t) => format!(" terms {t}"),
+                (ks, t) => format!(" ks {ks} terms {t}"),
+            };
+            format!("{k}:{}x{} (mean {mean:.2}{extra})", r.ops, r.limbs)
+        })
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn limb_json(c: &BTreeMap<String, LimbRow>) -> serde_json::Value {
+    serde_json::Value::Object(
+        c.iter()
+            .map(|(k, r)| (k.clone(), serde_json::json!({"ops": r.ops, "limbs": r.limbs, "ks": r.ks, "terms": r.terms})))
+            .collect(),
+    )
+}
 
 /// The chain preset a plan names: the last `CHAIN_PRESET=` token of its `runtime=` line, else a block stamp's
 /// `chain.preset` (the plan's own Config, as `PlanDir::config` builds it), else None (n32, the runtime's default).
@@ -103,6 +176,7 @@ fn main() {
     let mut routes_tot: BTreeMap<String, usize> = BTreeMap::new();
     let mut terms_tot: BTreeMap<String, BTreeMap<usize, usize>> = BTreeMap::new();
     let mut forms_tot: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut limbs_tot: BTreeMap<String, LimbRow> = BTreeMap::new();
     let mut rows = vec![];
     let mut failed = false;
     for (label, r) in &dc.programs {
@@ -147,6 +221,15 @@ fn main() {
             sc.diag_sums, hist(&sc.diag_terms), sc.stream_sums, hist(&sc.stream_terms), sc.fused_vars, forms.join(" "),
             sc.store_refs, sc.store_named_generated, sc.form_errors
         );
+        let lc = limb_census(p);
+        println!("      limbs {}", limb_line(&lc));
+        for (k, r) in &lc {
+            let t = limbs_tot.entry(k.clone()).or_default();
+            t.ops += r.ops;
+            t.limbs += r.limbs;
+            t.ks += r.ks;
+            t.terms += r.terms;
+        }
         for e in c.errors.iter().take(4) {
             println!("      {e}");
         }
@@ -175,12 +258,14 @@ fn main() {
             "sums": {"diag": sc.diag_sums, "stream": sc.stream_sums, "diag_terms": sc.diag_terms, "stream_terms": sc.stream_terms,
                      "fused_vars": sc.fused_vars, "pt_forms": sc.pt_forms, "store_refs": sc.store_refs,
                      "store_named_generated": sc.store_named_generated, "form_errors": sc.form_errors},
+            "limbs": limb_json(&lc),
         }));
     }
     let rs: Vec<String> = routes_tot.iter().map(|(k, v)| format!("{k}:{v}")).collect();
     let th = |s: &str| terms_tot.get(s).map(|h| h.iter().map(|(k, v)| format!("{k}x{v}")).collect::<Vec<_>>().join(" ")).unwrap_or_default();
     let fs: Vec<String> = forms_tot.iter().map(|(k, v)| format!("{k}:{v}")).collect();
-    // the census line comes before TOTAL: the planned driver logs the second-to-last line (TOTAL)
+    // the census lines come before TOTAL: the planned driver logs the second-to-last line (TOTAL)
+    println!("LIMBS (kind:ops x limb-sum (mean limbs per op; ks = key switches, terms = fused plaintexts), every block) {}", limb_line(&limbs_tot));
     println!("SUMS diag {} [{}] stream {} [{}] fused vars {}; pt refs {}; store refs {}, named <linear># {}; form errors {}",
         tot.get("diag_sums").unwrap_or(&0), th("diag"), tot.get("stream_sums").unwrap_or(&0), th("stream"), tot.get("fused_vars").unwrap_or(&0),
         fs.join(" "), tot.get("store_refs").unwrap_or(&0), tot.get("store_named_generated").unwrap_or(&0), tot.get("form_errors").unwrap_or(&0));
@@ -192,7 +277,7 @@ fn main() {
     if let Some(out) = json_out {
         let doc = serde_json::json!({"plan_dir": pos[0], "graph_dir": pos[1], "schedule": format!("{schedule:?}"),
                                      "no_batch": no_batch, "blocks": rows, "routes": routes_tot, "totals": tot,
-                                     "sum_terms": terms_tot, "pt_forms": forms_tot});
+                                     "sum_terms": terms_tot, "pt_forms": forms_tot, "limbs": limb_json(&limbs_tot)});
         std::fs::write(&out, serde_json::to_string_pretty(&doc).unwrap()).expect("write --json");
     }
     std::process::exit(if failed { 1 } else { 0 })
