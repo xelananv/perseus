@@ -487,6 +487,19 @@ def resolve_generated(cfg: PassConfig, prev_reply_q, head) -> PassConfig:
 # ── the masks ──────────────────────────────────────────────────────────────────────────────────
 
 
+@dataclasses.dataclass(frozen=True)
+class BlockDecay:
+    """What a block's masks read of its weights: the decay ``a`` and the shift mix, ``(d,)`` each (a driver caches one
+    per block; ``weights.BlockParams`` has both too)."""
+
+    a: np.ndarray
+    mix: np.ndarray
+
+    @classmethod
+    def of(cls, bp) -> BlockDecay:
+        return cls(np.array(bp.a, dtype=np.float64), np.array(bp.mix, dtype=np.float64))
+
+
 def coefficients(cfg: PassConfig, a, mix) -> dict[str, np.ndarray]:
     """The target-indexed coefficients of one block (the module docstring): ``k1/P``, ``k1/Pc`` ``(t, t, d)`` complex
     (offset, lane, channel); ``k1/S/P``, ``k1/S/Pc`` ``(t, d)`` real; ``sh/mixU0``, ``sh/U0c``, ``sh/U1``, ``sh/U1c``

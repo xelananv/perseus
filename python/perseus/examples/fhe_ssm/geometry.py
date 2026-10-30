@@ -25,6 +25,7 @@ from perseus.impl.pcmm import PcmmLinear
 
 from . import filling, pairs
 from .lanemix import LaneMixKernel
+from .passkernel import ANTICAUSAL, CAUSAL, LaneKernel
 
 ROUTES = ("split", "lane")
 LINEARS = ("diagonal", "pcmm-trunk", "pcmm")
@@ -39,7 +40,10 @@ class Ops(Protocol):
     a session or the fake, ``NumpyOps`` on arrays, the lane-wise ops of a split pair."""
 
     def add(self, a: Any, b: Any) -> Any: ...
+    def sub(self, a: Any, b: Any) -> Any: ...
     def mult(self, a: Any, b: Any) -> Any: ...
+    def conjugate(self, a: Any) -> Any: ...
+    def mult_i(self, a: Any) -> Any: ...
     def square(self, a: Any) -> Any: ...
     def mult_pt(self, a: Any, v: Any, key: str | None = None) -> Any: ...
     def add_pt(self, a: Any, v: Any, key: str | None = None) -> Any: ...
@@ -217,6 +221,7 @@ class FilledGeometry:
         diag_hint: int = 1,
         pcmm_wbits: int = 16,
         lane_mix: bool = False,
+        pass_kernels: bool = False,
     ):
         n = rt.dims.N
         if n % d or d_ffn % d:
@@ -236,6 +241,9 @@ class FilledGeometry:
         self.linear_mode, self.diag_hint, self.pcmm_wbits = linear, int(diag_hint), int(pcmm_wbits)
         # the lane-mix term's rotation keys are part of the band from the start (lanemix.py)
         self.lane_mix_on = bool(lane_mix)
+        # the pass kernels' lane steps likewise: -1 .. -(NB - 1), -NB g (the scan, the shift), +1 .. +(NB - 1), +NB g
+        # (the carry prep) (passkernel.py)
+        self.pass_kernels_on = bool(pass_kernels)
         # PCMM bookkeeping for the driver's report: calls, inputs hinted, outputs (external refreshes)
         self.pcmm_stats = {"calls": 0, "inputs": 0, "outputs": 0}
         if self.uses_pcmm:
@@ -339,6 +347,9 @@ class FilledGeometry:
             steps |= set(pcmm.rot_steps())
         if self.lane_mix_on:
             steps |= LaneMixKernel.rotation_steps(self.N)
+        if self.pass_kernels_on:
+            steps |= LaneKernel(self.t, CAUSAL).rotation_steps(self.N)
+            steps |= LaneKernel(self.t, ANTICAUSAL, conj_half=False).rotation_steps(self.N)
         return steps
 
     def encode_rows(self, rows):

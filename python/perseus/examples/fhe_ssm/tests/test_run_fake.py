@@ -57,6 +57,7 @@ def test_driver_report(tmp_path, layout, payload, route, capacity):
         "newton_form": "perseus", "newton_sites": "served", "pack_stats": "off",
         "linear": None if layout == "decode" else "diagonal",
         "diag_hint": None if layout == "decode" else 1, "pcmm_wbits": None, "lane_mix": "off",
+        "pass_kernels": "off",
     }  # fmt: skip
     assert (rep["limit"], rep["bts_out"]) == (46, 34)
     for tick in rep["ticks"]:
@@ -84,7 +85,7 @@ def test_the_axes_reach_the_report(tmp_path):
     rep = json.loads((tmp_path / "report.json").read_text())
     assert rep["axes"] == {
         "newton_form": "depth2", "newton_sites": "per-site", "pack_stats": "halves", "linear": "diagonal",
-        "diag_hint": 1, "pcmm_wbits": None, "lane_mix": "random",
+        "diag_hint": 1, "pcmm_wbits": None, "lane_mix": "random", "pass_kernels": "off",
     }  # fmt: skip
     assert (rep["limit"], rep["bts_out"]) == (44, 32)
     assert rep["norm"]["in_block"] == {"k": 5.5, "frac": 0.3, "min_iters": 9}

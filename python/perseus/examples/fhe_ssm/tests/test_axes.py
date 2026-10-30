@@ -95,7 +95,13 @@ def test_every_axis_off_is_the_reference_circuit():
     """The default settings are the fork's reference circuit: the same op stream (refreshes included) and the
     same numbers as every axis named at its off value, and that circuit's refresh count at this shape."""
     params, *_ = synthetic(L=2, seed=3)
-    off = {"newton_form": "perseus", "pack_stats": "off", "linear": "diagonal", "diag_hint": 1}
+    off = {
+        "newton_form": "perseus",
+        "pack_stats": "off",
+        "linear": "diagonal",
+        "diag_hint": 1,
+        "pass_kernels": "off",
+    }
     _m, plain = run_arm(params)
     _m, named = run_arm(params, **off)
     for (ga, ca, _, _, ba), (gb, cb, _, _, bb) in zip(plain, named):

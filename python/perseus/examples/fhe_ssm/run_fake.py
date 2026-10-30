@@ -5,12 +5,18 @@
         --tokens 2 --blocks 24 [--newton-form ...] [--newton-sites ...] [--pack-stats ...] [--linear ...]
         [--pcmm-wbits ...] [--lane-mix ...] [--diag-hint ...] [--levels ...] [--rules ...] [--layout ...]
         [--payload ...] [--pair-route ...] [--conversations N] [--diag-source values|generated]
-        [--capture DIR [--capture-tick 1]] [--out F]
+        [--pass-kernels on [--scenario NAME | --lane-config FILE]] [--capture DIR [--capture-tick 1]] [--out F]
 
 Per tick: the reply's relative RMS error against the mirror and the exact forward, the refreshes (reactive /
 hints / carry / PCMM, and by step), the op counts, the levels. ``--capture DIR`` runs on the capture recorder
 and writes ``block_<b>/graph.json`` per stage at the capture tick. ``--help`` names every default; the
 README the meaning of each flag.
+
+``--pass-kernels on``: one pass per configuration of a list (``--lane-config FILE``, or ``--scenario tick[:K] |
+prefill:T | doc:T:readers | mixed | churn``, default ``tick``; passmasks.py), scored per lane-slot against
+``ExactModel.pass_`` and ``MirrorModel.pass_`` (relErrRms over the live lane-slots, the worst lane-slot, top-1 of the
+tied head at every sequence's last position and every live conversation), with the op census of every block and the
+count of pass-mask products; the list, its generated tokens resolved, goes into the report.
 """
 
 from __future__ import annotations
@@ -32,11 +38,11 @@ import numpy as np
 import perseus
 from perseus.impl import fake, fakecap
 
-from . import diaggen, fakes
+from . import diaggen, fakes, passkernel, passmasks
 from . import scales as scales_mod
 from .block import PACK_STATS
 from .geometry import LINEARS, PCMM_WBITS, ROUTES
-from .model import LAYOUTS, PAYLOADS, FheSsmModel
+from .model import LAYOUTS, PASS_KERNELS, PAYLOADS, FheSsmModel
 from .norm import NEWTON_FORMS, NEWTON_SITES
 from .ref import ExactModel, MirrorModel, rel_err_rms
 from .weights import LANE_MIX, load_model
@@ -151,6 +157,43 @@ def op_counts(calls) -> dict:
     }
 
 
+def block_census(calls) -> dict:
+    """``op_counts`` of one block's calls plus its ``mult_i``, ct - ct subtractions and refreshes."""
+    return {
+        **op_counts(calls),
+        "mult_i": calls.count("mult_i"),
+        "sub_cc": calls.count("sub_cc"),
+        "bootstraps": calls.count("bootstrap"),
+    }
+
+
+@contextlib.contextmanager
+def stage_marks(model, fhe):
+    """Per stage ``b``, ``[calls at entry, pass products at entry, calls at exit, pass products at exit]`` (the fake's
+    call list and the pass hook's counter, ``passkernel.COUNTER``), recorded around ``enter_stage`` / ``exit_stage``;
+    the model's own methods are restored on exit."""
+    marks: dict[int, list[int]] = {}
+    inf = model.inf
+    enter, leave = model.enter_stage, model.exit_stage
+
+    def entered(b, pos):
+        marks[b] = [len(fhe.calls), int(getattr(inf, passkernel.COUNTER, 0))]
+        return enter(b, pos)
+
+    def left(b, cap):
+        out = leave(b, cap)
+        marks[b] += [len(fhe.calls), int(getattr(inf, passkernel.COUNTER, 0))]
+        return out
+
+    setattr(model, "enter_stage", entered)  # noqa: B010 (an instance attribute over the method, removed below)
+    setattr(model, "exit_stage", left)  # noqa: B010
+    try:
+        yield marks
+    finally:
+        delattr(model, "enter_stage")
+        delattr(model, "exit_stage")
+
+
 def graph_census(graph_dir) -> dict:
     """The op counts of a capture (every ``block_<b>/graph.json`` under ``graph_dir``), the same
     fields as ``op_counts`` plus the refreshes the graphs hold, by block."""
@@ -209,14 +252,24 @@ def run(
     diag_source="values",
     capture=None,
     capture_tick=1,
+    pass_kernels="off",
+    pass_list=None,
     log=print,
 ):
     """``token_ids``: ``(ticks, conversations)`` (or ``(ticks,)`` for one conversation);
     ``scales``: the power-of-two folds per block (scales.py), or None; ``capture``: a graph dir; ``diag_source``:
     where the diagonal linears' plaintexts come from (``diaggen``: values, or generated from the matrices with the
-    device's index arithmetic, the same op stream)."""
-    ids = np.asarray(token_ids)
-    ids = ids[:, None] if ids.ndim == 1 else ids
+    device's index arithmetic, the same op stream). ``pass_kernels="on"``: ``pass_list`` (``passmasks.PassConfig``
+    per pass) in place of ``token_ids`` (the module docstring)."""
+    if pass_kernels == "on":
+        if pass_list is None or token_ids is not None:
+            raise ValueError("the pass kernels run a pass list (pass_list), not token ids")
+        passmasks.validate_list(pass_list)
+    elif pass_list is not None:
+        raise ValueError("a pass list needs pass_kernels='on'")
+    ids = None if token_ids is None else np.asarray(token_ids)
+    if ids is not None and ids.ndim == 1:
+        ids = ids[:, None]
     lim, land = fakes.level_preset(levels)
     limit = lim if limit is None else int(limit)
     bts_out = land if bts_out is None else int(bts_out)
@@ -241,8 +294,9 @@ def run(
         linear=linear,
         diag_hint=diag_hint,
         pcmm_wbits=pcmm_wbits,
+        pass_kernels=pass_kernels,
     )
-    n = ids.shape[1]
+    n = model.capacity if ids is None else ids.shape[1]
     if not 1 <= n <= model.capacity:
         raise ValueError(f"{n} conversations for a capacity of {model.capacity}")
     _rot_band(fhe, model)
@@ -255,6 +309,61 @@ def run(
     filled = model.filled
     pcmm_stats = None if filled is None else filled.pcmm_stats
     ticks = []
+    resolved: list[passmasks.PassConfig] = []
+    if pass_kernels == "on":
+        ticks, resolved, start_bootstraps = _run_passes(
+            model, fhe, params, pass_list, exact, mirror, pcmm_stats, log
+        )
+    else:
+        start_bootstraps = _run_ticks(model, fhe, params, ids, exact, mirror, pcmm_stats, ticks, log)
+    instrument = (
+        "perseus.impl.fakecap (capture recorder)"
+        if capture is not None
+        else f"perseus.impl.fake, {rules} level rules"
+    )
+    rep = {
+        "instrument": instrument,
+        "rules": rules,
+        "levels": levels,
+        "layout": layout,
+        "payload": payload if layout == "filled" else "real",
+        "pair_route": pair_route if complex_payload else None,
+        "axes": model.axes(),
+        "diag_source": diag_source,
+        "scales": None if scales is None else [dataclasses.astuple(x) for x in scales[: model.n_layers]],
+        "capacity": model.capacity,
+        "conversations": n,
+        "logn": logn,
+        "form": form,
+        "limit": limit,
+        "bts_out": bts_out,
+        "unit": unit,
+        "hint": "bootstrap_hint(x, headroom(products), acct=True) before each linear",
+        "n_layers": model.n_layers,
+        "resident_weights": resident_weights,
+        "runtime_config": json.loads(fhe.config.to_json()),
+        "landing_switches": fakes.landing_switches_set(),
+        "named_slot_encodes": model.rt.ops.n_encodes,
+        "start_bootstraps": start_bootstraps,
+        "rotation_steps": len(fhe.loaded_rot_steps),
+        "pcmm": pcmm_stats,
+        "ticks": ticks,
+    }
+    if pass_kernels == "on":
+        rep["pass_list"] = passmasks.dump_list(resolved)
+    if capture is not None:
+        rep["capture"] = {"dir": str(capture), "tick": int(capture_tick), **graph_census(capture)}
+        if "lane_mix" in rep["axes"] and rep["axes"]["lane_mix"] != "off":
+            rep["lane_mix_note"] = "random kernel: relErrRms_vs_exact is meaningless with this axis on"
+    elif params.lane_mix != "off":
+        rep["lane_mix_note"] = "random kernel: relErrRms_vs_exact is meaningless with this axis on"
+    return rep
+
+
+def _run_ticks(model, fhe, params, ids, exact, mirror, pcmm_stats, ticks, log):
+    """The ticks of ``run`` (every conversation one token per tick); appends to ``ticks``, returns the start's
+    refreshes."""
+    n = ids.shape[1]
     with bootstraps_by_step(fhe, model.rt.ops) as by_step:
         model.start()
         start_bootstraps = fhe.n_bootstraps
@@ -293,46 +402,95 @@ def run(
             by_step.clear()
             ticks.append(tick)
             log(json.dumps({k: v for k, v in tick.items() if k not in ("levels", "tokens")}))
-    instrument = (
-        "perseus.impl.fakecap (capture recorder)"
-        if capture is not None
-        else f"perseus.impl.fake, {rules} level rules"
-    )
-    rep = {
-        "instrument": instrument,
-        "rules": rules,
-        "levels": levels,
-        "layout": layout,
-        "payload": payload if layout == "filled" else "real",
-        "pair_route": pair_route if complex_payload else None,
-        "axes": model.axes(),
-        "diag_source": diag_source,
-        "scales": None if scales is None else [dataclasses.astuple(x) for x in scales[: model.n_layers]],
-        "capacity": model.capacity,
-        "conversations": n,
-        "logn": logn,
-        "form": form,
-        "limit": limit,
-        "bts_out": bts_out,
-        "unit": unit,
-        "hint": "bootstrap_hint(x, headroom(products), acct=True) before each linear",
-        "n_layers": model.n_layers,
-        "resident_weights": resident_weights,
-        "runtime_config": json.loads(fhe.config.to_json()),
-        "landing_switches": fakes.landing_switches_set(),
-        "named_slot_encodes": model.rt.ops.n_encodes,
-        "start_bootstraps": start_bootstraps,
-        "rotation_steps": len(fhe.loaded_rot_steps),
-        "pcmm": pcmm_stats,
-        "ticks": ticks,
-    }
-    if capture is not None:
-        rep["capture"] = {"dir": str(capture), "tick": int(capture_tick), **graph_census(capture)}
-        if "lane_mix" in rep["axes"] and rep["axes"]["lane_mix"] != "off":
-            rep["lane_mix_note"] = "random kernel: relErrRms_vs_exact is meaningless with this axis on"
-    elif params.lane_mix != "off":
-        rep["lane_mix_note"] = "random kernel: relErrRms_vs_exact is meaningless with this axis on"
-    return rep
+    return start_bootstraps
+
+
+def _top1(rows, emb) -> np.ndarray:
+    return np.argmax(np.asarray(rows, dtype=np.float64) @ emb.T, axis=1)
+
+
+def _run_passes(model, fhe, params, pass_list, exact, mirror, pcmm_stats, log):
+    """The passes of ``run`` under the pass kernels: per pass the configuration's generated tokens resolved from the
+    previous reply, the ``2t`` rows assembled in lane-slot order, one ``model.step``, the references' ``pass_``, the
+    per-lane-slot scores, the per-block census. Returns ``(passes, the resolved list, the start's refreshes)``."""
+    emb = np.asarray(params.emb, dtype=np.float64)
+    ticks, resolved = [], []
+    prev_reply = None
+    with bootstraps_by_step(fhe, model.rt.ops) as by_step, stage_marks(model, fhe) as marks:
+        model.start()
+        start_bootstraps = fhe.n_bootstraps
+        by_step.clear()
+        for pos, cfg0 in enumerate(pass_list):
+            cfg = passmasks.resolve_generated(cfg0, prev_reply, emb)
+            resolved.append(cfg)
+            rows = passmasks.pass_rows(cfg, params.emb_row)
+            b0, r0, c0 = fhe.n_bootstraps, fhe.n_reactive, len(fhe.calls)
+            p0 = 0 if pcmm_stats is None else pcmm_stats["outputs"]
+            pp0 = int(getattr(model.inf, passkernel.COUNTER, 0))
+            marks.clear()
+            rec = model.step(rows, pos, pass_cfg=cfg)
+            calls = fhe.calls[c0:]
+            t0 = time.time()
+            want_e, want_m = exact.pass_(cfg, rows), mirror.pass_(cfg, rows)
+            got = rec["out"]
+            live = cfg.live_slots()
+            per_slot = {q: rel_err_rms(got[q], want_e[q]) for q in live}
+            worst = max(per_slot, key=lambda q: per_slot[q])
+            ends = cfg.next_token_slots()
+            top_f, top_e = _top1(got[ends], emb), _top1(want_e[ends], emb)
+            censuses = {
+                b: {**block_census(fhe.calls[m[0] : m[2]]), "pass_products": m[3] - m[1]}
+                for b, m in sorted(marks.items())
+                if b < model.n_layers
+            }
+            first = censuses[0]
+            lv = model.levels()
+            tick = {
+                "pos": pos,
+                "config": cfg.name,
+                "segments": cfg.describe(),
+                "token_values": len(live),
+                "sequences": {str(s.stream): len(s.positions) for s in cfg.segments if s.kind == "seq"},
+                "conversations": sum(1 for s in cfg.segments if s.kind == "conv" and s.live),
+                "parked": sum(1 for s in cfg.segments if s.entry == "parked"),
+                "model_s": round(rec["decode_s"], 2),
+                "refs_s": round(time.time() - t0, 2),
+                "bootstraps": fhe.n_bootstraps - b0,
+                "reactive": fhe.n_reactive - r0,
+                "carry": 2 * model.n_layers if model.canonical_carry else 0,
+                "pcmm_external": 0 if pcmm_stats is None else pcmm_stats["outputs"] - p0,
+                **op_counts(calls),
+                "pass_products": int(getattr(model.inf, passkernel.COUNTER, 0)) - pp0,
+                "census_block_0": first,
+                # the op stream is the same in every block; the refreshes are the levels' (block 0 enters fresh)
+                "census_blocks_equal": all(
+                    {k: v for k, v in c.items() if k != "bootstraps"}
+                    == {k: v for k, v in first.items() if k != "bootstraps"}
+                    for c in censuses.values()
+                ),
+                "relErrRms_vs_exact": rel_err_rms(got[live], want_e[live]),
+                "relErrRms_vs_exact_worst_lane_slot": {"q": int(worst), "relErrRms": per_slot[worst]},
+                "relErrRms_vs_mirror": rel_err_rms(got[live], want_m[live]),
+                "relErrRms_vs_mirror_all_lane_slots": rel_err_rms(got, want_m),
+                "top1_agree": {"agree": int(np.sum(top_f == top_e)), "of": len(ends)},
+                "finite": bool(np.isfinite(got).all()),
+                "out_level": rec["out_level"],
+                "state_level_max": max(max(x) for x in lv),
+                "levels": lv[:2] + ([lv[-1]] if model.n_layers > 2 else []),
+                "pass_levels": {str(b): model.pass_seen[b] for b in sorted({0, model.n_layers - 1})},
+                "peak_rss_gb": peak_rss_gb(),
+            }
+            tick["hints"] = tick["bootstraps"] - tick["reactive"] - tick["carry"] - tick["pcmm_external"]
+            tick["bootstraps_by_step"] = dict(by_step)
+            by_step.clear()
+            ticks.append(tick)
+            prev_reply = got
+            log(
+                json.dumps(
+                    {k: v for k, v in tick.items() if k not in ("levels", "census_block_0", "pass_levels")}
+                )
+            )
+    return ticks, resolved, start_bootstraps
 
 
 def main(argv=None):
@@ -402,6 +560,17 @@ def main(argv=None):
         help="the diagonal linears' plaintexts: values (slot vectors) or generated (gathered from the matrices with the "
         "device encoder's index arithmetic; a capture records them as generated diagonals, the same op stream)",
     )
+    ap.add_argument(
+        "--pass-kernels",
+        default="off",
+        choices=PASS_KERNELS,
+        help="on = a pass in any lane configuration: the scan, the token shift and the carry prep as the pass kernels "
+        "(passmasks.py), the passes from --lane-config or --scenario (--tokens is then unused)",
+    )
+    ap.add_argument("--lane-config", default=None, metavar="FILE",
+                    help="a JSON list of pass configurations, one per pass (passmasks.PassConfig.to_json)")  # fmt: skip
+    ap.add_argument("--scenario", default=None, metavar="NAME",
+                    help="tick[:K] | prefill:T | doc:T:readers | mixed | churn (default tick under --pass-kernels on)")  # fmt: skip
     ap.add_argument("--ms-norm-k", type=float, default=5.5, help="sigma = -K b / a (--ms-norm)")
     ap.add_argument(
         "--newton-frac",
@@ -438,7 +607,22 @@ def main(argv=None):
     t = (1 << (a.logn - 1)) // params.d
     capacity = 1 if a.layout == "decode" else (t if a.payload == "real" else 2 * t)
     n = capacity if a.conversations is None else a.conversations
-    ids = np.random.default_rng(a.seed).integers(0, params.vocab, size=(a.tokens, n))
+    pass_list = None
+    if a.pass_kernels == "on":
+        if a.lane_config is not None and a.scenario is not None:
+            raise SystemExit("--lane-config and --scenario name the passes twice: give one")
+        if a.lane_config is not None:
+            pass_list = passmasks.load_list(a.lane_config)
+        else:
+            pass_list = passmasks.scenario(
+                a.scenario or "tick", vocab=params.vocab, seed=a.seed, lane_slots=capacity,
+                conversations=a.conversations,
+            )  # fmt: skip
+        ids = None
+    elif a.lane_config is not None or a.scenario is not None:
+        raise SystemExit("--lane-config / --scenario need --pass-kernels on")
+    else:
+        ids = np.random.default_rng(a.seed).integers(0, params.vocab, size=(a.tokens, n))
     rep = run(
         params,
         ids,
@@ -461,7 +645,12 @@ def main(argv=None):
         diag_source=a.diag_source,
         capture=a.capture,
         capture_tick=a.capture_tick,
+        pass_kernels=a.pass_kernels,
+        pass_list=pass_list,
     )
+    if a.pass_kernels == "on":
+        rep["scenario"] = None if a.lane_config is not None else (a.scenario or "tick")
+        rep["lane_config"] = a.lane_config
     rep["norm"] = {
         **norm_kw,
         "eps": params.norm_out.eps,

@@ -7,8 +7,14 @@ ciphertexts, so every tick is one op stream; the state starts as encryptions of 
 bootstrap, so tick 0 enters as every later tick does; each stage names its carried state for the planner
 (``cache.<name>-lvl=<level>``) and hands it to the planned driver as its K/V (``stage_caches``; ``encode_input``
 packs a tick's rows; planned.py). The geometry's axes (``linear``, ``diag_hint``, ``pcmm_wbits``) and
-``newton_form`` / ``pack_stats`` are the model's; ``newton_sites`` / ``lane_mix`` are the parameters'. Block
-numbering: 0..n_layers-1 the blocks, n_layers the tail. README.md: layouts, capture, the key rule.
+``newton_form`` / ``pack_stats`` / ``pass_kernels`` are the model's; ``newton_sites`` / ``lane_mix`` are the
+parameters'. Block numbering: 0..n_layers-1 the blocks, n_layers the tail. README.md: layouts, capture, the key rule.
+
+``pass_kernels="on"``: a pass in any lane configuration (passmasks.py): ``set_pass(cfg)`` (or ``step(rows, pos,
+pass_cfg=cfg)``) gives the configuration; each block's scan, token shift and carry prep run as the pass kernels
+(block.py) with that block's masks (``passmasks.masks`` from the cached decay and mix), every product through the pass
+hook (``passkernel.use_pass_hook``, installed here); the ``2t`` rows of a pass come in and go out in lane-slot order
+(``q = 2j + e``), permuted to the layout's order in ``_encode`` / ``_decode`` only.
 """
 
 from __future__ import annotations
@@ -17,6 +23,7 @@ import numpy as np
 
 from perseus.impl.driver import ImplModel
 
+from . import passkernel, passmasks
 from .block import PACK_STATS, BlockState, carry, norm, ssm_block
 from .geometry import FilledGeometry, PairGeometry, SlotGeometry
 from .norm import NEWTON_FORMS
@@ -27,6 +34,7 @@ LAYOUTS = ("filled", "decode")
 PAYLOADS = ("pairs", "real")
 #: the two carried ciphertexts of a block, in the order ``stage_caches`` returns them
 STATE_NAMES = ("s", "n_prev")
+PASS_KERNELS = ("off", "on")
 
 
 class FheSsmModel(ImplModel):
@@ -50,6 +58,7 @@ class FheSsmModel(ImplModel):
         linear="diagonal",
         diag_hint=1,
         pcmm_wbits=16,
+        pass_kernels="off",
     ):
         super().__init__(inf, core=core, unit=unit, profile=profile)
         if layout not in LAYOUTS:
@@ -69,6 +78,16 @@ class FheSsmModel(ImplModel):
             raise ValueError("the lane mix is cut for the filled layout with pairs")
         if linear != "diagonal" and layout != "filled":
             raise ValueError("PCMM linears need the filled layout")
+        if pass_kernels not in PASS_KERNELS:
+            raise ValueError(f"pass_kernels must be one of {PASS_KERNELS}, got {pass_kernels!r}")
+        if pass_kernels == "on" and not paired:
+            raise ValueError(
+                "the pass kernels are cut for the filled layout with pairs (lane-slots 2j, 2j + 1)"
+            )
+        if pass_kernels == "on" and params.lane_mix != "off":
+            raise ValueError(
+                "--lane-mix random adds a cost-only term to the scan state: refused with the pass kernels"
+            )
         self.params = params
         self.n_layers = int(params.n_layers if n_layers is None else n_layers)
         self.form = newton_form
@@ -91,10 +110,18 @@ class FheSsmModel(ImplModel):
                 diag_hint=diag_hint,
                 pcmm_wbits=pcmm_wbits,
                 lane_mix=params.lane_mix != "off",
+                pass_kernels=pass_kernels == "on",
             )
             self.geo = PairGeometry(filled, pair_route) if payload == "pairs" else filled
         self._bw: dict[int, BlockWeights] = {}
         self.state: list[BlockState] = []
+        self.pass_kernels = pass_kernels
+        self.pass_cfg: passmasks.PassConfig | None = None
+        self._decay: dict[int, passmasks.BlockDecay] = {}
+        #: per block, the levels and degrees the last pass's carry prep saw (``S``, ``n``, ``Z``, ``C``, ``C_n``)
+        self.pass_seen: dict[int, dict[str, tuple[int, int]]] = {}
+        if pass_kernels == "on":
+            passkernel.use_pass_hook(inf)
 
     @property
     def filled(self) -> FilledGeometry | None:
@@ -114,6 +141,7 @@ class FheSsmModel(ImplModel):
             "diag_hint": None if f is None else f.diag_hint,
             "pcmm_wbits": None if f is None or not f.uses_pcmm else f.pcmm_wbits,
             "lane_mix": self.params.lane_mix,
+            "pass_kernels": self.pass_kernels,
         }
 
     def block_weights(self, b):
@@ -168,8 +196,52 @@ class FheSsmModel(ImplModel):
 
     def encode_input(self, rows):
         """Block 0's input of one tick: the conversations' embedding rows packed in the layout
-        (``ImplModel``'s hook, read by the planned driver's recorder)."""
+        (``ImplModel``'s hook, read by the planned driver's recorder); a pass's lane-slot rows under the pass
+        kernels (``_encode``)."""
+        return self._encode(rows)
+
+    def _encode(self, rows):
+        """The rows packed in the layout; under the pass kernels the ``2t`` rows of a pass in lane-slot order,
+        permuted to the layout's row order here (``passmasks.to_layout``) and nowhere else."""
+        if self.pass_kernels == "on":
+            rows = np.asarray(rows, dtype=np.float64)
+            if rows.ndim != 2 or rows.shape[0] != self.capacity:
+                raise ValueError(
+                    f"a pass packs all {self.capacity} lane-slots (the configuration parks the rest), got {rows.shape}"
+                )
+            rows = passmasks.to_layout(rows)
         return self.geo.encode_rows(rows)
+
+    def _decode(self, ct, n: int):
+        """``_encode``'s inverse: under the pass kernels every lane-slot, in lane-slot order."""
+        if self.pass_kernels == "on":
+            return passmasks.from_layout(self.geo.decode_rows(ct, self.capacity))
+        return self.geo.decode_rows(ct, n)
+
+    def set_pass(self, cfg: passmasks.PassConfig) -> None:
+        """The configuration of the next pass (its masks are built per block when the block runs)."""
+        if self.pass_kernels != "on":
+            raise ValueError("a pass configuration needs pass_kernels='on'")
+        passmasks.validate(cfg)
+        if cfg.lane_slots != self.capacity:
+            raise ValueError(
+                f"a configuration of {cfg.lane_slots} lane-slots for a capacity of {self.capacity}"
+            )
+        self.pass_cfg = cfg
+
+    def block_decay(self, b: int) -> passmasks.BlockDecay:
+        """Block ``b``'s decay and shift mix, read once (``ModelParams`` keeps only its last blocks in float64)."""
+        v = self._decay.get(b)
+        if v is None:
+            v = self._decay[b] = passmasks.BlockDecay.of(self.params.block(b))
+        return v
+
+    def pass_block(self, b: int) -> passmasks.SlotPass:
+        """Block ``b``'s pass kernels for the current configuration."""
+        if self.pass_cfg is None:
+            raise ValueError("the pass kernels need a configuration (set_pass)")
+        mv = passmasks.masks(self.pass_cfg, self.block_decay(b), b)
+        return passmasks.SlotPass(mv, b, self.capacity // 2)
 
     @staticmethod
     def cache_keys(b: int) -> list[str]:
@@ -189,6 +261,7 @@ class FheSsmModel(ImplModel):
             def compute(h):
                 cap = self.enter_stage(b, pos)
                 self.name_state(self.state[b])
+                pk = None if self.pass_kernels == "off" else self.pass_block(b)
                 with self.rt.step(f"blk{b}"):
                     h = ssm_block(
                         self.rt.ops,
@@ -198,7 +271,10 @@ class FheSsmModel(ImplModel):
                         self.state[b],
                         self.form,
                         self.pack_stats,
+                        pk,
                     )
+                    if pk is not None:
+                        self.pass_seen[b] = pk.seen
                     if self.canonical_carry:
                         carry(self.rt.ops, self.geo, self.state[b])
                 self.exit_stage(b, cap)
@@ -219,18 +295,21 @@ class FheSsmModel(ImplModel):
         stages.append(("tail", "out.", tail_fn))
         return stages
 
-    def step(self, rows, pos):
+    def step(self, rows, pos, pass_cfg=None):
         """One tick: an embedding row per conversation in (``(n, d)``, or one ``(d,)`` row), the
-        final-norm rows out, decrypted, in the same shape."""
+        final-norm rows out, decrypted, in the same shape. Under the pass kernels one pass: the ``2t`` rows in
+        lane-slot order, ``pass_cfg`` its configuration (or the last one ``set_pass`` gave)."""
+        if pass_cfg is not None:
+            self.set_pass(pass_cfg)
         rows = np.asarray(rows, dtype=np.float64)
         one = rows.ndim == 1
         rows = rows[None] if one else rows
         self.token_begin(pos)
-        x = self.geo.encode_rows(rows)
+        x = self._encode(rows)
         out = self.run_stages(x, pos, self.token_stages(x, pos))
         self.token_tail(pos)
         rec = self.token_end(pos)
-        got = self.geo.decode_rows(out, rows.shape[0])
+        got = self._decode(out, rows.shape[0])
         rec["out"] = got[0] if one else got
         rec["out_level"] = self.rt.ops.level(out)
         return rec
