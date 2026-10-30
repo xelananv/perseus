@@ -327,6 +327,7 @@ def test_merge_takes_the_largest_record_whole(tmp_path):
     (x / "block_0" / "graph.json").write_text(json.dumps(xx))
     with pytest.raises(ValueError, match="outside the magnitudes"):
         passmerge.merge(a, [x], tmp_path / "m3", log=lambda _s: None)
+    assert not (tmp_path / "m3").exists()  # the partial output is removed
     with pytest.raises(ValueError, match="exists"):
         passmerge.merge(a, [b], tmp_path / "m", log=lambda _s: None)
     assert passmerge.main(["diff", str(a), str(b)]) == 0
@@ -346,6 +347,13 @@ def test_the_merged_synthetic_capture_is_the_slot_max_of_the_six(caps, tmp_path)
             assert n.get("output_max_abs") == max((x for x in got if x is not None), default=None)
         assert sum(rec["blocks"][blk]["records_from"].values()) == len(nodes)
     assert passmerge.structure_diff(caps["tick"], out)["block_0"]["differences"] == 0
+    # the merged capture holds no single configuration: the sources' stamps are in its record instead
+    assert not (out / "capture_pass.json").exists()
+    assert (out / "capture_config.json").exists()
+    assert (out / "block_0" / "capture_config.json").exists()
+    src = json.loads((out / "passmerge.json").read_text())["sources"]
+    assert src["longdoc"]["inject"]["positions"] == DOC_T0
+    assert src["tick"]["pass"]["name"] == "tick.1"
 
 
 # ── the plan of the merged capture binds every configuration ───────────────────────────────────
