@@ -3,7 +3,8 @@
 capture a plan is cut on; the per-site margins of a plan against them.
 
     python -m perseus.examples.fhe_ssm.passmerge diff A B
-    python -m perseus.examples.fhe_ssm.passmerge merge OUT BASE EXTRA [EXTRA ...] [--labels L0 L1 ...] [--rule record|max_each] [--json F]
+    python -m perseus.examples.fhe_ssm.passmerge merge OUT BASE EXTRA [EXTRA ...] [--labels L0 L1 ...] [--rule max_each|record] [--json F]
+    python -m perseus.examples.fhe_ssm.passmerge stamp CAPTURE PASSES
     python -m perseus.examples.fhe_ssm.passmerge margins PLAN MERGED LABEL=CAPTURE [...] [--kappa 2] [--json F]
 
 **One op stream.** Under ``--pass-kernels on`` every configuration issues the same products, rotations and refreshes
@@ -26,11 +27,16 @@ the chosen capture's (the coefficient maximum is the planner's CF key when captu
 largest such ratio. Measured at the model shape on the diagonal arm's stock plan, what it gives up is not small: a
 fired hint's coefficient maximum under the continuing-chunk configuration reached 5.0 times the record's times κ
 (``blk22.tm.out``), so the ``max_each`` rule (``RULES``) is the one the plans are cut on: every magnitude statistic
-its maximum over the captures, the signed mean the largest-slot record's. A capture whose structure differs from the
-base's is refused (the merged plan would bind one of them only;
-the partial output is removed). The per-block lines follow ``merge_mags.py``'s ("grew": nodes whose record came from
+its maximum over the captures, the signed mean the largest-slot record's; it is the ``merge`` command's default
+(``record`` is an explicit ``--rule record``; the ``merge`` function's own default stays ``record``). A capture whose
+structure differs from the base's is refused (the merged plan would bind one of them only; the partial output is
+removed). The per-block lines follow ``merge_mags.py``'s ("grew": nodes whose record came from
 another capture than the base, with the ratio of the chosen ``output_max_abs`` to the base's; a node that is an exact
 zero in the base, a product by a mask that is zero in the base's configuration, is counted apart and has no ratio).
+
+**The stamp check** (``stamp``, ``stamp_diff``): a configuration capture's ``capture_pass.json`` against the last pass
+of the lane-config file it should come from; exit 1 and the differences printed when it does not (``run_gpu.sh capture``
+runs it before it reuses a configuration capture, so a capture made under other lane-config files is not merged).
 
 **The margins** (``margins``): for every refresh site of a plan (its placements, its fired hints, and the graph's
 deliberate refreshes: the carry), each capture's ``output_max_abs`` and ``output_max_coeff`` of the site's producer
@@ -263,6 +269,43 @@ def merge(
     return rec
 
 
+#: a lane-config token the run resolves from the previous pass's reply (``passmasks.GENERATED``): any token matches it
+_GENERATED = -1
+
+
+def stamp_diff(cap, passes) -> list[str]:
+    """What differs between a capture's ``capture_pass.json`` and the last pass of the lane-config file ``passes`` it
+    should have been captured from (the two-pass lists are captured at tick 1): the capture tick against the last index,
+    the pass's name, segments and tokens (a generated token of the file matches the token the run resolved there). An
+    empty list when they agree; ``run_gpu.sh capture`` refuses to reuse a configuration capture otherwise."""
+    p = pathlib.Path(cap) / "capture_pass.json"
+    if not p.exists():
+        return [f"{p} is missing (not a capture under the pass kernels)"]
+    st = json.loads(p.read_text(encoding="utf-8"))
+    obj = json.loads(pathlib.Path(passes).read_text(encoding="utf-8"))
+    lst = obj["passes"] if isinstance(obj, dict) else obj
+    if not lst:
+        return [f"{passes} holds no pass"]
+    want, got = lst[-1], st.get("pass") or {}
+    out = []
+    if st.get("capture_tick") != len(lst) - 1:
+        out.append(f"capture_tick {st.get('capture_tick')!r} vs the file's last pass index {len(lst) - 1}")
+    if got.get("name") != want.get("name"):
+        out.append(f"name {got.get('name')!r} vs {want.get('name')!r}")
+    if got.get("segments") != want.get("segments"):
+        out.append(f"segments differ ({len(got.get('segments') or [])} vs {len(want.get('segments') or [])})")
+    gt, wt = list(got.get("tokens") or []), list(want.get("tokens") or [])
+    if len(gt) != len(wt):
+        out.append(f"{len(gt)} tokens vs {len(wt)}")
+    else:
+        bad = [q for q, (x, y) in enumerate(zip(gt, wt)) if y not in (_GENERATED, x)]
+        if bad:
+            out.append(
+                f"tokens differ at {len(bad)} lane-slots (first q={bad[0]}: {gt[bad[0]]} vs {wt[bad[0]]})"
+            )
+    return out
+
+
 def block_sites(placement: dict, nodes: list[dict]) -> list[tuple[str, str]]:
     """One block's refresh sites as ``(kind, var)``: ``placed`` (``placements``), ``hint`` (``hint_fire``) and
     ``deliberate`` (the input of every ``deliberate_bootstrap`` node of ``nodes``, the external PCMM finishes left out:
@@ -333,11 +376,15 @@ def main(argv=None) -> int:
     m.add_argument("--labels", nargs="+", default=None)
     m.add_argument(
         "--rule",
-        default="record",
+        default="max_each",
         choices=RULES,
-        help="record: one capture's whole record per node; max_each: every statistic its maximum",
+        help="max_each (the default, the rule the plans are cut on): every statistic its maximum; record: one "
+        "capture's whole record per node",
     )
     m.add_argument("--json", default=None, help="also write the record here")
+    s = sub.add_parser("stamp", help="stamp_diff: a capture against the lane-config file it came from")
+    s.add_argument("cap")
+    s.add_argument("passes")
     g = sub.add_parser("margins", help="the per-site margin table of a plan")
     g.add_argument("plan")
     g.add_argument("merged")
@@ -359,6 +406,11 @@ def main(argv=None) -> int:
         if a.json:
             pathlib.Path(a.json).write_text(json.dumps(rec, indent=1))
         return 0
+    if a.cmd == "stamp":
+        diffs = stamp_diff(a.cap, a.passes)
+        for x in diffs:
+            print(x)
+        return 0 if not diffs else 1
     caps = dict(x.split("=", 1) for x in a.captures)
     rep = margins(a.plan, a.merged, caps, a.kappa)
     rows = [r for r in rep["rows"] if not r.get("missing")]

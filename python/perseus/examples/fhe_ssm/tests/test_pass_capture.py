@@ -433,6 +433,55 @@ def test_merge_max_each_takes_every_statistics_maximum(tmp_path):
         passmerge.merge(a, [b], tmp_path / "m2", log=lambda _s: None, rule="other")
 
 
+def test_the_merge_command_defaults_to_max_each(tmp_path):
+    """``passmerge merge`` without ``--rule`` merges under ``max_each`` (the rule the plans are cut on); ``record``
+    stays an explicit choice."""
+    a = fake_capture(tmp_path / "a", {"block_0": [1.0, 2.0, 3.0], "block_1": [5.0]})
+    b = fake_capture(tmp_path / "b", {"block_0": [4.0, 2.0, 1.0], "block_1": [5.0]})
+    assert (
+        passmerge.main(["merge", str(tmp_path / "m"), str(a), str(b), "--json", str(tmp_path / "m.json")])
+        == 0
+    )
+    rule = json.loads((tmp_path / "m" / "passmerge.json").read_text())["rule"]
+    assert rule == "max of each statistic, the mean of the max_abs record"
+    assert json.loads((tmp_path / "m.json").read_text())["rule"] == rule
+    assert passmerge.main(["merge", str(tmp_path / "r"), str(a), str(b), "--rule", "record"]) == 0
+    assert json.loads((tmp_path / "r" / "passmerge.json").read_text())["rule"] == "max_abs record"
+
+
+def test_the_stamp_check_binds_a_capture_to_its_lane_config(caps):
+    """``passmerge.stamp_diff`` (``run_gpu.sh capture``'s reuse check): each synthetic capture against its own
+    lane-config file agrees, against another's it differs; the CLI exits 1 on a difference."""
+    d = caps["dir"]
+    for lab in LABELS:
+        assert passmerge.stamp_diff(caps[lab], d / f"{lab}.passes.json") == [], lab
+    diffs = passmerge.stamp_diff(caps["tick"], d / "mixed.passes.json")
+    assert any(x.startswith("name ") for x in diffs)
+    assert any(x.startswith("segments ") for x in diffs)
+    assert passmerge.main(["stamp", str(caps["tick"]), str(d / "tick.passes.json")]) == 0
+    assert passmerge.main(["stamp", str(caps["tick"]), str(d / "seqfresh.passes.json")]) == 1
+    assert passmerge.stamp_diff(caps["off"], d / "tick.passes.json")[0].endswith(
+        "is missing (not a capture under the pass kernels)"
+    )
+
+
+STAGE = pathlib.Path(__file__).resolve().parents[5] / ".cache" / "fhe_ssm" / "b4_stage"
+STAGE_B1 = "cap_high__linear_pcmm_pcmm_wbits_24_pass_kernels_on_b1"
+
+
+@pytest.mark.skipif(
+    not (STAGE / "cfgs").is_dir(), reason=f"no staged tree at {STAGE} (built by the GPU staging)"
+)
+def test_the_stamp_check_on_the_staged_one_block_captures():
+    """The shipped one-block cfg capture's four configuration captures against ``cfgs/<label>.passes.json`` agree;
+    the tick capture against ``mixed.passes.json`` does not."""
+    for lab in passmasks.CAPTURE_LABELS:
+        assert (
+            passmerge.stamp_diff(STAGE / f"{STAGE_B1}__{lab}", STAGE / "cfgs" / f"{lab}.passes.json") == []
+        ), lab
+    assert passmerge.stamp_diff(STAGE / f"{STAGE_B1}__tick", STAGE / "cfgs" / "mixed.passes.json")
+
+
 def test_capture_configurations_are_the_four():
     """``passmasks.capture_configurations``: what ``run_gpu.sh capture`` merges for a cfg-* arm and the device test's
     fixture captures are the four of this module's ``configurations`` (two passes each, the second the captured one,

@@ -296,9 +296,9 @@ Two independent ways on edge cases (`tests/`; `VERIFICATION` of the fork, carrie
 CPU (`tests/test_planned_contract.py`, one of them `slow_shape`: a 1-block PCMM capture at the model's width
 planned and bound) and 3 marked `gpu` (`tests/test_planned_gpu.py`, skipped without the device build); the
 device diagonal encoder's CPU half adds 14 (`tests/test_diag_source.py`) and its device half 3 marked `gpu`
-(`tests/test_diag_gpu.py`); the pass kernels add 149 (`tests/test_passkernel.py` 40, `test_passmasks.py` 37,
-`test_pass_model.py` 35, `test_pass_capture.py` 14, `test_pass_driver.py` 23) and 3 marked `gpu`
-(`tests/test_pass_gpu.py`). The whole light suite (`-m "not slow_shape and not gpu"`) is 334 tests, the `slow_shape`
+(`tests/test_diag_gpu.py`); the pass kernels add 152 (`tests/test_passkernel.py` 40, `test_passmasks.py` 37,
+`test_pass_model.py` 35, `test_pass_capture.py` 17, `test_pass_driver.py` 23) and 3 marked `gpu`
+(`tests/test_pass_gpu.py`). The whole light suite (`-m "not slow_shape and not gpu"`) is 337 tests, the `slow_shape`
 set 19, the `gpu` set 10. The
 fork's tests of its GPU runner, planner wrapper, Colab build and tick meter are not carried over: those modules
 belong to the fork's C++ runtime; on this branch the device path is `impl.driver.PlannedRun` (below). Two

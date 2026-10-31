@@ -72,7 +72,7 @@ proves; that the box's twin records the stream the plan was cut on is `prepare.c
 | `cap_stock__pass_kernels_on/` | the reference under the pass kernels, six configurations merged (`max_each`) [S16] | b3f021a99df258c0d10d1c5ae44d2288 |
 | `bootstrap_placements/plan_cfg-ref/` | its stock plan: 637, launches 720,418 [S16] | cut on b3f021a9… |
 | `cap_high__linear_pcmm_pcmm_wbits_24_b1/`, `bootstrap_placements/plan_pcmm24_b1/` | the 1-block smokes, `BLOCKS=1 run_gpu.sh capture / plan pcmm24` [S20] | the manifest |
-| `cap_high__linear_pcmm_pcmm_wbits_24_pass_kernels_on_b1/`, `bootstrap_placements/plan_cfg-pcmm24_b1/` | `BLOCKS=1 … cfg-pcmm24`: the four capture configurations at one block (`passmasks.capture_configurations`: tick, one sequence fresh, the same carried, mixed; the lane-config files in `cfgs/`), kept beside as `…_b1__<label>` and merged under `max_each`; the plan cut on the merge [S20] | the manifest |
+| `cap_high__linear_pcmm_pcmm_wbits_24_pass_kernels_on_b1/`, `bootstrap_placements/plan_cfg-pcmm24_b1/` | `BLOCKS=1 … cfg-pcmm24`: the four capture configurations at one block (`passmasks.capture_configurations`: tick, one sequence fresh, the same carried, mixed; the lane-config files in `cfgs/`, which `CFG_CONFIGS=$OUT/cfgs` names to `capture`), kept beside as `…_b1__<label>` and merged under `max_each` (made one configuration per call under `CFG_ONLY=<label>`, each under its own memory guard, then merged by a call without it); the plan cut on the merge [S20] | the manifest |
 | `cap_stock_b1/`, `bootstrap_placements/plan_ref_b1/` | `BLOCKS=1 … ref` (`smoke-diag`'s) [S20] | the manifest |
 
 Also before renting: a fresh `--pass-kernels off` PCMM capture at the tip has the md5 of `plan_pcmm24`'s capture
@@ -100,7 +100,13 @@ and 7; `mixed`: 3; `churn`: 5), so a steady-state wall exists without a fence.
 | 6 | the deployment split | `run_gpu.sh keyspec cfg-pcmm24` → `run_gpu.sh keygen cfg-pcmm24` → `KEYS=bundle FHE_SSM_KEYS=$OUT/keys_cfg-pcmm24 TICKS=6 SCENARIO=tick RUN_TAG=bundle run cfg-pcmm24` | `keys.mode bundle`, `setup.has_secret false`; no timing comparison with step 3 |
 | 7 | wrap up | the checks over every record, the numbers table, a tar of the records (without the staged tree and the `.work` directories); pull them home | — |
 
-Never run `capture` or `plan` for a shipped arm expecting a new product: both reuse what is in `$OUT`. `TICKS` is the
+Never run `capture` or `plan` for a shipped arm expecting a new product: both reuse what is in `$OUT`. A `cfg-*` arm's
+`capture` is four configuration captures merged under `max_each`: `CFG_CONFIGS=<dir>` names the directory of the four
+lane-config files (`tick`, `seqfresh`, `seqcarry`, `mixed.passes.json`; default `passmasks.capture_configurations`
+written to `<capname>.cfgs`), `CFG_ONLY=<label>` makes one of the four and stops (a small machine's memory guard; a call
+without it reuses them and merges). A configuration capture is reused only when its `capture_pass.json` is the last pass
+of its lane-config file, and a merged capture under `CFG_CONFIGS` only when its four are (`passmerge stamp`); a mismatch
+stops the call, naming the capture and what differs. `TICKS` is the
 pass count of `SCENARIO=tick`; the other scenarios set their own (`prefill:320` 8 passes, `doc:258:64` 8, `mixed` 5,
 `churn` 6). Durations on a device: **unmeasured**. The twin's recording at the model shape: 437 s for the diagonal
 arm's lean prepare on this machine's 16 GB laptop [S19]; it is part of every `run`'s setup.

@@ -54,7 +54,13 @@
 # PC_NVCC_JOBS (build: default 8), DIAG_SOURCE (values | generated, default values: where the diagonal linears'
 # plaintexts come from on the device, the driver's --diag-source; generated = the device diagonal encoder, which makes
 # every non-blocked arm a device arm; a driver flag only, so the captures and plans are the same under both), DIAG_E /
-# DIAG_F (diag-tests: 1 = also run (e) the model shape and (f) the timings), REPLAN (1: plan re-cuts an existing plan).
+# DIAG_F (diag-tests: 1 = also run (e) the model shape and (f) the timings), REPLAN (1: plan re-cuts an existing plan),
+# CFG_CONFIGS (capture, a cfg-* arm: a directory holding the four lane-config files tick / seqfresh / seqcarry /
+# mixed.passes.json, two passes each, the second the captured one; default: passmasks.capture_configurations written to
+# <capname>.cfgs; a configuration capture is reused only when its capture_pass.json is its file's last pass, and a merged
+# capture reused under CFG_CONFIGS only when its four are: passmerge stamp), CFG_ONLY (capture, a cfg-* arm: one label of
+# the four, below), VERIFY_SKIPS_OK (verify: 1 accepts skipped tests in the port's light suite, which it refuses by
+# default), ALLOW_UNCHECKED (run, prepare, keyspec: 1 runs without the plan's capture, below).
 # `run`, `prepare` and `keyspec` pass the driver --capture <the capture the arm's plan was cut from>, which must be in
 # $OUT (the plan's graph= line names the machine it was cut on, so without it the md5 check does not run; ALLOW_UNCHECKED=1
 # runs without it, recorded as capture.checked false). CFG_ONLY=<label> (capture, a cfg-* arm): make that one of the four
@@ -249,7 +255,22 @@ arms)
 capture)
     a=${1:?arm}; arm "$a"; c="$OUT/$(capname "$a")"
     case "$NOTE" in BLOCKED*) die "$a: $NOTE" ;; esac
-    if [ -f "$c/capture_config.json" ]; then log "capture $a: reusing $c"; exit 0; fi
+    stamp_check() {   # a configuration capture $1 is reused only when its capture_pass.json is the last pass of $2
+        local why
+        why=$(cd "$W" && env PYTHONPATH="$W/python" "$PY" -m perseus.examples.fhe_ssm.passmerge stamp "$1" "$2" 2>&1) \
+            || die "capture $a: $1 was not captured from $2 ($(printf '%s' "$why" | tr '\n' ';')); remove it to re-capture, or point CFG_CONFIGS at the files it came from"
+    }
+    if [ -f "$c/capture_config.json" ]; then
+        # a cfg-* arm's merge under CFG_CONFIGS: its four configuration captures must come from those files
+        case "$CAP" in *"--pass-kernels on"*) if [ -n "${CFG_CONFIGS:-}" ]; then
+            for lab in tick seqfresh seqcarry mixed; do
+                [ -f "$CFG_CONFIGS/$lab.passes.json" ] || die "capture $a: no $CFG_CONFIGS/$lab.passes.json (CFG_CONFIGS holds the four lane-config files)"
+                [ -d "${c}__$lab" ] || die "capture $a: reusing $c under CFG_CONFIGS needs ${c}__$lab beside it (the stamp check)"
+                stamp_check "${c}__$lab" "$CFG_CONFIGS/$lab.passes.json"
+            done
+        fi ;; esac
+        log "capture $a: reusing $c"; exit 0
+    fi
     resolve_data
     high_stamp() {   # a LANDING=high capture's stamp must carry the switches (the header comment)
         case "$PLANENV" in *LANDING=high*)
@@ -280,7 +301,7 @@ for lab, cs in passmasks.capture_configurations(p.vocab).items():
             case " tick seqfresh seqcarry mixed " in *" $lab "*) ;; *) die "capture $a: CFG_ONLY=$lab is not one of tick seqfresh seqcarry mixed" ;; esac
             cc="${c}__$lab"
             [ -f "$d/$lab.passes.json" ] || die "capture $a: no $d/$lab.passes.json (CFG_CONFIGS holds the four lane-config files)"
-            if [ -f "$cc/capture_config.json" ]; then log "capture $a: reusing $cc"; continue; fi
+            if [ -f "$cc/capture_config.json" ]; then stamp_check "$cc" "$d/$lab.passes.json"; log "capture $a: reusing $cc (its stamp is $d/$lab.passes.json's last pass)"; continue; fi
             rm -rf "$cc.part"
             log "capture $a __$lab -> $cc (CPU only): $CAPENV run_fake $CAP --lane-config $d/$lab.passes.json"
             ( cd "$W" && env CUDA_VISIBLE_DEVICES="" PYTHONPATH="$W/python" $CAPENV "$PY" -m perseus.examples.fhe_ssm.run_fake \
