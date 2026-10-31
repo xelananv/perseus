@@ -401,6 +401,8 @@ def test_the_pass_kernels_refusals(synth, tmp_path, monkeypatch):
         run_planned.main([*base, "--pass-kernels", "on", "--scenario", "mixed", "--lane-config", "f.json"])
     with pytest.raises(SystemExit, match="tick scenario only"):
         run_planned.main([*base, "--pass-kernels", "on", "--scenario", "mixed", "--conversations", "3"])
+    with pytest.raises(SystemExit, match="tick scenario only"):
+        run_planned.main([*base, "--pass-kernels", "on", "--lane-config", "f.json", "--conversations", "3"])
     passes = passmasks.scenario("mixed", vocab=synth["params"].vocab, seed=3)
     a = run_planned.parser().parse_args([*synth["base"], "--plan", "x"])
     _p, off_model, *_ = run_planned.make_twin(a)

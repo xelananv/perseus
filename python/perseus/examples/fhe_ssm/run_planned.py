@@ -263,6 +263,10 @@ def pass_list_of(a, vocab: int, capacity: int) -> tuple[list[passmasks.PassConfi
     """The pass list a run names (``--lane-config FILE`` or ``--scenario``; ``tick`` alone is ``tick:<--ticks>``),
     validated through one ``passmasks.Tracker``, and what the record keeps of it."""
     if a.lane_config:
+        if a.conversations is not None:
+            raise SystemExit(
+                "--conversations shapes the tick scenario only (a configuration names its own lane-slots)"
+            )
         cfgs = passmasks.load_list(a.lane_config)
         spec = None
     else:

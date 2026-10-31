@@ -585,8 +585,8 @@ only); `--pass-kernels on` is a capture flag too, so `run_gpu.sh`'s capture name
 
 **Refusals.** `--lane-mix random` with the kernels (it adds a cost-only term to the scan state); a layout other than
 the filled pairs; `--free-run` and `--tokens` with the kernels (a pass's tokens are its configuration's; a free run per
-lane-slot is not built); `--scenario` / `--lane-config` without them, or both at once; `--conversations` with a
-scenario other than `tick`; a configuration of another lane-slot count; a first pass holding a generated token; a
+lane-slot is not built); `--scenario` / `--lane-config` without them, or both at once; `--conversations` with anything
+but the `tick` scenario; a configuration of another lane-slot count; a first pass holding a generated token; a
 generated token when the session exports frames only (a bundle without the client's secret); a prepare whose stream is
 not static across the probes (`planned.NotStatic`: a configuration may enter only through pass-mask plaintexts).
 
