@@ -167,7 +167,8 @@ hints, 48 deliberate); `high` **609**; `pcmm24` **802** = 538 refresh sites + 26
 **802** (the same 538 sites and routes, `dense_stcf@26:48 s512_sb@24:490`; launches 20,976 against `pcmm24`'s 15,190,
 +5,786 = +38.1 % [S16]); `cfg-pcmm24-tick` 802 (launches 20,976); `cfg-ref` **637** (`dense@32:191 s512_sb@22:446`;
 launches 720,418 against 714,610, +5,808 = +0.81 % [S16]). The kernels add +2,448 ct×pt, +672 rotations, +192
-conjugations and +0 refreshes per pass, measured in the model-shape captures [S15]: the overhead is in launches, not in
+conjugations and +0 refreshes per pass, measured in the model-shape captures [S15] (+102 / +28 / +8 / +0 per block on the
+fake [S14]): the overhead is in launches, not in
 refreshes; its time is this session's to measure.
 
 What blocks which arms:

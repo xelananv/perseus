@@ -296,8 +296,10 @@ Two independent ways on edge cases (`tests/`; `VERIFICATION` of the fork, carrie
 CPU (`tests/test_planned_contract.py`, one of them `slow_shape`: a 1-block PCMM capture at the model's width
 planned and bound) and 3 marked `gpu` (`tests/test_planned_gpu.py`, skipped without the device build); the
 device diagonal encoder's CPU half adds 14 (`tests/test_diag_source.py`) and its device half 3 marked `gpu`
-(`tests/test_diag_gpu.py`). The whole light suite
-(`-m "not slow_shape and not gpu"`) is 184 tests, the `slow_shape` set 19. The
+(`tests/test_diag_gpu.py`); the pass kernels add 147 (`tests/test_passkernel.py` 40, `test_passmasks.py` 37,
+`test_pass_model.py` 35, `test_pass_capture.py` 13, `test_pass_driver.py` 22) and 3 marked `gpu`
+(`tests/test_pass_gpu.py`). The whole light suite (`-m "not slow_shape and not gpu"`) is 332 tests, the `slow_shape`
+set 19, the `gpu` set 10. The
 fork's tests of its GPU runner, planner wrapper, Colab build and tick meter are not carried over: those modules
 belong to the fork's C++ runtime; on this branch the device path is `impl.driver.PlannedRun` (below). Two
 further checks run at the model's shape with the published checkpoint (`tests/test_model_shape.py`, skipped
@@ -353,7 +355,18 @@ python -m perseus.examples.fhe_ssm.run_planned <model flags> --linear pcmm --pcm
     --ticks 148 --tokens tokens.json [--free-run] --profile --insecure-test-keys --out record.json
 # a run on a client's bundle: no secret in the session; the reply decrypted by the client's secret, or exported
 python -m perseus.examples.fhe_ssm.run_planned <model flags> --linear pcmm --plan PLAN --ticks 8 --keys DIR --out record.json
+# the pass kernels: a pass in any lane configuration, the plan cut on the merged capture of the configurations
+python -m perseus.examples.fhe_ssm.run_planned <model flags> --linear pcmm --pcmm-wbits 24 --pass-kernels on \
+    --scenario prefill:320 --plan PLAN --capture MERGED_CAPTURE --profile --insecure-test-keys --out record.json
 ```
+
+**The pass kernels' flags.** `--pass-kernels on` (a model flag, so a capture's flags carry it) with `--scenario
+tick[:K] | prefill:T | doc:T:READERS | mixed | churn` or `--lane-config FILE` (a JSON list of passes) runs the passes of
+"A pass in any lane configuration" below instead of ticks: `tick` alone runs `--ticks` passes, `--conversations` shapes
+only the tick scenario, every entry of `ticks` in the record is one pass (its configuration, `staged` / `stage_s`, the
+scores per live lane-slot), and `--prepare-only` adds `prepare.staging_dry_run` (what the setup and every pass would
+stage, on the CPU stand-ins). `--capture DIR` points the md5 check at the capture the plan was cut from (`run_gpu.sh`
+passes it from `$OUT`; a plan's `graph=` line names the machine it was cut on).
 
 **Keys.** A device run names its keys or does not run. `--keys DIR` opens the session on the client's
 bundle `DIR/keys.pckb` (`Session.from_bundle`: no secret on the server; the bundle must answer this
