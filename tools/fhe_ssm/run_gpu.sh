@@ -8,7 +8,10 @@
 #   bash tools/fhe_ssm/run_gpu.sh bench            this build's refresh prices (pc-bench bts --all --k 1,8) -> PLAN_BTS_MS
 #   bash tools/fhe_ssm/run_gpu.sh arms             the axis arms and what each sets
 #   bash tools/fhe_ssm/run_gpu.sh capture ARM      the CPU-twin capture of ARM (no GPU; reused when present)
-#   bash tools/fhe_ssm/run_gpu.sh plan ARM         tools/fhe_ssm/make_plan.sh on that capture (+ the compile check)
+#   bash tools/fhe_ssm/run_gpu.sh plan ARM         tools/fhe_ssm/make_plan.sh on that capture (+ the compile check); a plan
+#                                                  already in $OUT (one shipped from elsewhere) is reused after its graph=
+#                                                  md5 is checked against the capture (REPLAN=1 re-cuts it; an arm whose
+#                                                  plan is shipped only, cfg-pcmm24-tick, is never cut here)
 #   bash tools/fhe_ssm/run_gpu.sh prepare ARM      the driver's CPU part (--prepare-only: record, compile check, report)
 #   bash tools/fhe_ssm/run_gpu.sh keyspec ARM      the key request of ARM's plan ($DRIVER --keyspec: the model's needs and,
 #                                                  on the device build, the session's) -> $OUT/keys_ARM[_bN]/keyspec.json
@@ -16,13 +19,16 @@
 #                                                  keys.pckb); then KEYS=bundle FHE_SSM_KEYS=$OUT/keys_ARM[_bN] for run
 #   bash tools/fhe_ssm/run_gpu.sh run ARM          the planned run: $DRIVER --ticks $TICKS --profile, nvidia-smi sampled
 #                                                  (diagonal linears only under DIAG_SOURCE=generated: the device
-#                                                  diagonal encoder; else the PCMM arms only)
+#                                                  diagonal encoder; else the PCMM arms only); the cfg-* arms run the pass
+#                                                  kernels under --scenario $SCENARIO (tick: $TICKS passes)
 #   bash tools/fhe_ssm/run_gpu.sh smoke            capture + plan + run of `pcmm24` at BLOCKS=1 (the first device contact)
 #   bash tools/fhe_ssm/run_gpu.sh diag-tests       the device diagonal encoder's device checks in acceptance order: 1 the
 #                                                  kernel selftest (encode / encode_many / diag_gather lines), 2 the crates'
 #                                                  GPU tests (a)-(c), 3 the port's gpu tests (a, b, d); e (DIAG_E=1: DATA and
 #                                                  the whole-model plan_ref) and f (DIAG_F=1); DIAG_ONLY=1,2,3,e,f picks steps;
 #                                                  a passed step is skipped on the next call unless DIAG_RERUN=1
+#   bash tools/fhe_ssm/run_gpu.sh pass-tests       the pass kernels' device checks (tests/test_pass_gpu.py: per-pass staging
+#                                                  keeps the graphs, the replies per live lane-slot; a skip fails)
 #   bash tools/fhe_ssm/run_gpu.sh smoke-diag       capture + plan + run of `ref` at BLOCKS=1 under DIAG_SOURCE=generated
 #                                                  (the device diagonal encoder's first planned run; after diag-tests; KEYS
 #                                                  defaults to inproc here: a contact test, recorded insecure-inproc)
@@ -30,7 +36,10 @@
 #
 # Environment: OUT (default <worktree>/.cache/fhe_ssm/gpu_<UTC date>; every product lands there, one dir per arm; with
 # BLOCKS=N every capture, plan, prepare, run and key directory of an arm carries the suffix _bN, so a smoke never
-# replaces the whole model's plan),
+# replaces the whole model's plan), RUN_TAG (default empty: a further suffix _<tag> of every run, prepare and key
+# directory, run_<arm>[_bN][_<tag>], so the runs of one bracket never overwrite each other; [A-Za-z0-9._-] only),
+# SCENARIO (the cfg-* arms' --scenario: tick (default; $TICKS passes) | tick:K | prefill:T | doc:T:READERS | mixed |
+# churn; a run flag, never a capture's),
 # DATA (a directory holding the model's weights .npz, seeds .json and config .json; WEIGHTS / SEEDS / CONFIG override
 # each), DRIVER (the planned driver's python module, default perseus.examples.fhe_ssm.run_planned: its contract is in
 # RUNSHEET_GPU.md §4), TICKS (2), BLOCKS (all), GPU (0), KEYS (NO DEFAULT; run, smoke and matrix refuse without it:
@@ -41,7 +50,9 @@
 # PC_NVCC_JOBS (build: default 8), DIAG_SOURCE (values | generated, default values: where the diagonal linears'
 # plaintexts come from on the device, the driver's --diag-source; generated = the device diagonal encoder, which makes
 # every non-blocked arm a device arm; a driver flag only, so the captures and plans are the same under both), DIAG_E /
-# DIAG_F (diag-tests: 1 = also run (e) the model shape and (f) the timings).
+# DIAG_F (diag-tests: 1 = also run (e) the model shape and (f) the timings), REPLAN (1: plan re-cuts an existing plan).
+# `run`, `prepare` and `keyspec` pass the driver --capture <the capture the arm's plan was cut from> when that directory
+# is in $OUT (the plan's graph= line names the machine it was cut on, so without it the md5 check does not run).
 # Nothing here edits a tracked file; captures, plans and records go under OUT.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -52,7 +63,11 @@ DRIVER=${DRIVER:-perseus.examples.fhe_ssm.run_planned}
 TICKS=${TICKS:-2}; BLOCKS=${BLOCKS:-}; GPU=${GPU:-0}; KEYS=${KEYS:-}; PROFILE_EVERY=${PROFILE_EVERY:-2}
 DIAG_SOURCE=${DIAG_SOURCE:-values}
 case "$DIAG_SOURCE" in values|generated) ;; *) echo "run_gpu: DIAG_SOURCE=$DIAG_SOURCE (values | generated)" >&2; exit 2 ;; esac
+SCENARIO=${SCENARIO:-tick}; RUN_TAG=${RUN_TAG:-}
+[[ "$SCENARIO" =~ ^[a-z]+(:[0-9]+)*$ ]] || { echo "run_gpu: SCENARIO=$SCENARIO (tick[:K] | prefill:T | doc:T:READERS | mixed | churn)" >&2; exit 2; }
+[[ -z "$RUN_TAG" || "$RUN_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "run_gpu: RUN_TAG=$RUN_TAG ([A-Za-z0-9._-] only)" >&2; exit 2; }
 S=${BLOCKS:+_b$BLOCKS}   # the BLOCKS suffix of every product name (capname gives captures the same one)
+T=${RUN_TAG:+_$RUN_TAG}  # the RUN_TAG suffix of every run, prepare and key directory
 mkdir -p "$OUT"
 log() { echo "[run_gpu $(date -u +%H:%M:%S)] $*" | tee -a "$OUT/session.log"; }
 die() { log "STOP: $*"; exit 1; }
@@ -77,9 +92,13 @@ resolve_data() {   # WEIGHTS / SEEDS / CONFIG, else the first match of each in D
 # in python/perseus/examples/fhe_ssm/fakes.py), so a high capture's capture_config.json carries bts.stc_first=2 and
 # bts.raise_drop=512:1 and its own dense refreshes land StC-first. `capture` still refuses a LANDING=high capture whose
 # stamp lacks them (a capture made without the switches exported, or by a port without that Config).
-ARMS="ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24 pcmm24 best lockstep2 lockstep4"
-arm() {   # sets CAP, PLANENV, RUNF, NOTE, DEVICE for arm $1
-    CAP=""; PLANENV="LANDING=stock"; RUNF=""; NOTE=""
+# The cfg-* arms run the pass kernels (python/perseus/examples/fhe_ssm/passmasks.py: a pass in any lane configuration).
+# --pass-kernels on is a capture flag (the capture name carries it); the shipped captures of these arms are the merged
+# ones (every configuration's magnitudes), the per-configuration ones beside them as <capname>__<label>. cfg-pcmm24-tick
+# shares cfg-pcmm24's capture flags but its plan was cut on <capname>__tick alone (a pure-kernel control): shipped only.
+ARMS="ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24 pcmm24 best lockstep2 lockstep4 cfg-pcmm24 cfg-pcmm24-tick cfg-ref"
+arm() {   # sets CAP, PLANENV, RUNF, NOTE, DEVICE, PLANCAP (the suffix of the capture its plan was cut from), SHIPPED
+    CAP=""; PLANENV="LANDING=stock"; RUNF=""; NOTE=""; PLANCAP=""; SHIPPED=0
     case "$1" in
         ref)        NOTE="the reference: the shipped circuit, this runtime's landings without StC-first (diagonal linears)" ;;
         depth2)     CAP="--newton-form depth2" ;;
@@ -96,6 +115,14 @@ arm() {   # sets CAP, PLANENV, RUNF, NOTE, DEVICE for arm $1
         lockstep2|lockstep4)
                     CAP="--streams ${1#lockstep}"; PLANENV="LANDING=high"; RUNF="--schedule lockstep"
                     NOTE="BLOCKED until the port captures k ciphertext sets per stage (RUNSHEET_GPU.md §3)" ;;
+        cfg-pcmm24) CAP="--linear pcmm --pcmm-wbits 24 --pass-kernels on"; PLANENV="LANDING=high"; RUNF="--scenario $SCENARIO"
+                    NOTE="the pass kernels on pcmm24 (the whole model's plan: the merged capture's; at BLOCKS=1 the tick configuration's capture); compare with pcmm24" ;;
+        cfg-pcmm24-tick)
+                    CAP="--linear pcmm --pcmm-wbits 24 --pass-kernels on"; PLANENV="LANDING=high"; RUNF="--scenario $SCENARIO"
+                    PLANCAP="__tick"; SHIPPED=1
+                    NOTE="cfg-pcmm24's kernels, plan cut on the tick configuration's capture alone (shipped, never cut here); compare with cfg-pcmm24" ;;
+        cfg-ref)    CAP="--pass-kernels on"; RUNF="--scenario $SCENARIO"
+                    NOTE="the pass kernels on the reference (diagonal linears: a device arm under DIAG_SOURCE=generated); compare with ref" ;;
         *) die "unknown arm $1 (arms: $ARMS)" ;;
     esac
     case "$PLANENV" in *LANDING=high*) CAPENV="FIDESLIB_BTS_STC_FIRST=2 FIDESLIB_BTS_STC_FIRST_ROUTES=dense FIDESLIB_BTS_STC_FIRST_CF=13 FIDESLIB_BTS_RAISE_DROP=512:1 AUTO_BTS_LEVEL=44" ;;
@@ -122,6 +149,17 @@ capname() {   # the capture an arm uses: arms that differ only at plan or run ti
     local land; land=$(echo "$PLANENV" | sed -n 's/.*LANDING=\([a-z]*\).*/\1/p')
     local key="${land}_$(echo "$CAP" | tr -c 'a-z0-9\n' '_' | tr -s '_')"
     echo "cap_${key%_}${BLOCKS:+_b$BLOCKS}"
+}
+plancap() {   # the capture an arm's plan was cut from: capname, or a per-configuration capture beside it (PLANCAP)
+    local c; c=$(capname "$1"); arm "$1"
+    echo "${c}${PLANCAP}"
+}
+capture_flag() {   # the driver's --capture for arm $1 when that capture is in $OUT (sets CAPF; logs either way)
+    local c; c="$OUT/$(plancap "$1")"
+    if [ -d "$c" ]; then CAPF="--capture $c"; else CAPF=""; log "$1: no capture $c here: the plan's capture md5 is not checked"; fi
+}
+md5_of() {   # cat block_*/graph.json | md5, as make_plan.sh writes it into PLAN_CMD.txt
+    cat "$1"/block_*/graph.json | (md5sum 2>/dev/null || md5 -q) | cut -c1-32
 }
 
 cuda_env() {   # the build's CUDA environment for every step that compiles the kernels: build.rs re-runs nvcc whenever
@@ -186,7 +224,11 @@ bench)
         > "$OUT/bench_bts.txt" 2>&1 || { tail -20 "$OUT/bench_bts.txt"; die "pc-bench failed"; }
     tail -25 "$OUT/bench_bts.txt"; log "bench: $OUT/bench_bts.txt (set PLAN_BTS_MS from it for ILP_OBJECTIVE=ms); $(build_id)" ;;
 arms)
-    for a in $ARMS; do arm "$a"; printf '%-12s device[%s] capture[%s] plan[%s] run[%s] -> %s  %s\n' "$a" "$([ $DEVICE = 1 ] && echo yes || echo cpu-only)" "$CAP" "$PLANENV" "$RUNF" "$(capname "$a")" "$NOTE"; done ;;
+    for a in $ARMS; do
+        arm "$a"
+        pc=$(plancap "$a"); c=$(capname "$a")
+        printf '%-15s device[%s] capture[%s] plan[%s] run[%s] -> %s%s  %s\n' "$a" "$([ $DEVICE = 1 ] && echo yes || echo cpu-only)" "$CAP" "$PLANENV" "$RUNF" "$c" "$([ "$pc" = "$c" ] || echo " (plan cut on $pc)")" "$NOTE"
+    done ;;
 capture)
     a=${1:?arm}; arm "$a"; c="$OUT/$(capname "$a")"
     case "$NOTE" in BLOCKED*) die "$a: $NOTE" ;; esac
@@ -204,7 +246,17 @@ capture)
     rm -rf "$c"; mv "$c.part" "$c"
     log "capture $a: done in $(( $(date +%s) - t0 )) s" ;;
 plan)
-    a=${1:?arm}; arm "$a"; c="$OUT/$(capname "$a")"
+    a=${1:?arm}; arm "$a"; c="$OUT/$(plancap "$a")"; p="$OUT/bootstrap_placements/plan_$a$S"
+    if [ -f "$p/PLAN_CMD.txt" ] && [ "${REPLAN:-0}" != 1 ]; then
+        # a plan in place (shipped): reused, never re-cut, once its graph= md5 is the capture's at hand
+        want=$(sed -n 's/^graph=.*(md5 of the stages.* graph.json \([0-9a-f]*\)).*/\1/p' "$p/PLAN_CMD.txt")
+        [ -d "$c" ] || die "plan $a: reusing $p needs its capture $c here (the md5 check)"
+        got=$(md5_of "$c")
+        [ -n "$want" ] && [ "$got" = "$want" ] || die "plan $a: $p was cut from a capture of md5 ${want:-?}, $c has $got"
+        grep -q "check errors 0;" "$p/summary.txt" || die "plan $a: $p's summary holds no 'check errors 0;' line"
+        log "plan $a: reusing $p (capture md5 $got; REPLAN=1 re-cuts it)"; exit 0
+    fi
+    [ "$SHIPPED" = 1 ] && die "plan $a: shipped only (cut elsewhere on $(plancap "$a")): never cut here; ship $p"
     [ -d "$c" ] || die "no capture $c: run_gpu.sh capture $a"
     ( env $PLANENV PLAN_ROOT="$OUT" MEMGUARD_GB= bash "$HERE/make_plan.sh" "$c" "plan_$a$S" ) 2>&1 | tee "$OUT/plan_$a$S.log" | tail -8
     rc=${PIPESTATUS[0]}
@@ -218,11 +270,12 @@ prepare)
     PYTHONPATH="$W/python" "$PY" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$DRIVER') else 1)" 2>/dev/null \
         || die "no driver module $DRIVER (RUNSHEET_GPU.md §4 is its contract)"
     resolve_data
-    r="$OUT/prepare_$a$S"; mkdir -p "$r"
-    log "prepare $a (CPU only): $CAPENV $DRIVER --plan $p --prepare-only $CAP $RUNF ${PREPARE_EXTRA:-}"
+    capture_flag "$a"
+    r="$OUT/prepare_$a$S$T"; mkdir -p "$r"
+    log "prepare $a (CPU only): $CAPENV $DRIVER --plan $p --prepare-only $CAP $RUNF $CAPF ${PREPARE_EXTRA:-}"
     t0=$(date +%s)
     ( cd "$W" && env CUDA_VISIBLE_DEVICES="" PYTHONPATH="$W/python" $CAPENV "$PY" -m "$DRIVER" $MODEL_ARGS --plan "$p" \
-        --prepare-only ${PREPARE_EXTRA:-} $CAP $RUNF --out "$r/record.json" ) > "$r/prepare.log" 2>&1
+        --prepare-only ${PREPARE_EXTRA:-} $CAP $RUNF $CAPF --out "$r/record.json" ) > "$r/prepare.log" 2>&1
     rc=$?
     log "prepare $a: exit $rc in $(( $(date +%s) - t0 )) s; $r/record.json"
     tail -8 "$r/prepare.log"
@@ -237,15 +290,16 @@ run)
     [ "$KEYS" != bundle ] || [ -d "${FHE_SSM_KEYS:-}" ] || die "KEYS=bundle reads the client's key directory from FHE_SSM_KEYS: export it (or KEYS=<dir>)"
     gpu_free
     resolve_data
-    r="$OUT/run_$a$S"; mkdir -p "$r"
+    capture_flag "$a"
+    r="$OUT/run_$a$S$T"; mkdir -p "$r"
     echo "$(build_id)" > "$r/build_id.txt"
     nvidia-smi --query-gpu=timestamp,memory.used,utilization.gpu,power.draw --format=csv -lms 500 -i "$GPU" > "$r/nvsmi.csv" 2>/dev/null &
     smi=$!
     trap 'kill "$smi" 2>/dev/null; wait "$smi" 2>/dev/null' EXIT       # the sampler dies with the step, whatever ends it
-    log "run $a: $DRIVER --plan $p --ticks $TICKS --profile --profile-every $PROFILE_EVERY $CAP $RUNF --keys $KEYS"
+    log "run $a${RUN_TAG:+ (tag $RUN_TAG)}: $DRIVER --plan $p --ticks $TICKS --profile --profile-every $PROFILE_EVERY $CAP $RUNF $CAPF --keys $KEYS"
     t0=$(date +%s)
     ( cd "$W" && env CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH="$W/python" $CAPENV "$PY" -m "$DRIVER" $MODEL_ARGS --plan "$p" --ticks "$TICKS" \
-        --profile --profile-every "$PROFILE_EVERY" --keys "$KEYS" $CAP $RUNF --out "$r/record.json" ) > "$r/run.log" 2>&1
+        --profile --profile-every "$PROFILE_EVERY" --keys "$KEYS" $CAP $RUNF $CAPF --out "$r/record.json" ) > "$r/run.log" 2>&1
     rc=$?
     kill "$smi" 2>/dev/null; wait "$smi" 2>/dev/null; trap - EXIT
     peak=$(awk -F', ' 'NR>1 {gsub(/ MiB/,"",$2); if ($2+0>m) m=$2+0} END {print m+0}' "$r/nvsmi.csv")
@@ -256,16 +310,17 @@ keyspec)
     a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a$S"
     [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
     resolve_data
-    r="$OUT/keys_$a$S"; mkdir -p "$r"
-    log "keyspec $a: $DRIVER --plan $p --keyspec $r/keyspec.json $CAP $RUNF"
+    capture_flag "$a"
+    r="$OUT/keys_$a$S$T"; mkdir -p "$r"
+    log "keyspec $a: $DRIVER --plan $p --keyspec $r/keyspec.json $CAP $RUNF $CAPF"
     ( cd "$W" && env CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH="$W/python" $CAPENV "$PY" -m "$DRIVER" $MODEL_ARGS --plan "$p" \
-        --keyspec "$r/keyspec.json" $CAP $RUNF ) > "$r/keyspec.log" 2>&1
+        --keyspec "$r/keyspec.json" $CAP $RUNF $CAPF --out "$r/keyspec_record.json" ) > "$r/keyspec.log" 2>&1
     rc=$?
     log "keyspec $a: exit $rc; $r/keyspec.json"
     tail -5 "$r/keyspec.log"
     [ $rc = 0 ] || die "keyspec $a failed ($r/keyspec.log)" ;;
 keygen)
-    a=${1:?arm}; r="$OUT/keys_$a$S"
+    a=${1:?arm}; r="$OUT/keys_$a$S$T"
     [ -f "$r/keyspec.json" ] || die "no key request $r/keyspec.json: run_gpu.sh keyspec $a"
     log "keygen $a (the client role, on this box for the test): $DRIVER --keygen $r --keyspec-file $r/keyspec.json"
     ( cd "$W" && env CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH="$W/python" "$PY" -m "$DRIVER" --keygen "$r" \
@@ -360,6 +415,22 @@ diag-tests)
         grep "\[diag_gen\] (f)" "$r/6_crates_f.log" | tee -a "$OUT/session.log"
     fi
     log "diag-tests: steps $only passed ($r); $(build_id)" ;;
+pass-tests)
+    # the pass kernels on a device (RUNSHEET_GPU.md §3 step 2a): one block at d = 1,024, PCMM-24, LANDING=high, the tick,
+    # mixed and doc scenarios; FHE_SSM_REQUIRE_DEVICE=1 (a test that cannot find the device fails, never skips) and
+    # CUDA_MODULE_LOADING=EAGER (no lazy module load after the warm-up: the free-memory check is exact)
+    gpu_free
+    cuda_env
+    r="$OUT/pass_tests"; mkdir -p "$r"
+    log "pass-tests: pytest -m gpu python/perseus/examples/fhe_ssm/tests/test_pass_gpu.py"
+    ( cd "$W" && env CUDA_VISIBLE_DEVICES="$GPU" PYTHONPATH="$W/python" CUDA_MODULE_LOADING=EAGER FHE_SSM_REQUIRE_DEVICE=1 \
+        "$PY" -m pytest -q -rs -x -p no:cacheprovider -m gpu python/perseus/examples/fhe_ssm/tests/test_pass_gpu.py ) \
+        > "$r/pass_tests.log" 2>&1
+    rc=$?
+    tail -4 "$r/pass_tests.log" | tee -a "$OUT/session.log"
+    [ $rc = 0 ] || { grep -E 'FAILED|Error' "$r/pass_tests.log" | head -20 | tee -a "$OUT/session.log"; die "pass-tests failed ($r/pass_tests.log)"; }
+    grep -qE '(^| )3 passed' "$r/pass_tests.log" || die "pass-tests: exit 0 but no '3 passed' line (a skipped or deselected test passes nothing)"
+    log "pass-tests: passed ($r); $(build_id)" ;;
 smoke-diag)
     export BLOCKS=1 DIAG_SOURCE=generated KEYS=${KEYS:-inproc}
     log "smoke-diag: KEYS=$KEYS (a contact test; inproc = in-process keys, recorded insecure-inproc)"
@@ -372,5 +443,5 @@ matrix)
         bash "$0" capture "$a" && bash "$0" plan "$a" && bash "$0" "$last" "$a" || log "arm $a stopped (above); continuing"
     done ;;
 *)
-    sed -n '2,45p' "$0"; exit 2 ;;
+    sed -n '2,/^set -uo pipefail/p' "$0" | sed '$d'; exit 2 ;;
 esac

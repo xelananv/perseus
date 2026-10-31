@@ -91,6 +91,7 @@ weights, seeds, config and scales. The times are the fake's own and say nothing 
 | `--capture DIR`, `--capture-tick` | —, `1` | run on the capture recorder and write `block_<b>/graph.json` per stage at that tick (tick 0's carried state is zero) |
 | `--ms-norm-k`, `--newton-frac`, `--newton-min-iters` | 5.5, 0.1, 12 | the norm frame and the served seed (the in-block values under `per-site` are fixed) |
 | `--no-carry` | | skip the canonical carry (with a huge `--limit` the levels then measure the depth) |
+| `--pass-kernels`, `--scenario`, `--lane-config`, `--inject-from-exact` | `off`, `tick`, —, — | a pass in any lane configuration: the scan, the token shift and the carry prep as the pass kernels, the passes from a scenario or a JSON list, the registers optionally started from a history on the float64 reference ("A pass in any lane configuration" below) |
 
 Every axis off reproduces the reference circuit op for op (`tests/test_axes.py::test_every_axis_off_is_the_reference_circuit`).
 
@@ -392,11 +393,12 @@ own path when it exists). A plan stamped under another Config than the twin's (a
 plan whose Config names a chain other than n32 (`CHAIN_PRESET` on its `runtime=` line, e.g. the lean
 n32a4: the session, its shadow and its key manifest would build that chain, while the model's plaintext
 rows and levels are n32's; `run_planned.session_config`). A model whose stream is not static (never this model). **Diagonal linears on the device path under
-`--diag-source values`** (`--linear diagonal` and `pcmm-trunk`): `PlannedRun` keeps one resident plaintext
-slot per distinct plaintext (`pt_slots = len(pt_levels) + 8`, `driver.py:731`; a slot is `pt_rows` rows of N
-32-bit words, 7 MiB at 28 rows) and the reference circuit reads 344,064 diagonal plaintexts per tick (about
-2.3 TiB), so the driver refuses above `--pt-budget-gb` (40) with the count; `--diag-source generated` runs
-them on the device diagonal encoder (below). `--diag-source generated` on a device build without the
+`--diag-source values`** (`--linear diagonal` and `pcmm-trunk`): the store keeps one resident plaintext slot per
+distinct (store alias, level) pair (`planned.PlannedSsmRun.session_kwargs`: a static plaintext aliased by the
+digest of its values, as `PlannedRun.precompute` names a slot; upstream's `PlannedRun` reserves one per reference,
+`driver.py:731`; a slot is `pt_rows` rows of N 32-bit words, 7 MiB at 28 rows) and the reference circuit reads 344,064
+distinct diagonal plaintexts per tick (about 2.3 TiB), so the driver refuses above `--pt-budget-gb` (40) with the
+count; `--diag-source generated` runs them on the device diagonal encoder (below). `--diag-source generated` on a device build without the
 encoder (`Session.register_tile`). The `--linear pcmm` arms are resident (about 1,200 per-channel
 constants per tick) and run.
 
@@ -510,6 +512,101 @@ at a `compile_check` binary other than the one `tools/fhe_ssm/compile_check/buil
 `default_check_bin`). `run_gpu.sh`'s `diag-tests` step exports `FHE_SSM_REQUIRE_DEVICE=1` and passes the model's
 files, `plan_ref` and `FHE_SSM_E_OUT` from `DATA` / `OUT`; it never sets `FHE_SSM_COMPILE_CHECK` (its `verify` step
 builds the binary where the default looks). By hand, set them as that step does.
+
+## A pass in any lane configuration
+
+`--pass-kernels on` (model flag; `FheSsmModel(pass_kernels="on")`) runs one op stream for any partition of a pass's
+64 lane-slots into sequences and conversations: 64 conversations at one token each (today's tick), one document read
+64 positions per pass and then served to 64 readers, a lone conversation prefilling a long prompt, or any mix in the same
+passes. Nothing in the model changes: the only ops that couple two tokens of one conversation are the scan
+`S = a S + (1 − a) x` and the token shift `um = mix n + (1 − mix) n_prev`, both linear in the carried value with
+plaintext coefficients (the decay is a trained per-channel constant: an LTI diagonal scan), so a sequence laid out over
+consecutive lane-slots of one pass is the same block with the scan replaced by a segmented plaintext-linear map over the
+lane-slots and the shift by a lane read. The norms, the gates, the linears and the refreshes act per lane-slot and see
+the same ops. What changes per pass is plaintext values only (the masks), never the stream.
+
+**The configuration** (`passmasks.py`). Lane-slot `q = 2j + e` is lane `j`'s real (`e = 0`) or imaginary (`e = 1`) axis
+(channel `i` of lane `j` at slot `i t + j`, `t = 32`). A pass partitions the 64 lane-slots of every channel group into
+`seq` segments (a home `[h0, h1)` with even bounds; the sequence's consecutive positions at `[q0, h1)` in `q` order;
+`[h0, q0)` front padding, copies of row `q0` run as fresh conversations and never scored; the last position `h1 − 1` on
+an imaginary axis; entry `fresh` or `carry`) and `conv` lane-slots (one conversation, one token; `fresh`, `carry`, or
+`parked`, a copy of a named live lane-slot's row, never scored). A JSON pass is `{"name", "segments": [{"kind", "home",
+"q0", "entry", "stream", "parked_from"}], "tokens": [64 ints, q order]}`; a token `-1` is generated: the tied head's
+argmax on the previous pass's reply at that lane-slot. `passmasks.Tracker` follows which stream last wrote each
+lane-slot's register and refuses an overlapping or incomplete partition, an odd home bound, a continuing `seq` whose home
+is not inside its previous home, and `carry` on a register another stream, a parked copy or a still-continuing `seq`
+wrote; a finished segment's home lanes may turn `conv carry` (the hand-over: every home lane-slot, padding included,
+holds the segment's final state on both axes); a register no pass wrote holds `start()`'s encryption of zero. Not
+representable: a segment that widens, a conversation's state handed to a multi-lane segment, a segment ending on a real
+axis. The scenarios (`--scenario`): `tick[:K]` (K conversations' ticks, conv carry throughout: today's tick),
+`prefill:T` (one sequence on `[0, 64)` in ⌈T/64⌉ chunks, then 3 generation passes on lane-slot 63), `doc:T:READERS` (a
+document chunked the same way, then 3 passes of `READERS` conversations reading its final state), `mixed` (two
+sequences and conversations in the same passes, a hand-over, joins), `churn` (conversations leaving and joining).
+
+**The three kernels** (`passkernel.py`, `block.py`; every product through the one hook `passkernel.passmult`).
+K1, the scan (`tm.scan`): a causal baby-step giant-step over the lanes, `S[q] = Σ_{q'} c(q, q') x[q'] + κ(q) C[q]`
+with `c = (1 − a) a^(q − q')` inside a sequence, two complex products per lane offset realizing any real-linear map
+between the two axes (64 products, 14 hoisted baby rotations of `x` and `conj x` and 3 giant ones, 1 conjugation) plus
+the state pair (2 products, 1 conjugation). The shift (`tm.shift`): `n_prev[q] = n[q − 1]` inside a sequence, else the carried `C_n[q]` (6 products,
+1 rotation, 3 conjugations). K2, the carry prep (`carry.prep`, between the time mix and the channel mix): an anti-causal
+broadcast of each sequence's last position to every lane of its home, both carried values in one kernel (32 + 2
+products, 7 + 3 rotations, 3 conjugations; the halves folded into the masks: a scalar product costs a level). The
+pre-rotation rule for both directions is derived in `passkernel.py`'s docstring and tested against the direct form, the
+rows form and two wrong variants (`tests/test_passkernel.py`). Measured on the fake at the synthetic shape, per block
+against today's tick: **+102 ct×pt, +28 rotations, +8 conjugations, +0 refreshes** (106 pass products through 105
+mask ids); at the model shape the PCMM-24 capture holds `mult_pt 3,649 = 1,201 + 2,448`, `rotations 2,108 = 1,436 + 672`,
+`conjugations 457 = 265 + 192`, bootstraps 1,390 unchanged, with 0 structural differences between six configurations'
+captures. The plans of the merged captures keep today's counts (`cfg_pcmm24_high` 802, `cfg_ref_stock` 637, the same
+routes) and grow the compile check's launches: 20,976 against 15,190 on PCMM-24 (+38.1 %), 720,418 against 714,610 on
+the diagonal arm (+0.81 %). The tick configuration reproduces `--pass-kernels off`'s replies bit for bit (64, 10 and 1
+conversations); every scenario at the synthetic shape matches `ref.ExactModel.pass_` per live lane-slot to ≤ 4.72e-16.
+Time on a device: unmeasured.
+
+**The flags.** `run_fake.py --pass-kernels on --scenario NAME | --lane-config FILE [--inject-from-exact HISTORY]`: the
+passes on the fake or the capture recorder, scored per live lane-slot against `ExactModel.pass_` and the mirror, the
+census per block; a capture under the kernels writes `capture_pass.json` (the captured pass's configuration).
+`passmerge.py` merges configurations' captures (`--rule max_each`: every magnitude statistic its maximum over the
+captures), which is what the plans are cut on. `run_planned.py --pass-kernels on --scenario NAME | --lane-config FILE`:
+the planned driver under the kernels (`tick` alone runs `--ticks` passes; `--conversations` shapes the tick scenario
+only); `--pass-kernels on` is a capture flag too, so `run_gpu.sh`'s capture names carry it (`cfg-pcmm24`, `cfg-ref`).
+
+**Refusals.** `--lane-mix random` with the kernels (it adds a cost-only term to the scan state); a layout other than
+the filled pairs; `--free-run` and `--tokens` with the kernels (a pass's tokens are its configuration's; a free run per
+lane-slot is not built); `--scenario` / `--lane-config` without them, or both at once; `--conversations` with a
+scenario other than `tick`; a configuration of another lane-slot count; a first pass holding a generated token; a
+generated token when the session exports frames only (a bundle without the client's secret); a prepare whose stream is
+not static across the probes (`planned.NotStatic`: a configuration may enter only through pass-mask plaintexts).
+
+**The driver's staging** (`planned.py`). The twin records the probes in one fixed configuration, the first pass's,
+and keeps each pass-mask product as a `PassPt` (its mask id and its full vector; a digest under `--lean`), so the static
+check across the probes also proves the masks a pure function of the configuration. The store's alias map is permanent
+(`alias_pts` is refused after a graph capture), so it is built once, before the session: a pass key by its identity, the
+mask id (`pass/b<b>/...` for the per-block masks, `pass/k2/...` shared by every block, at each level a block reads it);
+a static plaintext by the digest of its values (`v/<digest>`); no alias in both. The store is sized by the distinct
+(alias, level) pairs (`session_kwargs`), not by references: at the model shape the diagonal arm's 2,544 pass products
+are 1,796 pairs under 1,761 ids. `stage_static` stages the static plaintexts and the first pass's masks before the
+warm-up captures the graphs; every configuration's masks and digests are computed at setup (`precompute_passes`);
+before each pass `stage_pass` re-encodes in place only the keys whose digest changed (`PtStore.stage`: the resident slot,
+so the captured graphs keep replaying; never an evict, never a new key), inside the clock. Block 0's input is packed in
+lane-slot order through one permutation (`passmasks.to_layout`) and the reply unpacked through its inverse; nowhere
+else on the device path. Each pass's record (`ticks[]`): the configuration, what was restaged and in how long
+(`staged`, `stage_s`), whether it was fenced, `served`, the counters' deltas, the live positions (`token_values`), the
+sequences' positions, relErrRms over the live lane-slots and the worst one, top-1 at every sequence's last position and
+every live conversation, the free device memory.
+
+**What the CPU verifies, and what is GPU-only.** On the CPU: the recorder's records equal `passmasks.masks` bit for
+bit per configuration and block (`tests/test_pass_driver.py`); the staging on stand-ins (`CheckedProgram.pt_keys` /
+`alias_pts` derived from the recorded references, `FakeStore`) for every pass of every scenario: every program key reads
+the twin's recorded value of that pass's configuration, no pass key aliases a static one, every key a program reads is
+resident, the staged count per configuration change equals the keys whose recorded values differ (0 on a repeated
+configuration; at the synthetic shape `prefill:320` restages 8 keys at fresh → carry and all 212 at the chunk →
+generation change); the store holds exactly what was staged; `--prepare-only` per scenario (static, 0 check errors, the
+budget both ways, `staging_dry_run`); the lane-slot order on both ends. The model-shape lean prepare of the diagonal arm
+under the kernels runs on a 16 GB laptop (25 programs, 722,245 ops, 637 refresh sites, 0 check errors, static, 437 s);
+the PCMM arm's needs more than 3 GB of host memory. GPU-only (`tests/test_pass_gpu.py`, `@pytest.mark.gpu`; `run_gpu.sh
+pass-tests`): that in-place restaging keeps the graphs (every stage replayed, no capture and no invalidation on a
+restaging pass), the replies per live lane-slot on a device, the free memory across passes, and every time;
+`tools/fhe_ssm/RUNSHEET_GPU.md` is the session.
 
 ## Upstream APIs this package depends on (at d97a6f7)
 

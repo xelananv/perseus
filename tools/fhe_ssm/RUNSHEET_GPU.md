@@ -5,97 +5,148 @@ product under `$OUT` (default `<checkout>/.cache/fhe_ssm/gpu_<UTC date>`, gitign
 source tag [Sn] when it was measured (the sources are listed in the research record of this runsheet); otherwise it
 says **unmeasured**. Paths are relative to the checkout.
 
-Status: the plan tooling (`make_plan.sh`), the CPU compile check (`compile_check/`), the change check and the sync
-script work on the CPU; the port's fake and capture run (`python/perseus/examples/fhe_ssm/run_fake.py`). The planned
-driver (`python/perseus/examples/fhe_ssm/run_planned.py`, contract §4) exists and its CPU part (`--prepare-only`: the
-recorded stream, the compile check, the report) runs on a CPU-only build [S12]; **nothing of it has run on a device**.
-On the device path it runs only the arms whose every linear is PCMM (`pcmm24`, `best`); the others run their CPU part
-(§3).
+This session prices **a pass in any lane configuration** (the pass kernels: `python/perseus/examples/fhe_ssm/README.md`
+"A pass in any lane configuration") against today's tick on one binary, accepts the device diagonal encoder (§3a), and
+tries the deployment split. The plans and captures are cut on the CPU before the rental and shipped (§2): the box
+captures and plans nothing. The steps are §3, in order; a session script in the research record runs them start to
+finish and checks every record.
+
+Status: the plan tooling, the CPU compile check, the change check, the port's fake and capture, and the planned driver's
+CPU part (`run_planned.py --prepare-only`: the recorded stream, the compile check, the plaintext budget both ways, the
+per-pass staging's dry run on the CPU stand-ins) run on a CPU-only build [S12, S18, S19]. **Nothing of the driver has
+run on a device**: the session, the graphs, the in-place restaging, every timing and every fidelity on a device are
+this session's to measure.
 
 ## 0. Rules for every timed step
 
-- One binary for every number that is compared. Build once and never rebuild mid-matrix. Wall-clock belongs to a build,
-  so a time measured on another build (another runtime, another toolkit, another link) is never a denominator here.
-  `run_gpu.sh` writes the commit, the `_pc` .so hash, nvcc's version and the load average beside every run.
+- One binary for every number that is compared. Build once and never rebuild mid-session. Wall-clock belongs to a
+  build, so a time measured on another build (another runtime, another toolkit, another link) is never a denominator
+  here. `run_gpu.sh` writes the commit, the `_pc` .so hash, nvcc's version and the load average beside every run.
 - An idle GPU and an idle host. `run` refuses a GPU with other compute processes. The planned path stages plaintexts
-  from the host, so a CPU-heavy neighbour moves the timing. Captures and plans are CPU jobs: run them before the timed
-  block, or on another machine at the same commit.
-- A control inside the block: time the arm's control (§3) first and again last. Quote an arm's gain only against the
-  control of the same block and binary; a difference inside the control's own spread is noise.
-- Fidelity next to speed for every arm: the reply's RMS relative error against the exact forward, and top-1 agreement
-  over the conversations. An arm that moves fidelity is reported as such, not as a free speedup.
+  from the host, so a CPU-heavy neighbour moves the timing. Prepares are CPU jobs: run them before the timed block.
+- One `KEYS` mode across a bracket (`KEYS=inproc` for the timing brackets); the bundle run is last and never compared
+  with them.
+- A control inside every bracket: the arm's control first and again last (`RUN_TAG=ctlA`, `RUN_TAG=ctlB`, `TICKS=6`:
+  three unfenced ticks each under `PROFILE_EVERY=2`). Quote an arm's difference only against the controls' mean and only
+  when it falls outside their spread (max − min over both controls' unfenced ticks).
+- `RUN_TAG` names every run: `run_<arm>[_bN][_<tag>]`; without it a second run of an arm overwrites the first.
+- Fidelity next to speed for every row: the reply's RMS relative error against the exact reference over the live
+  lane-slots, the worst live lane-slot, and top-1 agreement at every next-token lane-slot.
 
 ## 1. The box
 
 | need | why | source |
 |---|---|---|
-| Linux x86-64; an NVIDIA driver for CUDA 13.2; the CUDA 13.2 toolkit at `/usr/local/cuda-13.2` (or `CUDA_HOME`) | the kernels are built with nvcc from `CUDA_HOME` | `crates/pc-kernels/build.rs:8`; `speedrun/MAINTAINING.md:13` |
-| GPU: **96 GB recommended** (RTX PRO 6000; sm_120 is the build's default arch). 48 GB is upstream's floor for GPT-2 | the lockstep schedule grows the slab 4.7× on GPT-2 prefill [S7]; this runtime's footprint for the model is unmeasured (§6) | `README.md:33,173`; `crates/pc-kernels/build.rs:2-3` |
-| host RAM: ≥ 128 GB for the PCMM arms and for the diagonal arms under `DIAG_SOURCE=generated` (the device builds the diagonals from 2.625 GiB of resident tiles: nothing streams from the host per tick). Upstream's streamed alternative for the diagonals (not this port's path) would move ≈ 84 GiB of float32 rows per tick from pinned host memory (344,064 × 2^16 × 4 B) | GPT-2 Prefill-128's server peaks at 39.6 GB | `speedrun/runner/entry.sh:10-11`; `python/perseus/impl/driver.py:941-959` |
-| rustup + cargo (`rust-toolchain.toml` pins 1.99.1; rustup installs it on first use), `uv`, git | the build | `README.md:22-27` |
-| ≥ 50 GB disk | venv, cargo target, captures (the model's 24-block capture: 472 MB [S4]) and plans | — |
+| Linux x86-64; an NVIDIA driver ≥ 580; the CUDA 13.2 toolkit at `/usr/local/cuda-13.2` (or `CUDA_HOME`) | the kernels are built with nvcc from `CUDA_HOME`; a CUDA 13.x toolkit needs driver ≥ 580 | `crates/pc-kernels/build.rs:8`; `speedrun/MAINTAINING.md:13` |
+| GPU: **96 GB** (RTX PRO 6000; sm_120 is the build's default arch) | this runtime's footprint for the model is unmeasured (§8); the pass kernels add store slots and 20 rotation keys | `README.md:33,173`; `crates/pc-kernels/build.rs:2-3` |
+| host RAM: **≥ 128 GB** | the 24-block PCMM prepare needs more than 3 GB of host memory (a 3 GB guard stopped it without the pass kernels [S13]); the diagonal arms under `DIAG_SOURCE=generated` hold 2.625 GiB of float64 tiles; every configuration's masks are computed at setup (≈ 0.9 GB per configuration at the model shape [derived: 1,761 vectors of 256-512 KiB]) | `speedrun/runner/entry.sh:10-11` |
+| rustup + cargo (`rust-toolchain.toml` pins 1.99.1), `uv`, git, tmux | the build | `README.md:22-27` |
+| ≥ 50 GB disk | venv, cargo target, the staged tree (two diagonal captures of 472-475 MB each [S4]) | — |
 
-## 2. Steps
+## 2. Before renting: the staged tree
 
-| # | step | command | expected output | duration |
-|---|---|---|---|---|
-| 0 | record the box | `bash tools/fhe_ssm/run_gpu.sh box` | `$OUT/box.txt`: the GPU's name, memory, driver and compute capability; `nvidia-smi topo -m`; nvcc 13.2; RAM; disk; load; commit | seconds |
-| 1 | the code | `git clone -b fhe-ssm-speedrun <the fork's URL> perseus && cd perseus && git remote add upstream https://github.com/gladia-research-group/perseus && git fetch upstream speedrun`. Without a pushed branch: `git bundle create fhe-ssm.bundle origin/speedrun..fhe-ssm-speedrun` where the branch lives, copy the bundle, then `git clone -b speedrun https://github.com/gladia-research-group/perseus perseus && git -C perseus fetch <bundle> fhe-ssm-speedrun:fhe-ssm-speedrun && git -C perseus switch fhe-ssm-speedrun` | `bash tools/fhe_ssm/check_additive.sh upstream/speedrun` → `... : OK` (every change is the port's own or listed in `tools/fhe_ssm/UPSTREAM_CHANGES.md`) | unmeasured |
-| 2 | build | `bash tools/fhe_ssm/run_gpu.sh build`: uv venv 3.12, `uv pip install -e ".[hf,examples,dev]"`, `maturin develop --release`; `PERSEUS_CORE_ARCH` from the GPU's compute capability, `PC_NVCC_JOBS=8` | `build: done in N s; commit=… pc_so=… nvcc=13.2 arch=120` | unmeasured |
-| 3 | verify | `bash tools/fhe_ssm/run_gpu.sh verify` | `perseus._pc loaded; device classes missing: none` (Session, Program, KeySource, Client, PtStore: `crates/pc-py/src/lib.rs:31-48`); the GPU's used / free / total memory from `nvidia-smi`; upstream's CPU tests (`test_fake_shadow`, `test_pairing_cpu`, `test_rmsnorm_example`, `test_prefill_cpu`): 70 passed, 4 skipped [S1]; the port's tests pass; the change check `OK`; the compile check's binary path. `_pc` has no free-memory function: a session's memory is its `mem_report` and `fhe.mem_info()` = (free, total) bytes (`crates/pc-py/src/fhe.rs:1307-1310`), which the driver records (§4) | the four upstream files: 1.76 s on a CPU-only build [S1]; this box unmeasured |
-| 4 | the model's data | the pbd430a checkpoint's weights `.npz` (sha256 begins `3ec3f1d8`, ends `784b` [S3]), seeds `.json` and config `.json` in one directory; `export DATA=<that dir>` | `sha256sum` matches | — |
-| 5 | this build's refresh prices | `bash tools/fhe_ssm/run_gpu.sh bench` = `cargo run --release -p pc-tools --bin pc-bench -- bts --all --k 1,8 --reps 20 --keys packed` (the command in `README.md` of upstream `main`) | `$OUT/bench_bts.txt`: ms per refresh per route at K = 1 and 8. Set `PLAN_BTS_MS` from it before planning with `ILP_OBJECTIVE=ms` | unmeasured |
-| 6 | the arms | `bash tools/fhe_ssm/run_gpu.sh arms` | the table of §3 | — |
-| 7 | captures (CPU) | `bash tools/fhe_ssm/run_gpu.sh capture <arm>` per distinct capture (arms that differ only in plan or run share one); or make them elsewhere at the same commit and copy `$OUT/cap_*` | `$OUT/cap_<landing>_<flags>/`: `block_<b>/graph.json` × 25 stages, `capture_env.json`, `capture_config.json`. A `LANDING=high` arm's capture is checked after it is written: its `capture_config.json` must carry `stc_first=2` and `raise_drop=512:1` (§3) | 24 blocks at `--levels preset`: 11 min 29 s on a 16 GB laptop CPU [S4] (17 min 7 s for the high switches' capture, with a planner running beside it [S10]); every linear PCMM: 31 s [S11]; the plain fake run of the same model: 17-25 s [S2] |
-| 8 | plans (CPU) | `bash tools/fhe_ssm/run_gpu.sh plan <arm>` = `tools/fhe_ssm/make_plan.sh` with the arm's axes, then the compile check | `plan_<arm>/summary.txt`: refreshes per stage @ exit level, the total, `compile check … check errors 0`. A planner failure (exit ≠ 0) or a compile check error stops the step | 25 stages, min-cut: 168-183 s on the same laptop [S5]; `LANDING=high`: 992 s (every block retried once; another planner beside part of it) [S10]; ILP: 55-58 s for 2 GPT-2 stages [S5] |
-| 8a | the driver's CPU part | `bash tools/fhe_ssm/run_gpu.sh prepare <arm>` = `$DRIVER … --plan P --prepare-only` (`PREPARE_EXTRA=--lean` on a host with little RAM: plaintext digests instead of values) | `prepare_<arm>/record.json`: the recorded stream's op count = the capture's node count, the plan's refresh count, 0 check errors, the stream static across ticks | the reference at the model shape, `--lean`: 885.6 s, contended [S12]; `pcmm24` at `BLOCKS=1`: 3 s; the 24-block `pcmm24` prepare needs more than 3 GB of host memory [S13] |
-| 9 | keys | `KEYS` has no default: `run`, `smoke` and `matrix` refuse without it; `smoke-diag` (a contact test) takes `KEYS=inproc` when unset and says so. `KEYS=inproc` = the driver's `--insecure-test-keys`: the session derives every key from the compiled programs and holds the secret for the whole run (`crates/pc-py/src/session.rs:617-737`), a timing run only, recorded as `keys.mode = "insecure-inproc"`. The deployment split: `bash tools/fhe_ssm/run_gpu.sh keyspec <arm>` = `$DRIVER … --plan P --keyspec $OUT/keys_<arm>[_bN]/keyspec.json` (the key request: the model's rotation steps, the conjugation, the PCMM `t`s, and on the device build the session's own `Session.key_manifest` after the programs compile), then `bash tools/fhe_ssm/run_gpu.sh keygen <arm>` = `$DRIVER --keygen $OUT/keys_<arm> --keyspec-file …/keyspec.json` (the client role, no model flags: a fresh secret, `keys.pckb`, and `client_secret.bin` kept beside it so the run can decode its replies; a real client runs this elsewhere and ships `keys.pckb` only), then `KEYS=bundle FHE_SSM_KEYS=$OUT/keys_<arm>` (or `KEYS=<that dir>`) for `run`. The driver checks the bundle before the session opens (plan contract, PCMM keys, switching-key count, public key) and opens it with `Session.from_bundle` without a secret; the reply is decrypted by `_pc.Client` on the client's side of the process | `keyspec.json`; `keygen.log`: the key count, the bundle size; the run logs the PCMM `t`s | unmeasured |
-| 10 | 1-block smokes and the encoder's device checks | in this order: `bash tools/fhe_ssm/run_gpu.sh smoke` (capture, plan and run of `pcmm24` at `BLOCKS=1`); `bash tools/fhe_ssm/run_gpu.sh diag-tests` (the device diagonal encoder's checks 1-3 of §2a, stopping at the first failure); `bash tools/fhe_ssm/run_gpu.sh smoke-diag` (`ref` at `BLOCKS=1` under `DIAG_SOURCE=generated`, check 4: the encoder's first planned run; its capture and plan are `cap_stock_b1` and `plan_ref_b1`, never the whole model's); then, **without `BLOCKS`**, `bash tools/fhe_ssm/run_gpu.sh capture ref` and `bash tools/fhe_ssm/run_gpu.sh plan ref` (the whole model: `cap_stock`, `plan_ref`) and `DIAG_E=1 DIAG_F=1 bash tools/fhe_ssm/run_gpu.sh diag-tests` (checks 5-6; the passed checks 1-3 are skipped, `DIAG_ONLY=e,f` says the same explicitly). A build without the encoder refuses `smoke-diag`: `no device diagonal encoder` | the driver's per-tick line, `mem_report` (with `diag.tiles` / `diag.scratch` / `diag.jobs` / `diag.lists` under `generated`), `nvsmi.csv`; `$OUT/diag_tests/*.log` and `*.passed` | unmeasured |
-| 11 | the matrix | `bash tools/fhe_ssm/run_gpu.sh matrix pcmm24 best pcmm24` on the device; `DIAG_SOURCE=generated bash tools/fhe_ssm/run_gpu.sh matrix ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24 ref` runs the diagonal arms on the device (the encoder); under the default `DIAG_SOURCE=values` the same command runs their CPU part only (capture, plan, prepare: `matrix` calls `prepare` instead of `run` for an arm that is not a device arm). The lockstep arms stay blocked (§3). One arm at a time, the control first and last | per arm `run_<arm>/record.json` (§4), `run.log`, `nvsmi.csv`, `build_id.txt` | unmeasured on this runtime |
-| 12 | bring it home | `rsync -a $OUT/ <the records' home>/gpu_<date>/` | — | — |
+The box captures and plans nothing: `run_gpu.sh plan` reuses a plan already in `$OUT` after checking its `graph=` md5
+against the capture there (`REPLAN=1` re-cuts it; `cfg-pcmm24-tick` is never cut on the box), and `capture` reuses a
+directory holding `capture_config.json`. The tree below is laid out as the box's `$OUT` and built on the machine that cut
+the plans; a manifest holds every capture's md5 (`cat block_*/graph.json | md5`, the value `make_plan.sh` writes into
+`PLAN_CMD.txt`'s `graph=` line) and every plan file's, checked on the box before anything runs. `run`, `prepare` and
+`keyspec` pass the driver `--capture $OUT/<the capture the arm's plan was cut from>` (a plan's `graph=` line names the
+machine it was cut on, so without that flag the driver's md5 check would not run: `capture.checked` is `false`).
 
-### 2a. The device diagonal encoder's first device contact (step 10), in acceptance order
+| box path under `$OUT` | what it is | capture md5 / plan |
+|---|---|---|
+| `cap_high__linear_pcmm_pcmm_wbits_24/` | the PCMM-24 capture under the high switches, `--pass-kernels off` [S11] | d67559a3d0eb2b4440528b14c32993f9 |
+| `bootstrap_placements/plan_pcmm24/` | its LANDING=high plan: 802 refreshes per tick = 538 sites + 264 PCMM finishes, launches 15,190 [S11, S16] | cut on d67559a3… |
+| `cap_high__linear_pcmm_pcmm_wbits_24_pass_kernels_on/` | the PCMM-24 arm under the pass kernels: six configurations' captures merged, every magnitude statistic its maximum over the six (`passmerge --rule max_each`) [S15, S16] | e60f2166c2a7fc49a5efdc2828e7dc22 |
+| `cap_high__linear_pcmm_pcmm_wbits_24_pass_kernels_on__{tick,seqfresh,seqcarry,mixed,longdoc,longtick}/` | the six configurations' own captures (0 structural differences between them [S15]); `__tick` is what `cfg-pcmm24-tick` was cut on | the manifest |
+| `bootstrap_placements/plan_cfg-pcmm24/` | the merged capture's LANDING=high plan: 802, the same routes as `plan_pcmm24`, launches 20,976 [S16] | cut on e60f2166… |
+| `bootstrap_placements/plan_cfg-pcmm24-tick/` | the tick configuration's capture alone, LANDING=high: 802, launches 20,976 (a pure-kernel control for the tick) [S16] | cut on cf79cdaf7462a65bfdf156c1ec6a3224 |
+| `cap_stock/` | the reference capture, diagonal linears, the stock landing [S4, S6] | 3f3c555c2e100acf5bc5cfc6575b4b55 |
+| `bootstrap_placements/plan_ref/` | its stock plan, re-cut on a copy named `cap_stock` (diag-tests (e) checks the basename): 637, placements byte-identical to the first stock plan of this capture [S16] | cut on 3f3c555c… |
+| `cap_stock__pass_kernels_on/` | the reference under the pass kernels, six configurations merged (`max_each`) [S16] | b3f021a99df258c0d10d1c5ae44d2288 |
+| `bootstrap_placements/plan_cfg-ref/` | its stock plan: 637, launches 720,418 [S16] | cut on b3f021a9… |
+| `cap_high__linear_pcmm_pcmm_wbits_24_b1/`, `bootstrap_placements/plan_pcmm24_b1/` | the 1-block smokes, `BLOCKS=1 run_gpu.sh capture / plan pcmm24` [S20] | the manifest |
+| `cap_high__linear_pcmm_pcmm_wbits_24_pass_kernels_on_b1/`, `bootstrap_placements/plan_cfg-pcmm24_b1/` | `BLOCKS=1 … cfg-pcmm24` (the tick configuration's capture: one block) [S20] | the manifest |
+| `cap_stock_b1/`, `bootstrap_placements/plan_ref_b1/` | `BLOCKS=1 … ref` (`smoke-diag`'s) [S20] | the manifest |
 
-Nothing of the encoder's CUDA has been compiled (the Mac that wrote it has no nvcc) or run. Each check names what a
-pass means; a failure stops the sequence and prints the log's `FAILED` / `panicked at` / error lines (`run_gpu.sh
-diag-tests`; logs in `$OUT/diag_tests/`). `diag-tests` builds with the same `PERSEUS_CORE_ARCH` / `PC_NVCC_JOBS` as
-`build` (else `build.rs` re-runs nvcc), sets `CUDA_MODULE_LOADING=EAGER` (no lazy module load allocates device memory
-after the first tick: the free-memory checks are exact) and `FHE_SSM_REQUIRE_DEVICE=1` (a test that cannot find the
-encoder fails, never skips), requires each step's pass line, leaves `<step>.passed` (skipped on the next call unless
-`DIAG_RERUN=1`), and runs the steps `DIAG_ONLY` lists (default 1,2,3, plus e with `DIAG_E=1` and f with `DIAG_F=1`).
-The kernels and the runtime half: `crates/pc-kernels/kernels/diag.cuh`, `encode.cuh` (`encode_many`),
-`crates/pc-gpu/src/diag_gen.rs`.
+Also before renting: a fresh `--pass-kernels off` PCMM capture at the tip has the md5 of `plan_pcmm24`'s capture
+(d67559a3…): the control plan binds the twin the box records [S17]. `KEYS` reaches the box on the session's start
+command (`KEYS=…` on the tmux line); the session refuses to start without it.
+
+## 3. Steps on the box
+
+`served` is one letter per stage, `e` eager, `c` captured, `r` replayed (`crates/pc-py/src/program.rs` `run`); every
+`run` below passes `--capture`, a `RUN_TAG` and, for the `cfg-*` arms, `--scenario $SCENARIO` (`--pass-kernels on` is
+in their capture flags, which the run repeats). `PROFILE_EVERY=2` fences passes 0, 2, 4, …; every scenario holds an
+unfenced pass whose configuration equals the previous pass's (`tick`: 1, 3, 5; `prefill:320`: 3 and 7; `doc:258:64`: 3
+and 7; `mixed`: 3; `churn`: 5), so a steady-state wall exists without a fence.
+
+| # | step | command | pass |
+|---|---|---|---|
+| 1 | setup and the build | the clone at the tip (upstream `speedrun` plus the branch's bundle; HEAD = the tip), the data, the staged tree checked against its manifest; then `run_gpu.sh box`, `build`, `verify`, `bench` | stop on any failure; `verify`: `device classes missing: none`, the port's tests and upstream's CPU tests pass, the change check `OK`, the compile check built |
+| 1a | the PCMM arm's CPU part under the pass kernels | `run_gpu.sh prepare cfg-pcmm24` (the 24-block PCMM prepare: more than 3 GB of host memory [S13]) | `prepare_cfg-pcmm24/record.json`: 25 programs, `check_errors {}`, `static_stream true`, `capture.checked true`, the budget by references and by aliases, `staging_dry_run` |
+| 2 | first device contact | `BLOCKS=1 RUN_TAG=smoke run pcmm24` | exit 0, `served` all `r` on the timed ticks, relErrRms < 1e-3 |
+| 2a | the pass kernels' device tests | `run_gpu.sh pass-tests` (`tests/test_pass_gpu.py`: one block at d = 1,024, PCMM-24, LANDING=high, the `tick:4`, `mixed` and `doc:130:64` scenarios; `FHE_SSM_REQUIRE_DEVICE=1`, `CUDA_MODULE_LOADING=EAGER`) | `3 passed` |
+| 2b | the per-pass staging's contacts | `BLOCKS=1 SCENARIO=tick TICKS=4 RUN_TAG=smoke_tick run cfg-pcmm24`, then `BLOCKS=1 SCENARIO=mixed RUN_TAG=smoke_mixed run cfg-pcmm24` | every timed pass: `served` all `r`; on every restaging pass (`staged` > 0): `counters.captures == 0` and `counters.invalidations == 0` (the in-place re-encode keeps the graphs: `crates/pc-py/src/store.rs:2-5`, `crates/pc-program/src/replay.rs:879`); the worst live lane-slot's relErrRms < 1e-3; `mem_free_bytes` equal on every pass |
+| 3 | the PCMM bracket (whole model, one binary, `KEYS=inproc`, idle GPU and host, `PROFILE_EVERY=2`) | `TICKS=6 RUN_TAG=ctlA run pcmm24` → `TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-pcmm24` (the modularity overhead) → `SCENARIO=prefill:320 RUN_TAG=prefill run cfg-pcmm24` → `SCENARIO=doc:258:64 RUN_TAG=doc run cfg-pcmm24` → `SCENARIO=mixed RUN_TAG=mixed run cfg-pcmm24` → `TICKS=6 RUN_TAG=ctlB run pcmm24` → `TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-pcmm24-tick` (the pure-kernel control plan) | every record: `capture.checked true`, `prepare.check_errors {}`; the numbers table (§4) |
+| 4 | the device diagonal encoder's acceptance | `run_gpu.sh diag-tests` (checks 1-3) → `RUN_TAG=smoke_diag run_gpu.sh smoke-diag` → `DIAG_E=1 DIAG_F=1 run_gpu.sh diag-tests` (on the shipped `plan_ref`) | §3a |
+| 5 | the diagonal bracket under the encoder | `DIAG_SOURCE=generated TICKS=6 RUN_TAG=ctlA run ref` → `DIAG_SOURCE=generated TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-ref` → `DIAG_SOURCE=generated TICKS=6 RUN_TAG=ctlB run ref` | as step 3 |
+| 6 | the deployment split | `run_gpu.sh keyspec cfg-pcmm24` → `run_gpu.sh keygen cfg-pcmm24` → `KEYS=bundle FHE_SSM_KEYS=$OUT/keys_cfg-pcmm24 TICKS=6 SCENARIO=tick RUN_TAG=bundle run cfg-pcmm24` | `keys.mode bundle`, `setup.has_secret false`; no timing comparison with step 3 |
+| 7 | wrap up | the checks over every record, the numbers table, a tar of the records; pull them home | — |
+
+Never run `capture` or `plan` for a shipped arm expecting a new product: both reuse what is in `$OUT`. `TICKS` is the
+pass count of `SCENARIO=tick`; the other scenarios set their own (`prefill:320` 8 passes, `doc:258:64` 8, `mixed` 5,
+`churn` 6). Durations on a device: **unmeasured**. The twin's recording at the model shape: 437 s for the diagonal
+arm's lean prepare on this machine's 16 GB laptop [S19]; it is part of every `run`'s setup.
+
+### 3a. The device diagonal encoder's acceptance (step 4), in order
+
+Nothing of the encoder's CUDA has been compiled or run. Each check names what a pass means; a failure stops the
+sequence and prints the log's `FAILED` / `panicked at` / error lines (`run_gpu.sh diag-tests`; logs in
+`$OUT/diag_tests/`). `diag-tests` builds with the same `PERSEUS_CORE_ARCH` / `PC_NVCC_JOBS` as `build`, sets
+`CUDA_MODULE_LOADING=EAGER` and `FHE_SSM_REQUIRE_DEVICE=1` (a test that cannot find the encoder fails, never skips),
+requires each step's pass line, leaves `<step>.passed` (skipped on the next call unless `DIAG_RERUN=1`), and runs the
+steps `DIAG_ONLY` lists (default 1,2,3, plus e with `DIAG_E=1` and f with `DIAG_F=1`).
 
 | # | check | command (inside `diag-tests`) | pass |
 |---|---|---|---|
-| 1 | the kernels against host references, every built instance | `cargo run --release -p pc-kernels --bin pc-kernels-selftest -- --no-bench` | exit 0 and the final `[selftest] instances ...: total mismatches 0` line; per instance 3 `encode` lines (the refactored kernels' own host reference), 4 `encode_many` lines (3 jobs == 3 single encodes: limbs, coefficients, max-abs words, with every max word starting at a 2^80 sentinel and padded a / b, c strides; the split counter == the one job past 2^61) and 2 `diag_gather` lines (16 jobs at t = 32 and t = 256 == `np.roll(np.repeat(diagonal, t), gg b t)`), each at `0 mismatches`: 18 lines on the default w32 build (2 instances) |
-| 2 | (a) a generated plaintext's slots == its host-built vector and its rows == the eager `DeviceFft` encode of that vector, each tile's three corner jobs and 26 random at 20 and 10 limbs; (b) `encode_many` over B = 1, 32, 128 == B single encodes (`Payload2::DeviceSlots`); (c) a fused sum == `PtStore::mult_pt_sum` of the same terms (32 terms in one chunk, 128 in four), words and metadata | `cargo test --release -p pc-program --features gpu --test diag_gen_gpu -- --ignored --test-threads=1 --nocapture --skip f_device_ms_per_plaintext` | `test result: ok. 3 passed`; every `[diag_gen]` line at 0 words differing |
-| 3 | (a, b) `Session.diag_probe` at the model's width against the port's oracle (`filling.diag_gather_reference` over the registered folded `LazyDiagonals.W`), 32 random diagonals at the deepest sum's limbs and at half; (d) one block (d = 1,024) under `generated` against the exact forward, 3 ticks; the negative control (`--diag-perturb b0.wr:2`: the tile uploaded x2, the exact forward unchanged); chunks of 1 (eager, `--no-graphs`) and 128 | `pytest -q -rs -x -m gpu python/perseus/examples/fhe_ssm/tests/test_diag_gpu.py -k "not model_shape"` | `3 passed`: probe mismatches 0, 0, 0; `relErrRms_vs_exact` < 1e-3 per tick (the port's device tolerance, `test_planned_gpu.py`; top-1 recorded only: at one block the input rows are the tokens' own tied embeddings, so the argmax is the input token whatever the block does); the perturbed run NOT below 1e-3; `splits` 0; device free memory equal on every timed tick |
-| 4 | the first planned run | `run_gpu.sh smoke-diag` (outside `diag-tests`; `KEYS=inproc` unless set) | exit 0; the record's `setup.diag` tiles = uploaded = 5, `missing` empty |
-| 5 | (e) the model, 2 ticks on the `ref` arm's whole-model stock plan, `--diag-probe 32` | `DIAG_E=1` or `DIAG_ONLY=e` (needs `DATA` and `$OUT/bootstrap_placements/plan_ref`; refused when its `graph=` line names another capture than the whole model's `cap_stock` or it holds fewer than 25 block plans) | `1 passed`: 2 ticks; 120 tiles uploaded, 8,448 diagonal sums in the programs, probe mismatches 0, `splits` 0, free memory equal on both ticks, top-1 > 0.95; `relErrRms_vs_exact` recorded |
-| 6 | (f) device ms per plaintext (CUDA events on the compute lane): the encoder alone and the fused sum, B = 1, 32, 128, 18 and 10 limbs | `DIAG_F=1` or `DIAG_ONLY=f` | `test result: ok. 1 passed` and the `[diag_gen] (f)` lines, recorded; set beside the fork's device encoder on an A6000 at 20 limbs, 0.119 ms (B = 32) and 0.083 ms (B = 128) per plaintext, for the order of magnitude only (another binary, another card) |
+| 1 | the kernels against host references, every built instance | `cargo run --release -p pc-kernels --bin pc-kernels-selftest -- --no-bench` | exit 0 and the final `[selftest] instances ...: total mismatches 0` line; per instance 3 `encode`, 4 `encode_many` and 2 `diag_gather` lines, each at `0 mismatches` (18 lines on the default w32 build) |
+| 2 | (a) generated slots and rows == the eager encode of the host vector; (b) `encode_many` == single encodes over B = 1, 32, 128; (c) a fused sum == `PtStore::mult_pt_sum` | `cargo test --release -p pc-program --features gpu --test diag_gen_gpu -- --ignored --test-threads=1 --nocapture --skip f_device_ms_per_plaintext` | `test result: ok. 3 passed`; every `[diag_gen]` line at 0 words differing |
+| 3 | (a, b) the session's probe at the model's width against the port's oracle; (d) one block under `generated` against the exact forward, 3 ticks; a perturbed tile (negative control); chunks of 1 and 128 | `pytest -q -rs -x -m gpu python/perseus/examples/fhe_ssm/tests/test_diag_gpu.py -k "not model_shape"` | `3 passed`: probe mismatches 0, 0, 0; `relErrRms_vs_exact` < 1e-3 per tick; the perturbed run NOT below 1e-3; `splits` 0; free memory equal on every timed tick |
+| 4 | the first planned run | `smoke-diag` (`ref` at `BLOCKS=1` under `generated`; the shipped `cap_stock_b1`, `plan_ref_b1`) | exit 0; `setup.diag` tiles = uploaded = 5, `missing` empty |
+| 5 | (e) the model, 2 ticks on the shipped whole-model `plan_ref`, `--diag-probe 32` | `DIAG_E=1` (needs `DATA` and `$OUT/bootstrap_placements/plan_ref`, cut on a capture named `cap_stock`, 25 block plans) | `1 passed`: 120 tiles uploaded, 8,448 diagonal sums, probe mismatches 0, `splits` 0, free memory equal on both ticks, top-1 > 0.95 |
+| 6 | (f) device ms per plaintext, B = 1, 32, 128, 18 and 10 limbs | `DIAG_F=1` | `test result: ok. 1 passed` and the `[diag_gen] (f)` lines |
 
-A values run and a generated run never agree word for word: the values arm's plaintexts are encoded on the host
-(`HostFft`, exact i128 rounding), the generated arm's on the device (`DeviceFft`, `llround` of a double FFT), and the
-two differ by 1 in rare coefficients where the double FFT's error straddles a .5 boundary (`encode_dev.rs` module doc).
-So (d) and (e) are tolerance scores against the exact forward; the word-for-word checks are 1-3, inside one encoder.
+A values run and a generated run never agree word for word (host vs device encoders, ±1 in rare coefficients), so (d)
+and (e) are tolerance scores against the exact forward; the word-for-word checks are 1-3, inside one encoder.
 
-## 3. The axis matrix
+## 4. The numbers table
 
-> The `LANDING=high` arms (high, pair, sbk16, emfuse, pcmmtrunk24, pcmm24, best) run. The port's session Config takes
-> the landing's runtime switches from the environment (`LANDING_SWITCHES` in `python/perseus/examples/fhe_ssm/fakes.py`),
-> so a capture made under them writes a `capture_config.json` carrying `bts.stc_first=2` and `bts.raise_drop=512:1`
-> and records its own dense refreshes StC-first; `run_gpu.sh capture` checks the stamp after the capture, and
-> `HIGH_CAPTURE_OK=0` blocks these arms. Their plans need the planner fix of upstream PR #10, which this branch carries
-> (`tools/fhe_ssm/UPSTREAM_CHANGES.md`). The lockstep arms stay blocked (below).
+Computed only from **unfenced passes that restaged nothing** (`fenced false`, `staged 0`), each row named by its run
+and pass index:
+- time per pass: the pass's `seconds` (issue to the reply read, the restaging inside the clock);
+- token-values per pass: `token_values`, the live lane-slots (sequence positions plus live conversations; padding and
+  parked lane-slots excluded); conversations per pass: `conversations`;
+- tok/s aggregate = token-values / seconds; tok/s per sequence = that sequence's positions (`sequences`) / seconds;
+  tok/s per conversation = 1 / seconds;
+- the modularity overhead = the `cfg-pcmm24` (`cfg-ref`) tick's unfenced passes against the two controls' mean, quoted
+  only when the difference falls outside the controls' spread (max − min over both controls' unfenced ticks);
+- the restage cost from the restaging passes (`staged`, `stage_s`, their `seconds`);
+- fidelity beside every time: `relErrRms_vs_exact`, its worst live lane-slot, `top1`.
 
+The per-stage split comes from the fenced passes (`stages[].wall_s`). There is **no per-step split on this path**:
+`PF_NVTX_STEPS` is a torch NVTX range around Python `rt.step` scopes (`crates/pc-config/src/fields.rs:502-504`,
+`python/perseus/impl/rt.py:208-249`) and the Rust replayer emits none (`git grep -i nvtx -- crates` finds `fields.rs`
+only), so the norm chains' share of a pass stays unmeasured here; the per-stage split is what the first runs give (§10).
+
+## 5. The axis matrix
 
 Columns: the capture flags (`run_fake.py`), the plan axes (`make_plan.sh`), the run flags (the driver), what the arm
-isolates, and its control. The counts are plans made on the CPU [S5, S6, S10, S11]; no time on this runtime is measured.
+isolates, and its control. `run_gpu.sh arms` prints it with each arm's capture name.
 
 | arm | capture | plan | run | isolates | control |
 |---|---|---|---|---|---|
-| `ref` | — (every axis at its default: the reference circuit, diagonal hint 1) | `LANDING=stock` | — | the reference circuit; this runtime's landings without StC-first: dense shipped order 34, SparseB-512 24; diagonal linears | itself (first and last) |
+| `ref` | — (every axis at its default: the reference circuit, diagonal hint 1) | `LANDING=stock` | — | the reference circuit; this runtime's landings without StC-first; diagonal linears | itself (first and last) |
 | `depth2` | `--newton-form depth2` | stock | — | 2 products per Newton step instead of 3 | `ref` |
 | `persite` | `--newton-sites per-site` | stock | — | per-site Newton counts | `ref` |
 | `packstats` | `--pack-stats halves` | stock | — | one Newton chain for both halves' statistics | `ref` |
@@ -103,157 +154,107 @@ isolates, and its control. The counts are plans made on the CPU [S5, S6, S10, S1
 | `pair` | as `high` | `LANDING=high PAIR=1` | `--schedule siblings` | refresh pairs on the real-payload dense StC-first sites | `high` |
 | `sbk16` | as `high` | `LANDING=high SPARSE_B_K=16` | — | SparseB's EvalMod at K = 16, replay only | `high` |
 | `emfuse` | as `high` | `LANDING=high RUNTIME_EXTRA=PC_EM_FUSE_RESCALE=1` | — | EvalMod's relinearization and rescale fused (a kernel switch) | `high` |
-| `pcmmtrunk24` | `--linear pcmm-trunk --pcmm-wbits 24` | `LANDING=high` (PCMM needs StC-first: `python/perseus/impl/pcmm.py:3`) | — | PCMM on the trunk's linears, 24-bit weights | `high` |
+| `pcmmtrunk24` | `--linear pcmm-trunk --pcmm-wbits 24` | `LANDING=high` | — | PCMM on the trunk's linears, 24-bit weights | `high` |
 | `pcmm24` | `--linear pcmm --pcmm-wbits 24` | `LANDING=high` | — | every linear PCMM | `high` |
 | `best` | depth2 + per-site + pack-stats + pcmm 24 | `LANDING=high PAIR=1` | `--schedule siblings` | the stack | `ref` and `high` |
-| `lockstep2`, `lockstep4` | `--streams K` (**does not exist**) | `LANDING=high` | `--schedule lockstep` | K batches of conversations through one stream | `high` |
+| `cfg-pcmm24` | `--linear pcmm --pcmm-wbits 24 --pass-kernels on` | `LANDING=high` (shipped: the merged capture's) | `--scenario $SCENARIO` | the pass kernels: one op stream for every lane configuration, the masks restaged per pass | `pcmm24` |
+| `cfg-pcmm24-tick` | as `cfg-pcmm24` | `LANDING=high` (shipped: the tick configuration's capture alone) | `--scenario $SCENARIO` | the merged magnitudes' share of the overhead (its plan's correction factors are the tick's) | `cfg-pcmm24` |
+| `cfg-ref` | `--pass-kernels on` | `LANDING=stock` (shipped: the merged capture's) | `--scenario $SCENARIO` | the pass kernels on the diagonal arm (a device arm under `DIAG_SOURCE=generated`) | `ref` under `generated` |
+| `lockstep2`, `lockstep4` | `--streams K` (**does not exist**) | `LANDING=high` | `--schedule lockstep` | K sets of 64 conversations through one stream | `high` |
 
-Planned counts so far [S6, S10, S11] (`summary.total_bootstraps` per tick; the landings are effective levels, a raw
-landing plus the pending rescale):
-- **the reference (`ref`, diagonal hint 1)**: LANDING=stock **637** refreshes per tick (446 placed, 143 fired hints, 48
-  deliberate; block 0 29, blocks 1-23 26 each, the head 10), 0 check errors, 152 s of planning;
-- **`high`** (the same circuit, captured under the high switches): **609** per tick (560 placed, 1 fired hint, 48
-  deliberate; block 0 24, blocks 1-23 25 each, the head 10), 0 check errors. Routes: dense StC-first landing at 28: 95;
-  dense in the shipped order at 34: 24 (one per block, the exit refresh of the planner's retry, its input past the
-  StC-first entry 46); SparseB-512 at 26: 490. The capture's own eager refreshes: 1,968 without the switches, 1,344 with
-  them; every one StC-first, none past the entry [S10];
-- **`pcmm24`** (every linear PCMM at 24 bits, captured under the high switches): **802** per tick = 490 placed
-  (SparseB-512 at 26) + 48 deliberate carry refreshes (dense StC-first at 28) + 264 PCMM output finishes (11 per
-  block); blocks 0-23 33 each, the head 10; no fired hint; 0 check errors (the compile counts 538 refresh sites plus
-  120 PCMM finish ops, one per linear call). The PCMM input cap (44) never fires: every input arrives at 40 or below
-  [S11];
-- a LANDING=high plan of a capture made WITHOUT the switches: 610 planned, **120 compile-check errors** (does not bind)
-  [S10];
-- a capture at diagonal hint 2 (the upstream `diag_apply` rule): the same 637, stage for stage, although its graphs
-  differ (half its linear-input hints have threshold 40 instead of 42). The planner decides which hints fire, and at
-  this runtime's landings the thresholds do not bind. LANDING=fork (the fork's landings, dense and 512 at 36) on that
-  capture: **900**.
+Planned counts [S6, S10, S11, S16] (`summary.total_bootstraps` per tick): `ref` stock **637** (446 placed, 143 fired
+hints, 48 deliberate); `high` **609**; `pcmm24` **802** = 538 refresh sites + 264 PCMM output finishes; `cfg-pcmm24`
+**802** (the same 538 sites and routes, `dense_stcf@26:48 s512_sb@24:490`; launches 20,976 against `pcmm24`'s 15,190,
++5,786 = +38.1 % [S16]); `cfg-pcmm24-tick` 802 (launches 20,976); `cfg-ref` **637** (`dense@32:191 s512_sb@22:446`;
+launches 720,418 against 714,610, +5,808 = +0.81 % [S16]). The kernels add +2,448 ct×pt, +672 rotations, +192
+conjugations and +0 refreshes per pass, measured in the model-shape captures [S15]: the overhead is in launches, not in
+refreshes; its time is this session's to measure.
 
 What blocks which arms:
-- **The `LANDING=high` arms are no longer blocked**; what they needed, and what still goes wrong without it:
-  1. A capture under the high switches. The port's capture now takes them from the environment; a capture made without
-     them records its own refreshes in the shipped order, and a LANDING=high plan of it does not bind (the compile
-     check's level errors) [S10].
-  2. The planner fix of upstream PR #10 (forced exit refreshes survive the re-cut and the prune), on this branch as a
-     listed change. Under the high recipe the cheapest plan of each block leaves its exit at 48/d2, the next block is
-     refused there, and the planner retries the block with a forced exit refresh; without the fix a re-cut trial drops
-     that refresh and block 1 is infeasible [S6, S10]. With it the 24 stages after block 0 each refuse their entry once
-     and blocks 0-23 are each retried once.
-- **Lockstep**: `Program.compile(schedule="lockstep")` reorders what was captured (`crates/pc-py/src/program.rs:68-84`).
-  K streams need K ciphertext sets in each captured stage and registers per stream; `PlannedRun.prepare` does not pass
-  a schedule (`python/perseus/impl/driver.py:653-655`). `run_gpu.sh` refuses these arms.
-- **Diagonal linears on the device** (every arm but `pcmm24` and `best`: `ref`, `depth2`, `persite`, `packstats`,
-  `high`, `pair`, `sbk16`, `emfuse`, and `pcmmtrunk24`'s `W_k` / `W_r`) run only under `DIAG_SOURCE=generated` (the
-  driver's `--diag-source generated`: the device diagonal encoder). Under the default `values` a planned session
-  keeps every plaintext its programs read resident (`driver.py:725-731`; 28 rows × 2^16 × 4 B = 7 MiB each): for the
-  model's 344,064 diagonals per tick ≈ 2.3 TiB, refused above `--pt-budget-gb` (40) by the driver and before it by
-  `run_gpu.sh run`. Under `generated` the twin records each diagonal as a generated plaintext
-  (`<linear>#<n>.<m>.<gg>.<jj>`), the compiler fuses each `(m, gg)` group into one `CoeffSum` (352 per block, 8,448 per
-  tick at the model shape), the session declares the linears' float64 matrices (`Session(diag_tiles=...)`, 2.625 GiB;
-  1.5 GiB on `pcmmtrunk24`) and the device builds every diagonal inside its sum; the store holds the other 1,633
-  plaintexts. The flag is the driver's: the captures and the plans are the ones the values arms use (§2 step 7-8), and
-  `run_gpu.sh arms` under `DIAG_SOURCE=generated` lists every non-blocked arm `device[yes]`. Controls on the device:
-  `ref` under `generated` is the reference circuit itself (first and last); the linear route alone is `high` under
-  `generated` against `pcmm24` (both `LANDING=high`, the same circuit but for the linears), while `ref` (generated)
-  against `pcmm24` also moves the landings (stock vs high) and reads as the two arms' totals only. A build without the encoder's kernels
-  (`Session.register_tile`) refuses `generated` before any session opens.
-- **Captures at the runtime's levels**: `run_gpu.sh` passes `--levels preset` (ceiling 44, landing 32 + a pending
-  rescale). A capture at the fork's levels records its own refreshes where this runtime has no route.
-- **`SPARSE_SLOTS=512,32,1`**: the runtime lists no landing for 32 slots (`crates/pc-program/src/compile/mod.rs:250-262`);
-  expect the compile check to refuse it. It is not in the matrix.
-- **Placer arms** (`PLACER=ilp`, `ILP_OBJECTIVE=ms` with `PLAN_BTS_MS` from step 5) are CPU-only. Compare their refresh
-  counts and the planner's ms cost, and run on the GPU only the one that wins on paper.
+- **Lockstep**: `Program.compile(schedule="lockstep")` reorders what was captured (`crates/pc-py/src/program.rs:68-84`);
+  K streams need K ciphertext sets in each captured stage and registers per stream. `run_gpu.sh` refuses these arms.
+- **Diagonal linears on the device** (`ref`, `depth2`, `persite`, `packstats`, `high`, `pair`, `sbk16`, `emfuse`,
+  `cfg-ref`, and `pcmmtrunk24`'s `W_k` / `W_r`) run only under `DIAG_SOURCE=generated` (the device diagonal encoder):
+  under `values` a planned session keeps every plaintext its programs read resident, 344,064 diagonals per tick
+  (2,544,444,112,896 B = 2.31 TiB at 28 rows, one slot per distinct value [S19]), refused above `--pt-budget-gb` (40).
+- **Captures at the runtime's levels**: `run_gpu.sh` passes `--levels preset` (ceiling 44, landing 32).
+- **`SPARSE_SLOTS=512,32,1`**: the runtime lists no landing for 32 slots; not in the matrix.
 
-## 4. The driver's contract
+## 6. The driver's contract
 
 `DRIVER` (default `perseus.examples.fhe_ssm.run_planned`) is invoked as
 
 ```
 python -m $DRIVER --weights W --seeds S --config C --levels preset [--blocks N] [run_fake's axis flags]
-                  --plan PLAN_DIR --ticks T --profile --profile-every K --keys inproc|bundle|DIR
-                  [--schedule program|siblings|lockstep] [--diag-source values|generated] --out record.json
+                  --plan PLAN_DIR [--capture DIR] --ticks T --profile --profile-every K --keys inproc|bundle|DIR
+                  [--schedule program|siblings] [--diag-source values|generated]
+                  [--pass-kernels on --scenario tick[:K]|prefill:T|doc:T:READERS|mixed|churn | --lane-config FILE]
+                  --out record.json
 python -m $DRIVER … --plan PLAN_DIR --prepare-only [--lean] … --out record.json        (the CPU part, no session)
 ```
 
 The landing's runtime switches are in the environment. The driver must:
-- build the model on the CPU twin with the same axis flags;
-- run `PlannedRun` (decode-shaped: the carried state as registers, the same stream every tick), compiled with
-  `--schedule` (an override of `PlannedRun.prepare`), on `config.plan_runtime(PLAN_DIR, "n32",
-  base=config.preset("n32_gpt2_decode"))`;
-- call `precompute`, run one untimed warm-up tick on public random tokens (it also captures the CUDA graphs), then T
-  timed ticks;
-- with `--profile`, fence the device after every stage so each stage has a wall. That wall is an attribution, not the
-  production wall: the fence serializes host issue with device work. `impl/profile.TimedOps` times Python-issued ops
-  and so times nothing on this path. `--profile-every K` fences every K-th tick only, so one run holds fenced and
-  unfenced ticks (each tick's record says which); `run_gpu.sh` passes `PROFILE_EVERY` (default 2);
-- refuse diagonal linears above `--pt-budget-gb` under `--diag-source values`; under `generated` record each diagonal
-  as a generated plaintext on the twin (a name, never its vector), leave every generated plaintext out of the store's
-  slots and staging, declare the diagonal linears' matrices at construction (`Session(diag_tiles={name: (d_in, d_out,
-  t)})`, also `from_bundle` / `key_manifest`) and upload them after setup (`Session.register_tile`), and refuse on a
-  build without the encoder (§3).
+- build the model on the CPU twin with the same axis flags (`--pass-kernels on` among them);
+- under the pass kernels, record the probes in one fixed configuration (the first pass's), refuse a stream that is not
+  static across them, keep each pass-mask product as its mask id and values, alias the store keys of the masks by mask
+  id and the static ones by value digest once before any graph capture, size the store by the distinct (alias, level)
+  pairs, stage the first pass's masks with the static plaintexts, compute every configuration's masks at setup, and
+  before every pass re-encode in place only the keys whose values change; pack block 0's input and unpack the reply in
+  lane-slot order (one permutation on each end);
+- run one untimed warm-up (the first pass's configuration on random public tokens; it captures the CUDA graphs), then
+  the timed passes (ticks), each scored per live lane-slot against the exact reference;
+- with `--profile`, fence the device after every stage so each stage has a wall (an attribution, not the production
+  wall); `--profile-every K` fences every K-th pass only;
+- refuse diagonal linears above `--pt-budget-gb` under `--diag-source values`.
 
-`record.json`, one object per arm:
-- `build_id`, and the plan's `axes=` and `runtime=` lines;
-- per program: `n_bootstraps`, `bts_batches`, `n_pairs`, `n_finishes`, `mem()`; the fused sums by source
-  (`prepare.sums`: counts and term histograms; `diag_tiles` uploaded after setup);
-- after setup: `sess.mem_report`, `sess.setup_seconds()` (setup, keygen), `sess.fhe.mem_info()` (free, total bytes);
-  under `generated` `setup.diag` (`Session.diag_stats()`: tiles declared and uploaded, the missing names, tile bytes, the
-  chunk, `max_rows`, job rows filled and capacity, the counters) and, with `--diag-probe K`, `setup.diag_probe` (per
-  probed level: slots vs the oracle, generated vs single encode, generated vs the eager encode of the oracle, words);
-  with the test-only `--diag-perturb TILE:FACTOR`, `diag_perturb`;
-- per tick: `wall_s` (issue to the reply's decrypt); `stage_wall_s` (with `--profile`); `sess.planned_stats()` (host_us,
-  launch_us, captures and replays, pairs as one or split, fused product-adds, StC-first cache misses);
-  `sess.fhe.mem_info()`; the reply's RMS relative error vs the exact forward and vs the mirror; its worst conversation;
-  top-1 agreement over the conversations; under `generated` `diag`, the tick's increments of the encoder's counters
-  (`sums`, `terms`, `chunks`: issued by the host, so a replayed graph adds none; `splits`: per launch, replays
-  included);
-- the nvidia-smi peak comes from `run_gpu.sh`'s `nvsmi.csv`.
+`record.json`, one object per run:
+- per run: `build_id` (commit, dirty, `_pc` .so, nvcc, arch; `run_gpu.sh` adds the load average in `build_id.txt`),
+  `keys.mode`, the plan's `axes` / `recipe` / `runtime` lines, `capture` (`checked`, `md5`, `plan_md5`), `prepare`
+  (`check_errors`, `static_stream`, `refreshes_planned`, per program `n_ops` / `n_launches` / `n_bootstraps` /
+  `bts_batches` / `n_pairs` / `n_finishes` / `mem`, `plaintexts`: by references and `by_alias`, `sums`), `pass_list`
+  (the scenario or file, the configurations, `config_ids`, the list, the generated tokens resolved), `setup`
+  (`mem_report`, free / total memory, `plaintexts_staged`, `pass_masks`), the nvidia-smi peak (`nvsmi.csv`);
+- per pass (`ticks[]` under the pass kernels): `pass`, `config`, `config_id`, `segments`, `describe`, `fenced`,
+  `staged`, `stage_s`, `masks_s`, `restaged`, `seconds`, `issue_s`, `served`, `counters` (the deltas of
+  `planned_stats`: runs, captures, replays, eager, invalidations, host_us, launch_us, …), `mem_free_bytes`, `stages`
+  (fenced passes), `token_values`, `sequences` (positions per sequence), `conversations`, `parked`, `padding`,
+  `relErrRms_vs_exact` (over the live lane-slots), `relErrRms_vs_exact_worst_lane_slot`, `logits_relErrRms_vs_exact`,
+  `top1` (agree / of at every next-token lane-slot, which ones disagree).
 
-## 5. What each run writes
+## 7. What each run writes
 
 - `$OUT/box.txt`, `$OUT/session.log` (every step, with the build id), `$OUT/build.log`, `$OUT/bench_bts.txt`
-- `$OUT/cap_<…>/`: the capture (`graph.json` per stage, `capture_env.json`, `capture_config.json`), with
-  `cap_<…>.capture.log` and `cap_<…>.fake.json` (the fake's report of the capture tick) beside it
-- `$OUT/bootstrap_placements/plan_<arm>[_bN]/`: `block_<b>_placement.json` (stamped), `PLAN_CMD.txt`, `plan_rot_steps.json`,
-  `summary.txt`, `compile_check.txt` / `.json`, `plan.log` (`_bN` = a `BLOCKS=N` run's, named like its capture; the
-  whole model's plan has no suffix and a smoke never touches it)
-- `$OUT/prepare_<arm>[_bN]/`: `record.json`, `prepare.log` (the driver's CPU part)
-- `$OUT/run_<arm>[_bN]/`: `record.json`, `run.log`, `nvsmi.csv` (500 ms samples of memory, utilisation and power),
-  `build_id.txt`; `$OUT/keys_<arm>[_bN]/` (keyspec, keygen)
-- `$OUT/diag_tests/`: one log per `diag-tests` step and its `.passed` marker; `5_model_shape.json` (check 5's record)
+- `$OUT/cap_<…>/`: a capture (`graph.json` per stage, `capture_env.json`, `capture_config.json`)
+- `$OUT/bootstrap_placements/plan_<arm>[_bN]/`: `block_<b>_placement.json` (stamped), `PLAN_CMD.txt`,
+  `plan_rot_steps.json`, `summary.txt`, `compile_check.txt` / `.json`
+- `$OUT/prepare_<arm>[_bN][_<tag>]/`: `record.json`, `prepare.log`
+- `$OUT/run_<arm>[_bN][_<tag>]/`: `record.json`, `run.log`, `nvsmi.csv`, `build_id.txt`; `$OUT/keys_<arm>[_bN][_<tag>]/`
+  (keyspec, keygen)
+- `$OUT/diag_tests/`, `$OUT/pass_tests/`: one log per step and its `.passed` marker
 
-## 6. VRAM: what is known
+## 8. VRAM: what is known
 
-- **The fork's C++ runtime** (another binary): the planned plateau was 35,961 MiB on an RTX PRO 6000 and 35,118 MiB on
-  an RTX A6000, leaving 13.1 GiB free on that 48 GB card [S8].
-- **This runtime: unmeasured.** Every term differs:
-  - the weights: PCMM keeps int8 digit planes, ≈ 0.7-1.05 GB for the model (≈ 349 M weights × 2-3 planes); the
-    diagonal arms under `DIAG_SOURCE=generated` keep the linears' float64 tiles (`diag.tiles`: 24 × 14 × 1,024² × 8 B =
-    2.625 GiB; 1.5 GiB on `pcmmtrunk24`) and the encoder's scratch (`diag.scratch`: 3,145,736 + 262,144·L bytes per
-    plaintext in flight, at most 128: 1.0 GiB at L = 20) [derived, BATCH3_ENCODER_BRIEF §1]; nothing is streamed;
-  - a ciphertext slab sized by the compiled programs. The compile check prints it per stage on the CPU: 1,711 MB for
-    the model's largest stage under `program` [S6]; GPT-2 Prefill-128's record plan, 1,421 MB under `program` and
-    6,705 MB under `lockstep` [S7];
-  - keys derived from the plan (the packed layout regenerates `a`);
-  - a `PtStore` of every plaintext the programs read from it: under `generated` 1,633 (the masks and constants; ≈ 11.2
-    GiB at 28 rows [derived]), under `values` every diagonal too (≈ 2.3 TiB: refused).
+- **The fork's C++ runtime** (another binary): the planned plateau was 35,961 MiB on an RTX PRO 6000 [S8].
+- **This runtime: unmeasured.** The terms: PCMM's int8 digit planes (≈ 0.7-1.05 GB for the model), or under
+  `generated` the diagonal tiles (2.625 GiB) and the encoder's scratch; a ciphertext slab sized by the compiled
+  programs (1,711 MB for the model's largest stage under `program` [S6]); the keys (the pass kernels add 20 rotation
+  steps: `−1..−7, −8, −16, −24` and `+1..+7, +8, +16, +24`; key bytes per step unmeasured); the plaintext store, one slot
+  per distinct (alias, level) pair: on `cfg-ref` 1,796 pass-mask pairs (1,761 mask ids) plus the static plaintexts
+  [S19], each 28 rows × 2^16 × 4 B = 7 MiB.
 
-  The session prints its own breakdown at setup (`sess.mem_report`; `driver.py:718`). Record it on the first arm, and
-  decide then whether 48 GB would have been enough.
+  The session prints its own breakdown at setup (`sess.mem_report`). Record it on the first arm.
 
-## 7. Not runnable yet
+## 9. Not measured on this path yet
 
-- a device run of the planned driver (§4: written, its CPU part verified [S12]);
-- the lockstep arms: K-stream captures (§3);
-- the diagonal arms on the GPU: the device diagonal encoder (`diag_gather`, `encode_many`, pc-gpu `DiagGen`,
-  `Session(diag_tiles=...)` / `register_tile` / `diag_stats` / `diag_probe`) is written and type-checks on a machine
-  without CUDA; its CUDA has never been compiled and nothing of it has run: §2a is its first device contact;
-- `SPARSE_SLOTS=512,32,1`: no 32-slot landing in the runtime (§3).
+- anything on a device (§3: written, its CPU part verified);
+- the lockstep arms (§5);
+- the program-variant route for passes with no sequence (today's program for those, the kernel program otherwise):
+  designed, not built; the bracket decides whether it is needed.
 
-## 8. After the first runs
+## 10. After the first runs
 
 - [ ] **Lockstep decision (pending, deferred).** With the per-stage split of the first planned runs in hand, report the
-  norm chains' share of the pass and whether a device diagonal encoder exists, and put the lockstep-k-streams decision
-  to the maintainer of this port: projected ≈ 1.1–1.25× aggregate at k = 4 beyond the k = 1 statistic packing; up to
-  ≈ 1.4× on the diagonal-linear arms with the encoder; k ≤ 3–4 on a 96 GB card (projections [S9]; the mechanism and what
-  lockstep needs from the driver: §3).
+  norm chains' share of the pass (on this path: not measurable below the stage, §4) and whether a device diagonal
+  encoder exists, and put the lockstep-k-streams decision to the maintainer of this port: projected ≈ 1.1–1.25×
+  aggregate at k = 4 beyond the k = 1 statistic packing; up to ≈ 1.4× on the diagonal-linear arms with the encoder;
+  k ≤ 3–4 on a 96 GB card (projections [S9]).
