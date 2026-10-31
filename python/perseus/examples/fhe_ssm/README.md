@@ -296,10 +296,14 @@ Two independent ways on edge cases (`tests/`; `VERIFICATION` of the fork, carrie
 CPU (`tests/test_planned_contract.py`, one of them `slow_shape`: a 1-block PCMM capture at the model's width
 planned and bound) and 3 marked `gpu` (`tests/test_planned_gpu.py`, skipped without the device build); the
 device diagonal encoder's CPU half adds 14 (`tests/test_diag_source.py`) and its device half 3 marked `gpu`
-(`tests/test_diag_gpu.py`); the pass kernels add 152 (`tests/test_passkernel.py` 40, `test_passmasks.py` 37,
-`test_pass_model.py` 35, `test_pass_capture.py` 17, `test_pass_driver.py` 23) and 3 marked `gpu`
-(`tests/test_pass_gpu.py`). The whole light suite (`-m "not slow_shape and not gpu"`) is 337 tests, the `slow_shape`
-set 19, the `gpu` set 10. The
+(`tests/test_diag_gpu.py`); the pass kernels add 154 (`tests/test_passkernel.py` 40, `test_passmasks.py` 37,
+`test_pass_model.py` 35, `test_pass_capture.py` 19, `test_pass_driver.py` 23) and 3 marked `gpu`
+(`tests/test_pass_gpu.py`). The whole light suite (`-m "not slow_shape and not gpu"`) is 339 tests, the `slow_shape`
+set 19, the `gpu` set 10. One light test is marked `staged_tree` (`test_pass_capture.py`, the stamp check on the
+staged one-block captures): it reads the GPU session's staged tree at `FHE_SSM_STAGED_TREE`, else the worktree's
+`.cache/fhe_ssm/b4_stage`, and skips where it is absent, so `run_gpu.sh verify`, which refuses any skipped test,
+deselects it (`-m 'not gpu and not slow_shape and not staged_tree'`, 338 tests): on the box the tree is not at either
+path. The
 fork's tests of its GPU runner, planner wrapper, Colab build and tick meter are not carried over: those modules
 belong to the fork's C++ runtime; on this branch the device path is `impl.driver.PlannedRun` (below). Two
 further checks run at the model's shape with the published checkpoint (`tests/test_model_shape.py`, skipped
@@ -522,7 +526,8 @@ cannot pass with no test run); `FHE_SSM_WEIGHTS` / `FHE_SSM_SEEDS` / `FHE_SSM_CO
 model's files and its whole-model stock plan) select the model-shape test (e), which writes its record to
 `FHE_SSM_E_OUT` (default: pytest's temporary directory); `FHE_SSM_COMPILE_CHECK` points the CPU build of the driver
 at a `compile_check` binary other than the one `tools/fhe_ssm/compile_check/build.sh` builds (`planned.py`
-`default_check_bin`). `run_gpu.sh`'s `diag-tests` step exports `FHE_SSM_REQUIRE_DEVICE=1` and passes the model's
+`default_check_bin`); `FHE_SSM_STAGED_TREE` names the staged tree the `staged_tree` test reads (default: the
+worktree's `.cache/fhe_ssm/b4_stage`). `run_gpu.sh`'s `diag-tests` step exports `FHE_SSM_REQUIRE_DEVICE=1` and passes the model's
 files, `plan_ref` and `FHE_SSM_E_OUT` from `DATA` / `OUT`; it never sets `FHE_SSM_COMPILE_CHECK` (its `verify` step
 builds the binary where the default looks). By hand, set them as that step does.
 

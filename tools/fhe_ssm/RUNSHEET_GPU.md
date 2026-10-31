@@ -89,7 +89,7 @@ and 7; `mixed`: 3; `churn`: 5), so a steady-state wall exists without a fence.
 
 | # | step | command | pass |
 |---|---|---|---|
-| 1 | setup and the build | the clone at the tip (upstream `speedrun` plus the branch's bundle; HEAD = the tip's full SHA; the weights' sha256 3ec3f1d8…293e784b), the data, the staged tree checked against its manifest; then `run_gpu.sh box`, `build`, `verify`, `bench` | stop on any failure; `verify`: `device classes missing: none`, the compile check built first, upstream's CPU tests and the port's light suite (`-m 'not gpu and not slow_shape'`, `-rs`) pass with no skipped test, the change check `OK` |
+| 1 | setup and the build | the clone at the tip (upstream `speedrun` plus the branch's bundle; HEAD = the tip's full SHA; the weights' sha256 3ec3f1d8…293e784b), the data, the staged tree checked against its manifest; then `run_gpu.sh box`, `build`, `verify`, `bench` | stop on any failure; `verify`: `device classes missing: none`, the compile check built first, upstream's CPU tests and the port's light suite (`-m 'not gpu and not slow_shape and not staged_tree'`, `-rs`; the `staged_tree` test reads a tree at a machine-specific path, `FHE_SSM_STAGED_TREE`, and would skip here) pass with no skipped test, the change check `OK` |
 | 1a | the PCMM arm's CPU part under the pass kernels | `run_gpu.sh prepare cfg-pcmm24` (the 24-block PCMM prepare: more than 3 GB of host memory [S13]; `--prepare-only` compiles through the CPU compile check on this build too) | `prepare_cfg-pcmm24/record.json`: 25 programs, `compiled_by cpu-check`, `check_errors {}`, `static_stream true`, `capture.checked true`, the budget by references and by aliases, `staging_dry_run` |
 | 2 | first device contact | `BLOCKS=1 RUN_TAG=smoke run pcmm24` | exit 0, `served` all `r` on the timed ticks, relErrRms < 1e-3 |
 | 2a | the pass kernels' device tests | `run_gpu.sh pass-tests` (`tests/test_pass_gpu.py`: one block at d = 1,024, PCMM-24, LANDING=high, the `tick:4`, `mixed` and `doc:130:64` scenarios; `FHE_SSM_REQUIRE_DEVICE=1`, `CUDA_MODULE_LOADING=EAGER`) | `3 passed` |
@@ -104,8 +104,8 @@ Never run `capture` or `plan` for a shipped arm expecting a new product: both re
 `capture` is four configuration captures merged under `max_each`: `CFG_CONFIGS=<dir>` names the directory of the four
 lane-config files (`tick`, `seqfresh`, `seqcarry`, `mixed.passes.json`; default `passmasks.capture_configurations`
 written to `<capname>.cfgs`), `CFG_ONLY=<label>` makes one of the four and stops (a small machine's memory guard; a call
-without it reuses them and merges). A configuration capture is reused only when its `capture_pass.json` is the last pass
-of its lane-config file, and a merged capture under `CFG_CONFIGS` only when its four are (`passmerge stamp`); a mismatch
+without it reuses them and merges). A configuration capture is reused only when its `capture_pass.json` is its lane-config
+file's pass at the capture tick (1), read as the run reads it, and a merged capture under `CFG_CONFIGS` only when its four are (`passmerge stamp`); a mismatch
 stops the call, naming the capture and what differs. `TICKS` is the
 pass count of `SCENARIO=tick`; the other scenarios set their own (`prefill:320` 8 passes, `doc:258:64` 8, `mixed` 5,
 `churn` 6). Durations on a device: **unmeasured**. The twin's recording at the model shape: 437 s for the diagonal

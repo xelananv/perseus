@@ -34,8 +34,9 @@ removed). The per-block lines follow ``merge_mags.py``'s ("grew": nodes whose re
 another capture than the base, with the ratio of the chosen ``output_max_abs`` to the base's; a node that is an exact
 zero in the base, a product by a mask that is zero in the base's configuration, is counted apart and has no ratio).
 
-**The stamp check** (``stamp``, ``stamp_diff``): a configuration capture's ``capture_pass.json`` against the last pass
-of the lane-config file it should come from; exit 1 and the differences printed when it does not (``run_gpu.sh capture``
+**The stamp check** (``stamp``, ``stamp_diff``): a configuration capture's ``capture_pass.json`` against the pass of
+the lane-config file it should come from at the capture's own tick, the file's pass normalised as the run reads it
+(``PassConfig.from_json``); exit 1 and the differences printed when it does not (``run_gpu.sh capture``
 runs it before it reuses a configuration capture, so a capture made under other lane-config files is not merged).
 
 **The margins** (``margins``): for every refresh site of a plan (its placements, its fired hints, and the graph's
@@ -54,6 +55,8 @@ import shutil
 import sys
 from collections.abc import Sequence
 from typing import Any
+
+from . import passmasks
 
 #: the per-node statistics a capture measures on the values (``impl/magtape.node_stats``): everything else is structure
 STATS = ("output_max_abs", "output_mean", "output_max_dev", "output_max_coeff", "output_max_coeff_ac")
@@ -269,15 +272,17 @@ def merge(
     return rec
 
 
-#: a lane-config token the run resolves from the previous pass's reply (``passmasks.GENERATED``): any token matches it
-_GENERATED = -1
+#: a lane-config token the run resolves from the previous pass's reply: any token matches it
+_GENERATED = passmasks.GENERATED
 
 
 def stamp_diff(cap, passes) -> list[str]:
-    """What differs between a capture's ``capture_pass.json`` and the last pass of the lane-config file ``passes`` it
-    should have been captured from (the two-pass lists are captured at tick 1): the capture tick against the last index,
-    the pass's name, segments and tokens (a generated token of the file matches the token the run resolved there). An
-    empty list when they agree; ``run_gpu.sh capture`` refuses to reuse a configuration capture otherwise."""
+    """What differs between a capture's ``capture_pass.json`` and the pass of the lane-config file ``passes`` it should
+    have been captured from: the file's pass at the stamp's ``capture_tick`` (``run_gpu.sh`` captures at tick 1),
+    normalised through ``PassConfig.from_json(...).to_json()`` as the run reads it (an omitted ``name`` is ``""``, an
+    omitted ``stream`` / ``parked_from`` null), against the stamp's pass: its name, segments and tokens (a generated
+    token of the file matches the token the run resolved there). An empty list when they agree; ``run_gpu.sh capture``
+    refuses to reuse a configuration capture otherwise."""
     p = pathlib.Path(cap) / "capture_pass.json"
     if not p.exists():
         return [f"{p} is missing (not a capture under the pass kernels)"]
@@ -286,10 +291,15 @@ def stamp_diff(cap, passes) -> list[str]:
     lst = obj["passes"] if isinstance(obj, dict) else obj
     if not lst:
         return [f"{passes} holds no pass"]
-    want, got = lst[-1], st.get("pass") or {}
+    tick = st.get("capture_tick")
+    if not isinstance(tick, int) or not 0 <= tick < len(lst):
+        return [f"capture_tick {tick!r} is not a pass index of {passes} (it holds {len(lst)} passes)"]
+    try:
+        want = passmasks.PassConfig.from_json(lst[tick]).to_json()
+    except (KeyError, TypeError, ValueError) as e:
+        return [f"{passes} pass {tick} is not a lane-config pass ({type(e).__name__}: {e})"]
+    got = st.get("pass") or {}
     out = []
-    if st.get("capture_tick") != len(lst) - 1:
-        out.append(f"capture_tick {st.get('capture_tick')!r} vs the file's last pass index {len(lst) - 1}")
     if got.get("name") != want.get("name"):
         out.append(f"name {got.get('name')!r} vs {want.get('name')!r}")
     if got.get("segments") != want.get("segments"):

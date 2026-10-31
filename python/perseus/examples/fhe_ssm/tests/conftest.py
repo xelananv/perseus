@@ -15,6 +15,11 @@ def pytest_configure(config):
         "markers",
         "slow_shape: a check at the model's own shape (ring 2^16, d = 1,024); deselect with -m 'not slow_shape'",
     )
+    config.addinivalue_line(
+        "markers",
+        "staged_tree: reads the staged tree of the GPU session (FHE_SSM_STAGED_TREE, else the worktree's "
+        ".cache/fhe_ssm/b4_stage) and skips where it is absent; run_gpu.sh verify deselects it",
+    )
 
 
 @pytest.fixture(autouse=True)

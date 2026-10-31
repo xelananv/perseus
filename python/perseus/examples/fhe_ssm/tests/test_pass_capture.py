@@ -465,12 +465,67 @@ def test_the_stamp_check_binds_a_capture_to_its_lane_config(caps):
     )
 
 
-STAGE = pathlib.Path(__file__).resolve().parents[5] / ".cache" / "fhe_ssm" / "b4_stage"
+def test_the_stamp_check_normalises_the_files_pass(caps, tmp_path):
+    """A hand-written lane-config file that omits ``name`` and the null ``stream`` / ``parked_from`` is read by the run
+    as the full file is (``PassConfig.from_json``): a capture made from it passes the stamp check, and against the
+    capture made from the full file only the name (``""`` vs the full file's) differs, not the segments."""
+    d = caps["dir"]
+    lst = json.loads((d / "tick.passes.json").read_text())
+    bare = [
+        {
+            "segments": [{k: v for k, v in s.items() if v is not None} for s in p["segments"]],
+            "tokens": p["tokens"],
+        }
+        for p in lst
+    ]
+    assert any(
+        len(s) < len(t)
+        for p, q in zip(bare, lst, strict=True)
+        for s, t in zip(p["segments"], q["segments"], strict=True)
+    )
+    f = tmp_path / "bare.passes.json"
+    f.write_text(json.dumps(bare))
+    argv = [*caps["base"], "--pass-kernels", "on", "--lane-config", str(f),
+            "--capture", str(tmp_path / "cap_bare"), "--capture-tick", "1", "--out", str(tmp_path / "bare.json")]  # fmt: skip
+    assert run_fake.main(argv) == 0
+    assert json.loads((tmp_path / "cap_bare" / "capture_pass.json").read_text())["pass"]["name"] == ""
+    assert passmerge.stamp_diff(tmp_path / "cap_bare", f) == []
+    assert passmerge.main(["stamp", str(tmp_path / "cap_bare"), str(f)]) == 0
+    assert passmerge.stamp_diff(caps["tick"], f) == [f"name {lst[1]['name']!r} vs ''"]
+
+
+def test_the_stamp_check_compares_the_pass_at_the_capture_tick(caps, tmp_path):
+    """A capture at tick 1 is compared with the file's pass 1, not its last: a three-pass file whose pass 1 is the
+    captured pass agrees, one whose pass 2 is (and pass 1 another) differs; a tick outside the file is refused."""
+    d = caps["dir"]
+    tick = json.loads((d / "tick.passes.json").read_text())
+    other = json.loads((d / "seqfresh.passes.json").read_text())[1]
+    good, bad, short = tmp_path / "good.json", tmp_path / "bad.json", tmp_path / "short.json"
+    good.write_text(json.dumps([tick[0], tick[1], other]))
+    bad.write_text(json.dumps({"passes": [tick[0], other, tick[1]]}))
+    short.write_text(json.dumps(tick[:1]))
+    assert passmerge.stamp_diff(caps["tick"], good) == []
+    diffs = passmerge.stamp_diff(caps["tick"], bad)
+    assert any(x.startswith("name ") for x in diffs)
+    assert any(x.startswith("segments ") for x in diffs)
+    assert passmerge.stamp_diff(caps["tick"], short) == [
+        f"capture_tick 1 is not a pass index of {short} (it holds 1 passes)"
+    ]
+
+
+#: the staged tree of the GPU session: FHE_SSM_STAGED_TREE, else where this Mac builds it; on the box the tree is
+#: elsewhere, so ``run_gpu.sh verify`` deselects the ``staged_tree`` test (a skip there would stop the pod)
+STAGE = pathlib.Path(
+    os.environ.get("FHE_SSM_STAGED_TREE")
+    or pathlib.Path(__file__).resolve().parents[5] / ".cache" / "fhe_ssm" / "b4_stage"
+)
 STAGE_B1 = "cap_high__linear_pcmm_pcmm_wbits_24_pass_kernels_on_b1"
 
 
+@pytest.mark.staged_tree
 @pytest.mark.skipif(
-    not (STAGE / "cfgs").is_dir(), reason=f"no staged tree at {STAGE} (built by the GPU staging)"
+    not (STAGE / "cfgs").is_dir(),
+    reason=f"no staged tree at {STAGE} (built by the GPU staging; FHE_SSM_STAGED_TREE names it)",
 )
 def test_the_stamp_check_on_the_staged_one_block_captures():
     """The shipped one-block cfg capture's four configuration captures against ``cfgs/<label>.passes.json`` agree;
