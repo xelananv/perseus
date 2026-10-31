@@ -296,9 +296,9 @@ Two independent ways on edge cases (`tests/`; `VERIFICATION` of the fork, carrie
 CPU (`tests/test_planned_contract.py`, one of them `slow_shape`: a 1-block PCMM capture at the model's width
 planned and bound) and 3 marked `gpu` (`tests/test_planned_gpu.py`, skipped without the device build); the
 device diagonal encoder's CPU half adds 14 (`tests/test_diag_source.py`) and its device half 3 marked `gpu`
-(`tests/test_diag_gpu.py`); the pass kernels add 147 (`tests/test_passkernel.py` 40, `test_passmasks.py` 37,
-`test_pass_model.py` 35, `test_pass_capture.py` 13, `test_pass_driver.py` 22) and 3 marked `gpu`
-(`tests/test_pass_gpu.py`). The whole light suite (`-m "not slow_shape and not gpu"`) is 332 tests, the `slow_shape`
+(`tests/test_diag_gpu.py`); the pass kernels add 149 (`tests/test_passkernel.py` 40, `test_passmasks.py` 37,
+`test_pass_model.py` 35, `test_pass_capture.py` 14, `test_pass_driver.py` 23) and 3 marked `gpu`
+(`tests/test_pass_gpu.py`). The whole light suite (`-m "not slow_shape and not gpu"`) is 334 tests, the `slow_shape`
 set 19, the `gpu` set 10. The
 fork's tests of its GPU runner, planner wrapper, Colab build and tick meter are not carried over: those modules
 belong to the fork's C++ runtime; on this branch the device path is `impl.driver.PlannedRun` (below). Two
@@ -614,7 +614,9 @@ the twin's recorded value of that pass's configuration, no pass key aliases a st
 resident, the staged count per configuration change equals the keys whose recorded values differ (0 on a repeated
 configuration; at the synthetic shape `prefill:320` restages 8 keys at fresh → carry and all 212 at the chunk →
 generation change); the store holds exactly what was staged; `--prepare-only` per scenario (static, 0 check errors, the
-budget both ways, `staging_dry_run`); the lane-slot order on both ends. The model-shape lean prepare of the diagonal arm
+budget both ways, `staging_dry_run`; it compiles through the CPU compile check on any build, the GPU build's included,
+since the dry run reads the stand-ins' keys and a device program no session has bound has none); the lane-slot order
+on both ends. The model-shape lean prepare of the diagonal arm
 under the kernels runs on a 16 GB laptop (25 programs, 722,245 ops, 637 refresh sites, 0 check errors, static, 437 s);
 the PCMM arm's needs more than 3 GB of host memory. GPU-only (`tests/test_pass_gpu.py`, `@pytest.mark.gpu`; `run_gpu.sh
 pass-tests`): that in-place restaging keeps the graphs (every stage replayed, no capture and no invalidation on a

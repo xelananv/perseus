@@ -881,3 +881,34 @@ def scenario(spec: str, *, vocab: int, seed: int = 0, lane_slots: int = 64, conv
         raise ValueError(f"scenario {spec!r}: tick[:K] | prefill:T | doc:T:readers | mixed | churn")
     validate_list(cfgs)
     return cfgs
+
+
+#: the four configurations a capture under the pass kernels is merged from (``capture_configurations``)
+CAPTURE_LABELS = ("tick", "seqfresh", "seqcarry", "mixed")
+
+
+def capture_configurations(vocab: int, *, seed: int = 7, lane_slots: int = 64) -> dict[str, list[PassConfig]]:
+    """The four configurations a capture under the pass kernels is merged from (``passmerge --rule max_each``: every
+    magnitude statistic its maximum over them), two passes each with the second the captured one (``run_fake
+    --lane-config FILE --capture-tick 1``): ``tick`` = ``tick:2``; ``seqfresh`` = ``tick:2``'s pass 0, then one sequence
+    over every lane-slot entering fresh; ``seqcarry`` = ``prefill:320``'s passes 0-1 (the second chunk enters carry);
+    ``mixed`` = ``mixed``'s passes 0-1. A plan cut on the tick configuration alone sizes its refreshes by the tick's
+    magnitudes, which the other configurations exceed (the fired hints' coefficient maxima among them), so a failure
+    under them would not separate a staging fault from an under-sized refresh. ``tools/fhe_ssm/run_gpu.sh capture``
+    makes these for a cfg-* arm; the model-shape captures shipped for the GPU session merge two more (a long document
+    and a long tick, from recorded histories)."""
+    n = int(lane_slots)
+    rng = np.random.default_rng(seed)
+    tick_ = scenario("tick:2", vocab=vocab, seed=seed, lane_slots=n)
+    fresh = PassConfig(
+        (Segment.seq(0, n, 0, "fresh", "L"),), tuple(int(x) for x in rng.integers(0, vocab, n)), "seqfresh.1"
+    )
+    out = {
+        "tick": tick_,
+        "seqfresh": [tick_[0], fresh],
+        "seqcarry": scenario("prefill:320", vocab=vocab, seed=seed, lane_slots=n)[:2],
+        "mixed": scenario("mixed", vocab=vocab, seed=seed, lane_slots=n)[:2],
+    }
+    for cs in out.values():
+        validate_list(cs)
+    return out

@@ -296,10 +296,10 @@ def test_prepare_records_the_conversations_the_run_decodes(synthetic_plan, tmp_p
 def test_keygen_is_the_client_role_and_takes_no_model(tmp_path):
     from perseus import _pc  # type: ignore[attr-defined]
 
-    if hasattr(_pc, "Client"):
-        pytest.skip("the device build answers a key request for real")
-    with pytest.raises(SystemExit, match="device build"):
-        run_planned.main(["--keygen", str(tmp_path / "k"), "--keyspec-file", str(tmp_path / "ks.json")])
+    # the device build answers a key request for real: the refusal is the CPU build's
+    if not hasattr(_pc, "Client"):
+        with pytest.raises(SystemExit, match="device build"):
+            run_planned.main(["--keygen", str(tmp_path / "k"), "--keyspec-file", str(tmp_path / "ks.json")])
     with pytest.raises(SystemExit, match="--weights is required"):
         run_planned.main(["--plan", "x", "--ticks", "1"])
 

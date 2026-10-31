@@ -431,3 +431,19 @@ def test_merge_max_each_takes_every_statistics_maximum(tmp_path):
     assert rec["blocks"]["block_0"]["records_from"] == {"A": 2, "B": 1}
     with pytest.raises(ValueError, match="rule"):
         passmerge.merge(a, [b], tmp_path / "m2", log=lambda _s: None, rule="other")
+
+
+def test_capture_configurations_are_the_four():
+    """``passmasks.capture_configurations``: what ``run_gpu.sh capture`` merges for a cfg-* arm and the device test's
+    fixture captures are the four of this module's ``configurations`` (two passes each, the second the captured one,
+    the same segments and descriptions; the tokens are a draw), each a valid list."""
+    vocab = 50_304
+    got = passmasks.capture_configurations(vocab)
+    want = configurations(vocab)
+    assert tuple(got) == passmasks.CAPTURE_LABELS == ("tick", "seqfresh", "seqcarry", "mixed")
+    for lab, cs in got.items():
+        assert len(cs) == 2
+        assert [c.segments for c in cs] == [c.segments for c in want[lab][0]]
+        assert [c.describe() for c in cs] == [c.describe() for c in want[lab][0]]
+        assert all(t == passmasks.GENERATED or 0 <= t < vocab for c in cs for t in c.tokens)
+    assert got["tick"][1].tokens != got["seqfresh"][1].tokens

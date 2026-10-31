@@ -337,11 +337,11 @@ def pass_census(cfg: passmasks.PassConfig) -> dict:
 
 def score_pass(cfg: passmasks.PassConfig, got, want, emb) -> dict:
     """The reply of one pass against the exact reference, per lane-slot (``q`` order): relErrRms over the live
-    lane-slots, the worst one, the logits' relErrRms, top-1 of the tied head at every next-token lane-slot (each
-    sequence's last position, each live conversation)."""
+    lane-slots, the worst one (a non-finite value first: it is the worst), the logits' relErrRms, top-1 of the tied
+    head at every next-token lane-slot (each sequence's last position, each live conversation)."""
     live, ends = cfg.live_slots(), cfg.next_token_slots()
     per = {q: rel_err_rms(got[q], want[q]) for q in live}
-    worst = max(per, key=lambda q: per[q])
+    worst = max(per, key=lambda q: (not np.isfinite(per[q]), per[q]))
     top_g = np.argmax(np.asarray(got[ends]) @ emb.T, axis=1)
     top_w = np.argmax(np.asarray(want[ends]) @ emb.T, axis=1)
     return {
@@ -592,7 +592,8 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument(
         "--prepare-only",
         action="store_true",
-        help="the CPU part only: record, compile (check), report; no session",
+        help="the CPU part only: record, compile through the CPU compile check on any build (the GPU build's too), "
+        "report, under the pass kernels the staging's dry run on the stand-ins; no session",
     )
     s.add_argument(
         "--lean",
@@ -971,7 +972,7 @@ def main(argv=None) -> int:
         SsmRecorder(model, model.n_layers, lean=a.lean and mode != "run"), plan, cfg, labels, keys, model=model,
         conversations=None if pass_on else n, work_dir=work, schedule=a.schedule, bundle=None if bundle is None else bundle / "keys.pckb", client=client,
         pcmm_cf=a.pcmm_cf, diag_source=a.diag_source, profile=a.profile, profile_every=a.profile_every, ref_token=a.ref_token, probe=a.probe,
-        pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool, passes=pass_list, log=log,
+        pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool, passes=pass_list, cpu_check=mode == "prepare", log=log,
     )  # fmt: skip
     needs = key_needs(model)
     header: dict = {

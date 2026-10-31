@@ -83,7 +83,8 @@ def recorded(base, cfg, seed=5, lean=False):
 
 
 def make_run(synth, passes, tmp_path, lean=False):
-    """A prepared ``PlannedSsmRun`` on the CPU (the compile check) with ``passes``."""
+    """A prepared ``PlannedSsmRun`` on the CPU stand-ins (the compile check on any build, ``cpu_check``) with
+    ``passes``."""
     a = run_planned.parser().parse_args(
         [*synth["base"], "--pass-kernels", "on", "--plan", str(synth["plan"]), "--prepare-only"]
     )
@@ -92,7 +93,7 @@ def make_run(synth, passes, tmp_path, lean=False):
     labels = [f"block_{b}" for b in range(model.n_layers + 1)]
     run = planned.PlannedSsmRun(
         planned.SsmRecorder(model, model.n_layers, lean=lean), str(synth["plan"]), cfg, labels, None, model=model,
-        work_dir=str(tmp_path / "work"), passes=passes, log=lambda _m: None,
+        work_dir=str(tmp_path / "work"), passes=passes, cpu_check=True, log=lambda _m: None,
     )  # fmt: skip
     rng = np.random.default_rng(9)
     rows = [
@@ -328,6 +329,32 @@ def test_a_lane_config_file_runs_as_given(synth, tmp_path):
     pl = json.loads(out.read_text())["pass_list"]
     assert (pl["scenario"], pl["lane_config"], pl["passes"]) == (None, str(f), 2)
     assert pl["lane_config_sha256"] == run_planned.sha256_file(f)
+
+
+def test_prepare_only_takes_the_compile_check_on_any_build(synth, tmp_path, monkeypatch):
+    """The CPU part never compiles on the device, whatever the build: with a ``_pc.Program`` whose ``compile``
+    refuses (the GPU build's would return programs no session has bound, and ``pt_keys`` raises on those in the
+    staging dry run), ``--prepare-only`` still records ``cpu-check`` with the dry run, and the tests' own ``make_run``
+    likewise."""
+    from perseus import _pc  # type: ignore[attr-defined]
+
+    class Program:
+        @staticmethod
+        def compile(*_a, **_k):
+            raise AssertionError("_pc.Program.compile was called under --prepare-only")
+
+    monkeypatch.setattr(_pc, "Program", Program, raising=False)
+    out = tmp_path / "prep.json"
+    argv = [*synth["base"], "--pass-kernels", "on", "--scenario", "tick:2", "--plan", str(synth["plan"]),
+            "--prepare-only", "--out", str(out)]  # fmt: skip
+    assert run_planned.main(argv) == 0
+    p = json.loads(out.read_text())["prepare"]
+    assert p["compiled_by"] == "cpu-check"
+    assert p["staging_dry_run"]["every_program_key_resident"] is True
+    run, _ = make_run(
+        synth, passmasks.scenario("tick:2", vocab=synth["params"].vocab, seed=3), tmp_path / "m"
+    )
+    assert run.compiled_by == "cpu-check"
 
 
 # ── the lane-slot order on both ends ────────────────────────────────────────────────────────────

@@ -3,15 +3,19 @@
 #
 #   bash tools/fhe_ssm/run_gpu.sh box              record the box: GPU, driver, nvcc, RAM, disk, load, commit
 #   bash tools/fhe_ssm/run_gpu.sh build            uv venv + editable install + maturin develop --release
-#   bash tools/fhe_ssm/run_gpu.sh verify           _pc loads (its device classes present), the GPU's memory, upstream's
-#                                                  CPU tests, the port's tests, the change check, the CPU compile check
+#   bash tools/fhe_ssm/run_gpu.sh verify           _pc loads (its device classes present), the GPU's memory, the CPU compile
+#                                                  check built first (the plan tests skip without it), upstream's CPU tests,
+#                                                  the port's light suite with no skipped test, the change check
 #   bash tools/fhe_ssm/run_gpu.sh bench            this build's refresh prices (pc-bench bts --all --k 1,8) -> PLAN_BTS_MS
 #   bash tools/fhe_ssm/run_gpu.sh arms             the axis arms and what each sets
-#   bash tools/fhe_ssm/run_gpu.sh capture ARM      the CPU-twin capture of ARM (no GPU; reused when present)
+#   bash tools/fhe_ssm/run_gpu.sh capture ARM      the CPU-twin capture of ARM (no GPU; reused when present; a cfg-* arm's
+#                                                  is the max_each merge of four configurations' captures, kept beside it)
 #   bash tools/fhe_ssm/run_gpu.sh plan ARM         tools/fhe_ssm/make_plan.sh on that capture (+ the compile check); a plan
 #                                                  already in $OUT (one shipped from elsewhere) is reused after its graph=
-#                                                  md5 is checked against the capture (REPLAN=1 re-cuts it; an arm whose
-#                                                  plan is shipped only, cfg-pcmm24-tick, is never cut here)
+#                                                  md5 is checked against the capture and its axes= / recipe= / runtime=
+#                                                  lines against a dry run of make_plan.sh in this environment (REPLAN=1
+#                                                  re-cuts it; an arm whose plan is shipped only, cfg-pcmm24-tick, is never
+#                                                  cut here)
 #   bash tools/fhe_ssm/run_gpu.sh prepare ARM      the driver's CPU part (--prepare-only: record, compile check, report)
 #   bash tools/fhe_ssm/run_gpu.sh keyspec ARM      the key request of ARM's plan ($DRIVER --keyspec: the model's needs and,
 #                                                  on the device build, the session's) -> $OUT/keys_ARM[_bN]/keyspec.json
@@ -51,8 +55,9 @@
 # plaintexts come from on the device, the driver's --diag-source; generated = the device diagonal encoder, which makes
 # every non-blocked arm a device arm; a driver flag only, so the captures and plans are the same under both), DIAG_E /
 # DIAG_F (diag-tests: 1 = also run (e) the model shape and (f) the timings), REPLAN (1: plan re-cuts an existing plan).
-# `run`, `prepare` and `keyspec` pass the driver --capture <the capture the arm's plan was cut from> when that directory
-# is in $OUT (the plan's graph= line names the machine it was cut on, so without it the md5 check does not run).
+# `run`, `prepare` and `keyspec` pass the driver --capture <the capture the arm's plan was cut from>, which must be in
+# $OUT (the plan's graph= line names the machine it was cut on, so without it the md5 check does not run; ALLOW_UNCHECKED=1
+# runs without it, recorded as capture.checked false).
 # Nothing here edits a tracked file; captures, plans and records go under OUT.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -116,7 +121,7 @@ arm() {   # sets CAP, PLANENV, RUNF, NOTE, DEVICE, PLANCAP (the suffix of the ca
                     CAP="--streams ${1#lockstep}"; PLANENV="LANDING=high"; RUNF="--schedule lockstep"
                     NOTE="BLOCKED until the port captures k ciphertext sets per stage (RUNSHEET_GPU.md §3)" ;;
         cfg-pcmm24) CAP="--linear pcmm --pcmm-wbits 24 --pass-kernels on"; PLANENV="LANDING=high"; RUNF="--scenario $SCENARIO"
-                    NOTE="the pass kernels on pcmm24 (the whole model's plan: the merged capture's; at BLOCKS=1 the tick configuration's capture); compare with pcmm24" ;;
+                    NOTE="the pass kernels on pcmm24 (its plan a merged capture's: six configurations shipped for the whole model, four captured here); compare with pcmm24" ;;
         cfg-pcmm24-tick)
                     CAP="--linear pcmm --pcmm-wbits 24 --pass-kernels on"; PLANENV="LANDING=high"; RUNF="--scenario $SCENARIO"
                     PLANCAP="__tick"; SHIPPED=1
@@ -154,9 +159,11 @@ plancap() {   # the capture an arm's plan was cut from: capname, or a per-config
     local c; c=$(capname "$1"); arm "$1"
     echo "${c}${PLANCAP}"
 }
-capture_flag() {   # the driver's --capture for arm $1 when that capture is in $OUT (sets CAPF; logs either way)
+capture_flag() {   # the driver's --capture for arm $1: the capture its plan was cut from, in $OUT (sets CAPF)
     local c; c="$OUT/$(plancap "$1")"
-    if [ -d "$c" ]; then CAPF="--capture $c"; else CAPF=""; log "$1: no capture $c here: the plan's capture md5 is not checked"; fi
+    if [ -d "$c" ]; then CAPF="--capture $c"
+    elif [ "${ALLOW_UNCHECKED:-0}" = 1 ]; then CAPF=""; log "$1: no capture $c here: the plan's capture md5 is not checked (ALLOW_UNCHECKED=1)"
+    else die "$1: no capture $c here, so the plan's capture md5 cannot be checked: ship it beside the plan (ALLOW_UNCHECKED=1 runs unchecked, recorded as capture.checked false)"; fi
 }
 md5_of() {   # cat block_*/graph.json | md5, as make_plan.sh writes it into PLAN_CMD.txt
     cat "$1"/block_*/graph.json | (md5sum 2>/dev/null || md5 -q) | cut -c1-32
@@ -203,19 +210,27 @@ verify)
     ( cd "$W" && "$PY" -c "from perseus import _pc; import sys; want = ('Session', 'Program', 'KeySource', 'Client', 'PtStore'); miss = [n for n in want if not hasattr(_pc, n)]; print('perseus._pc loaded; device classes missing:', miss or 'none'); sys.exit(1 if miss else 0)" ) 2>&1 | tee -a "$OUT/session.log"
     [ "${PIPESTATUS[0]}" = 0 ] || die "_pc is not the full (CUDA) extension"
     nvidia-smi --query-gpu=index,name,memory.used,memory.free,memory.total --format=csv -i "$GPU" 2>&1 | tee -a "$OUT/session.log"
+    # the CPU compile check first: the plan tests skip without it (tests/test_planned_contract.py), and a skipped gate
+    # passes nothing; the CPU part of every run (--prepare-only) takes it on this build too
+    bash "$HERE/compile_check/build.sh" | tee -a "$OUT/session.log"
+    [ "${PIPESTATUS[0]}" = 0 ] || die "the compile check did not build (tools/fhe_ssm/compile_check/build.sh): plans could not be gated"
     ( cd "$W" && CUDA_VISIBLE_DEVICES="" "$PY" -m pytest -q -p no:cacheprovider -m 'not gpu' python/tests/test_fake_shadow.py \
         python/tests/test_pairing_cpu.py python/tests/test_rmsnorm_example.py python/tests/test_prefill_cpu.py > "$OUT/verify_upstream_tests.log" 2>&1 )
     rc=$?; tail -3 "$OUT/verify_upstream_tests.log" | tee -a "$OUT/session.log"
     [ "$rc" = 0 ] || die "upstream's CPU tests failed ($OUT/verify_upstream_tests.log)"
     if [ -d "$W/python/perseus/examples/fhe_ssm/tests" ]; then
-        ( cd "$W" && CUDA_VISIBLE_DEVICES="" "$PY" -m pytest -q -p no:cacheprovider python/perseus/examples/fhe_ssm/tests > "$OUT/verify_port_tests.log" 2>&1 )
+        # the light suite (the slow_shape tests are the model-shape CPU set, run where the plans were cut; the gpu-marked
+        # ones run in pass-tests and diag-tests under FHE_SSM_REQUIRE_DEVICE=1); every skip is printed (-rs) and refused:
+        # on this build the only skip the suite knows is a missing compile check, and that gate must run
+        ( cd "$W" && CUDA_VISIBLE_DEVICES="" "$PY" -m pytest -q -rs -p no:cacheprovider -m 'not gpu and not slow_shape' python/perseus/examples/fhe_ssm/tests > "$OUT/verify_port_tests.log" 2>&1 )
         rc=$?; tail -3 "$OUT/verify_port_tests.log" | tee -a "$OUT/session.log"
         [ "$rc" = 0 ] || die "the port's tests failed ($OUT/verify_port_tests.log)"
+        skips=$(grep -c '^SKIPPED' "$OUT/verify_port_tests.log")
+        grep '^SKIPPED' "$OUT/verify_port_tests.log" | tee -a "$OUT/session.log"
+        [ "$skips" = 0 ] || [ "${VERIFY_SKIPS_OK:-0}" = 1 ] || die "verify: $skips skipped test(s) in the port's light suite (above): a skipped gate passes nothing (VERIFY_SKIPS_OK=1 accepts them)"
     fi
     bash "$HERE/check_additive.sh" | tee -a "$OUT/session.log"
     [ "${PIPESTATUS[0]}" = 0 ] || die "the branch changes an unlisted upstream file (tools/fhe_ssm/UPSTREAM_CHANGES.md)"
-    bash "$HERE/compile_check/build.sh" | tee -a "$OUT/session.log"
-    [ "${PIPESTATUS[0]}" = 0 ] || die "the compile check did not build (tools/fhe_ssm/compile_check/build.sh): plans could not be gated"
     log "verify: $(build_id)" ;;
 bench)
     gpu_free
@@ -234,15 +249,56 @@ capture)
     case "$NOTE" in BLOCKED*) die "$a: $NOTE" ;; esac
     if [ -f "$c/capture_config.json" ]; then log "capture $a: reusing $c"; exit 0; fi
     resolve_data
-    log "capture $a -> $c (CPU only): $CAPENV run_fake $CAP"
+    high_stamp() {   # a LANDING=high capture's stamp must carry the switches (the header comment)
+        case "$PLANENV" in *LANDING=high*)
+            "$PY" -c "import json, sys; b = json.load(open(sys.argv[1]))['bts']; sys.exit(0 if int(b.get('stc_first') or 0) == 2 and b.get('raise_drop') == '512:1' else 1)" "$1/capture_config.json" \
+                || die "capture $a: $1/capture_config.json lacks stc_first=2 / raise_drop=512:1, the capture did not take the LANDING=high switches (fakes.LANDING_SWITCHES; header comment); kept at $1" ;;
+        esac
+    }
     t0=$(date +%s)
+    case "$CAP" in *"--pass-kernels on"*)
+        # a cfg-* arm: the max_each merge of four configurations' captures (tick; one sequence fresh; the same carried;
+        # mixed: passmasks.capture_configurations, written here from the model's vocabulary, or the <label>.passes.json
+        # files in CFG_CONFIGS), each kept beside the merge as <capname>__<label>. A plan cut on the tick configuration
+        # alone sizes its refreshes by the tick's magnitudes, which the other configurations exceed. The whole-model
+        # captures shipped for the GPU session merge six configurations (two from recorded histories); this makes the four
+        d=${CFG_CONFIGS:-$c.cfgs}
+        if [ -z "${CFG_CONFIGS:-}" ]; then
+            mkdir -p "$d"
+            ( cd "$W" && env PYTHONPATH="$W/python" "$PY" -c "
+import json, sys
+from perseus.examples.fhe_ssm import passmasks, weights
+p = weights.load_model(sys.argv[1], sys.argv[2], sys.argv[3])
+for lab, cs in passmasks.capture_configurations(p.vocab).items():
+    open(f'{sys.argv[4]}/{lab}.passes.json', 'w').write(json.dumps(passmasks.dump_list(cs)))
+    print(lab, cs[1].describe())
+" "$WEIGHTS" "$SEEDS" "$CONFIG" "$d" ) > "$d/configurations.txt" 2>&1 || { cat "$d/configurations.txt"; die "capture $a: the capture configurations"; }
+        fi
+        for lab in tick seqfresh seqcarry mixed; do
+            cc="${c}__$lab"
+            [ -f "$d/$lab.passes.json" ] || die "capture $a: no $d/$lab.passes.json (CFG_CONFIGS holds the four lane-config files)"
+            if [ -f "$cc/capture_config.json" ]; then log "capture $a: reusing $cc"; continue; fi
+            log "capture $a __$lab -> $cc (CPU only): $CAPENV run_fake $CAP --lane-config $d/$lab.passes.json"
+            ( cd "$W" && env CUDA_VISIBLE_DEVICES="" PYTHONPATH="$W/python" $CAPENV "$PY" -m perseus.examples.fhe_ssm.run_fake \
+                $MODEL_ARGS $CAP --lane-config "$d/$lab.passes.json" --capture "$cc.part" --capture-tick 1 --out "$cc.fake.json" ) \
+                > "$cc.capture.log" 2>&1 || { tail -20 "$cc.capture.log"; die "capture $a __$lab failed ($cc.capture.log)"; }
+            high_stamp "$cc.part"
+            rm -rf "$cc"; mv "$cc.part" "$cc"
+        done
+        rm -rf "$c.part"
+        ( cd "$W" && env PYTHONPATH="$W/python" "$PY" -m perseus.examples.fhe_ssm.passmerge merge "$c.part" "${c}__tick" \
+            "${c}__seqfresh" "${c}__seqcarry" "${c}__mixed" --labels tick seqfresh seqcarry mixed --rule max_each --json "$c.merge.json" ) \
+            > "$c.merge.log" 2>&1 || { tail -20 "$c.merge.log"; die "capture $a: the merge failed ($c.merge.log)"; }
+        tail -3 "$c.merge.log"
+        high_stamp "$c.part"
+        rm -rf "$c"; mv "$c.part" "$c"
+        log "capture $a: done in $(( $(date +%s) - t0 )) s (four configurations merged under max_each: $c.merge.log)"; exit 0 ;;
+    esac
+    log "capture $a -> $c (CPU only): $CAPENV run_fake $CAP"
     ( cd "$W" && env CUDA_VISIBLE_DEVICES="" PYTHONPATH="$W/python" $CAPENV "$PY" -m perseus.examples.fhe_ssm.run_fake \
         $MODEL_ARGS --tokens 2 $CAP --capture "$c.part" --capture-tick 1 --out "$OUT/$(capname "$a").fake.json" ) \
         > "$OUT/$(capname "$a").capture.log" 2>&1 || { tail -20 "$OUT/$(capname "$a").capture.log"; die "capture $a failed"; }
-    case "$PLANENV" in *LANDING=high*)
-        "$PY" -c "import json, sys; b = json.load(open(sys.argv[1]))['bts']; sys.exit(0 if int(b.get('stc_first') or 0) == 2 and b.get('raise_drop') == '512:1' else 1)" "$c.part/capture_config.json" \
-            || die "capture $a: capture_config.json lacks stc_first=2 / raise_drop=512:1, the capture did not take the LANDING=high switches (fakes.LANDING_SWITCHES; header comment); kept at $c.part" ;;
-    esac
+    high_stamp "$c.part"
     rm -rf "$c"; mv "$c.part" "$c"
     log "capture $a: done in $(( $(date +%s) - t0 )) s" ;;
 plan)
@@ -254,7 +310,16 @@ plan)
         got=$(md5_of "$c")
         [ -n "$want" ] && [ "$got" = "$want" ] || die "plan $a: $p was cut from a capture of md5 ${want:-?}, $c has $got"
         grep -q "check errors 0;" "$p/summary.txt" || die "plan $a: $p's summary holds no 'check errors 0;' line"
-        log "plan $a: reusing $p (capture md5 $got; REPLAN=1 re-cuts it)"; exit 0
+        # and its recipe is this environment's: PLAN_CMD.txt's axes= / recipe= / runtime= lines against make_plan.sh's
+        # dry run under the arm's PLANENV here (a changed PLACER, ILP_OBJECTIVE, PLAN_BTS_MS, ... would otherwise reuse
+        # the old plan silently)
+        dry=$(env $PLANENV PLAN_ROOT="$OUT" MEMGUARD_GB= DRY_RUN=1 bash "$HERE/make_plan.sh" "$c" "plan_$a$S" 2>&1) \
+            || die "plan $a: make_plan.sh's dry run failed: $(printf '%s\n' "$dry" | tail -3)"
+        for k in axes recipe runtime; do
+            w=$(sed -n "s/^$k=//p" "$p/PLAN_CMD.txt"); g=$(printf '%s\n' "$dry" | sed -n "s/^  $k: *//p")
+            [ -n "$w" ] && [ "$w" = "$g" ] || die "plan $a: $p was cut with $k=${w:-?}; this environment gives $k=$g (REPLAN=1 re-cuts it)"
+        done
+        log "plan $a: reusing $p (capture md5 $got; axes, recipe and runtime as here; REPLAN=1 re-cuts it)"; exit 0
     fi
     [ "$SHIPPED" = 1 ] && die "plan $a: shipped only (cut elsewhere on $(plancap "$a")): never cut here; ship $p"
     [ -d "$c" ] || die "no capture $c: run_gpu.sh capture $a"

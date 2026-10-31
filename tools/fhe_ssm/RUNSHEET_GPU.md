@@ -13,15 +13,18 @@ finish and checks every record.
 
 Status: the plan tooling, the CPU compile check, the change check, the port's fake and capture, and the planned driver's
 CPU part (`run_planned.py --prepare-only`: the recorded stream, the compile check, the plaintext budget both ways, the
-per-pass staging's dry run on the CPU stand-ins) run on a CPU-only build [S12, S18, S19]. **Nothing of the driver has
-run on a device**: the session, the graphs, the in-place restaging, every timing and every fidelity on a device are
+per-pass staging's dry run on the CPU stand-ins) run on a CPU-only build [S12, S18, S19]; `--prepare-only` compiles
+through the CPU compile check on any build, the GPU build's included (`compiled_by cpu-check`: the dry run reads the
+stand-ins' keys, which a device program no session has bound does not have), so step 1a runs on the box as it ran
+here. **Nothing of the driver has run on a device**: the session, the graphs, the in-place restaging, every timing and every fidelity on a device are
 this session's to measure.
 
 ## 0. Rules for every timed step
 
 - One binary for every number that is compared. Build once and never rebuild mid-session. Wall-clock belongs to a
   build, so a time measured on another build (another runtime, another toolkit, another link) is never a denominator
-  here. `run_gpu.sh` writes the commit, the `_pc` .so hash, nvcc's version and the load average beside every run.
+  here. `run_gpu.sh` writes the commit, the `_pc` .so hash, nvcc's version and the load average beside every run; the
+  numbers table prints them per run of a bracket and withholds the overhead line when a bracket spans two builds.
 - An idle GPU and an idle host. `run` refuses a GPU with other compute processes. The planned path stages plaintexts
   from the host, so a CPU-heavy neighbour moves the timing. Prepares are CPU jobs: run them before the timed block.
 - One `KEYS` mode across a bracket (`KEYS=inproc` for the timing brackets); the bundle run is last and never compared
@@ -51,7 +54,10 @@ directory holding `capture_config.json`. The tree below is laid out as the box's
 the plans; a manifest holds every capture's md5 (`cat block_*/graph.json | md5`, the value `make_plan.sh` writes into
 `PLAN_CMD.txt`'s `graph=` line) and every plan file's, checked on the box before anything runs. `run`, `prepare` and
 `keyspec` pass the driver `--capture $OUT/<the capture the arm's plan was cut from>` (a plan's `graph=` line names the
-machine it was cut on, so without that flag the driver's md5 check would not run: `capture.checked` is `false`).
+machine it was cut on, so without that flag the driver's md5 check would not run), and refuse to run without that
+capture unless `ALLOW_UNCHECKED=1` (recorded as `capture.checked false`). What `capture.checked true` proves: the
+shipped capture's md5 is the shipped plan's `graph=` md5, i.e. the staged tree is consistent, which the manifest also
+proves; that the box's twin records the stream the plan was cut on is `prepare.check_errors {}`.
 
 | box path under `$OUT` | what it is | capture md5 / plan |
 |---|---|---|
@@ -66,7 +72,7 @@ machine it was cut on, so without that flag the driver's md5 check would not run
 | `cap_stock__pass_kernels_on/` | the reference under the pass kernels, six configurations merged (`max_each`) [S16] | b3f021a99df258c0d10d1c5ae44d2288 |
 | `bootstrap_placements/plan_cfg-ref/` | its stock plan: 637, launches 720,418 [S16] | cut on b3f021a9… |
 | `cap_high__linear_pcmm_pcmm_wbits_24_b1/`, `bootstrap_placements/plan_pcmm24_b1/` | the 1-block smokes, `BLOCKS=1 run_gpu.sh capture / plan pcmm24` [S20] | the manifest |
-| `cap_high__linear_pcmm_pcmm_wbits_24_pass_kernels_on_b1/`, `bootstrap_placements/plan_cfg-pcmm24_b1/` | `BLOCKS=1 … cfg-pcmm24` (the tick configuration's capture: one block) [S20] | the manifest |
+| `cap_high__linear_pcmm_pcmm_wbits_24_pass_kernels_on_b1/`, `bootstrap_placements/plan_cfg-pcmm24_b1/` | `BLOCKS=1 … cfg-pcmm24`: the four capture configurations at one block (`passmasks.capture_configurations`: tick, one sequence fresh, the same carried, mixed; the lane-config files in `cfgs/`), kept beside as `…_b1__<label>` and merged under `max_each`; the plan cut on the merge [S20] | the manifest |
 | `cap_stock_b1/`, `bootstrap_placements/plan_ref_b1/` | `BLOCKS=1 … ref` (`smoke-diag`'s) [S20] | the manifest |
 
 Also before renting: a fresh `--pass-kernels off` PCMM capture at the tip has the md5 of `plan_pcmm24`'s capture
@@ -83,16 +89,16 @@ and 7; `mixed`: 3; `churn`: 5), so a steady-state wall exists without a fence.
 
 | # | step | command | pass |
 |---|---|---|---|
-| 1 | setup and the build | the clone at the tip (upstream `speedrun` plus the branch's bundle; HEAD = the tip), the data, the staged tree checked against its manifest; then `run_gpu.sh box`, `build`, `verify`, `bench` | stop on any failure; `verify`: `device classes missing: none`, the port's tests and upstream's CPU tests pass, the change check `OK`, the compile check built |
-| 1a | the PCMM arm's CPU part under the pass kernels | `run_gpu.sh prepare cfg-pcmm24` (the 24-block PCMM prepare: more than 3 GB of host memory [S13]) | `prepare_cfg-pcmm24/record.json`: 25 programs, `check_errors {}`, `static_stream true`, `capture.checked true`, the budget by references and by aliases, `staging_dry_run` |
+| 1 | setup and the build | the clone at the tip (upstream `speedrun` plus the branch's bundle; HEAD = the tip's full SHA; the weights' sha256 3ec3f1d8…293e784b), the data, the staged tree checked against its manifest; then `run_gpu.sh box`, `build`, `verify`, `bench` | stop on any failure; `verify`: `device classes missing: none`, the compile check built first, upstream's CPU tests and the port's light suite (`-m 'not gpu and not slow_shape'`, `-rs`) pass with no skipped test, the change check `OK` |
+| 1a | the PCMM arm's CPU part under the pass kernels | `run_gpu.sh prepare cfg-pcmm24` (the 24-block PCMM prepare: more than 3 GB of host memory [S13]; `--prepare-only` compiles through the CPU compile check on this build too) | `prepare_cfg-pcmm24/record.json`: 25 programs, `compiled_by cpu-check`, `check_errors {}`, `static_stream true`, `capture.checked true`, the budget by references and by aliases, `staging_dry_run` |
 | 2 | first device contact | `BLOCKS=1 RUN_TAG=smoke run pcmm24` | exit 0, `served` all `r` on the timed ticks, relErrRms < 1e-3 |
 | 2a | the pass kernels' device tests | `run_gpu.sh pass-tests` (`tests/test_pass_gpu.py`: one block at d = 1,024, PCMM-24, LANDING=high, the `tick:4`, `mixed` and `doc:130:64` scenarios; `FHE_SSM_REQUIRE_DEVICE=1`, `CUDA_MODULE_LOADING=EAGER`) | `3 passed` |
-| 2b | the per-pass staging's contacts | `BLOCKS=1 SCENARIO=tick TICKS=4 RUN_TAG=smoke_tick run cfg-pcmm24`, then `BLOCKS=1 SCENARIO=mixed RUN_TAG=smoke_mixed run cfg-pcmm24` | every timed pass: `served` all `r`; on every restaging pass (`staged` > 0): `counters.captures == 0` and `counters.invalidations == 0` (the in-place re-encode keeps the graphs: `crates/pc-py/src/store.rs:2-5`, `crates/pc-program/src/replay.rs:879`); the worst live lane-slot's relErrRms < 1e-3; `mem_free_bytes` equal on every pass |
-| 3 | the PCMM bracket (whole model, one binary, `KEYS=inproc`, idle GPU and host, `PROFILE_EVERY=2`) | `TICKS=6 RUN_TAG=ctlA run pcmm24` → `TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-pcmm24` (the modularity overhead) → `SCENARIO=prefill:320 RUN_TAG=prefill run cfg-pcmm24` → `SCENARIO=doc:258:64 RUN_TAG=doc run cfg-pcmm24` → `SCENARIO=mixed RUN_TAG=mixed run cfg-pcmm24` → `TICKS=6 RUN_TAG=ctlB run pcmm24` → `TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-pcmm24-tick` (the pure-kernel control plan) | every record: `capture.checked true`, `prepare.check_errors {}`; the numbers table (§4) |
+| 2b | the per-pass staging's contacts | `BLOCKS=1 SCENARIO=tick TICKS=4 RUN_TAG=smoke_tick run cfg-pcmm24`, then `BLOCKS=1 SCENARIO=mixed RUN_TAG=smoke_mixed run cfg-pcmm24` | every timed pass: `served` all `r`; on every restaging pass (`staged` > 0): `counters.captures == 0` and `counters.invalidations == 0` (the in-place re-encode keeps the graphs: `crates/pc-py/src/store.rs:2-5`, `crates/pc-program/src/replay.rs:879`); relErrRms < 1e-3 over the live lane-slots and on the worst one (a non-finite value is the worst); `mem_free_bytes` equal on every pass. A failed contact withholds the `cfg-*` runs of step 3 (the controls run) |
+| 3 | the PCMM bracket (whole model, one binary, `KEYS=inproc`, idle GPU and host, `PROFILE_EVERY=2`) | `TICKS=6 RUN_TAG=ctlA run pcmm24` → `TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-pcmm24` (the modularity overhead) → `SCENARIO=prefill:320 RUN_TAG=prefill run cfg-pcmm24` → `SCENARIO=doc:258:64 RUN_TAG=doc run cfg-pcmm24` → `SCENARIO=mixed RUN_TAG=mixed run cfg-pcmm24` → `TICKS=6 RUN_TAG=ctlB run pcmm24` → `TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-pcmm24-tick` (the pure-kernel control plan) | every record: `capture.checked true`, `prepare.check_errors {}`; the numbers table (§4) with every run's build identity (commit, dirty, `_pc` .so) and load beside it |
 | 4 | the device diagonal encoder's acceptance | `run_gpu.sh diag-tests` (checks 1-3) → `RUN_TAG=smoke_diag run_gpu.sh smoke-diag` → `DIAG_E=1 DIAG_F=1 run_gpu.sh diag-tests` (on the shipped `plan_ref`) | §3a |
-| 5 | the diagonal bracket under the encoder | `DIAG_SOURCE=generated TICKS=6 RUN_TAG=ctlA run ref` → `DIAG_SOURCE=generated TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-ref` → `DIAG_SOURCE=generated TICKS=6 RUN_TAG=ctlB run ref` | as step 3 |
+| 5 | the diagonal bracket under the encoder | `DIAG_SOURCE=generated TICKS=6 RUN_TAG=ctlA run ref` → `DIAG_SOURCE=generated TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-ref` → `DIAG_SOURCE=generated TICKS=6 RUN_TAG=ctlB run ref`; only once checks 1-3 left their `.passed` markers and `smoke-diag` passed | as step 3 |
 | 6 | the deployment split | `run_gpu.sh keyspec cfg-pcmm24` → `run_gpu.sh keygen cfg-pcmm24` → `KEYS=bundle FHE_SSM_KEYS=$OUT/keys_cfg-pcmm24 TICKS=6 SCENARIO=tick RUN_TAG=bundle run cfg-pcmm24` | `keys.mode bundle`, `setup.has_secret false`; no timing comparison with step 3 |
-| 7 | wrap up | the checks over every record, the numbers table, a tar of the records; pull them home | — |
+| 7 | wrap up | the checks over every record, the numbers table, a tar of the records (without the staged tree and the `.work` directories); pull them home | — |
 
 Never run `capture` or `plan` for a shipped arm expecting a new product: both reuse what is in `$OUT`. `TICKS` is the
 pass count of `SCENARIO=tick`; the other scenarios set their own (`prefill:320` 8 passes, `doc:258:64` 8, `mixed` 5,
@@ -131,7 +137,9 @@ and pass index:
   tok/s per conversation = 1 / seconds;
 - the modularity overhead = the `cfg-pcmm24` (`cfg-ref`) tick's unfenced passes against the two controls' mean, quoted
   only when the difference falls outside the controls' spread (max − min over both controls' unfenced ticks);
-- the restage cost from the restaging passes (`staged`, `stage_s`, their `seconds`);
+- the restage cost: a restaging pass's `seconds` minus the next steady pass's in the same configuration (`stage_s`
+  is host issue time only: `PtStore.stage` encodes on the compute lane, asynchronously to the host, so the device part
+  of a restage lands in the pass's `seconds`);
 - fidelity beside every time: `relErrRms_vs_exact`, its worst live lane-slot, `top1`.
 
 The per-stage split comes from the fenced passes (`stages[].wall_s`). There is **no per-step split on this path**:
@@ -210,7 +218,8 @@ The landing's runtime switches are in the environment. The driver must:
 
 `record.json`, one object per run:
 - per run: `build_id` (commit, dirty, `_pc` .so, nvcc, arch; `run_gpu.sh` adds the load average in `build_id.txt`),
-  `keys.mode`, the plan's `axes` / `recipe` / `runtime` lines, `capture` (`checked`, `md5`, `plan_md5`), `prepare`
+  `keys.mode`, the plan's `axes` / `recipe` / `runtime` lines, `capture` (`checked`: the shipped capture's md5 equals
+  the plan's `graph=` md5, the staged tree's consistency; `md5`, `plan_md5`), `prepare`
   (`check_errors`, `static_stream`, `refreshes_planned`, per program `n_ops` / `n_launches` / `n_bootstraps` /
   `bts_batches` / `n_pairs` / `n_finishes` / `mem`, `plaintexts`: by references and `by_alias`, `sums`), `pass_list`
   (the scenario or file, the configurations, `config_ids`, the list, the generated tokens resolved), `setup`
@@ -241,7 +250,10 @@ The landing's runtime switches are in the environment. The driver must:
   programs (1,711 MB for the model's largest stage under `program` [S6]); the keys (the pass kernels add 20 rotation
   steps: `−1..−7, −8, −16, −24` and `+1..+7, +8, +16, +24`; key bytes per step unmeasured); the plaintext store, one slot
   per distinct (alias, level) pair: on `cfg-ref` 1,796 pass-mask pairs (1,761 mask ids) plus the static plaintexts
-  [S19], each 28 rows × 2^16 × 4 B = 7 MiB.
+  [S19]; the driver's budget prices every slot at `max(28, 54 − min level)` rows × 2^16 × 4 B (17.7 GiB for the 2,589
+  slots of `cfg-ref` under `generated` [S19]), an **upper bound**: the store carves `54 − level` rows per key
+  (`crates/pc-py/src/session.rs` `level_classes`, `crates/pc-py/src/pt_store.rs` `slot_caps`), so the `--pt-budget-gb`
+  gate is conservative and the measured figure is `setup.mem_report`.
 
   The session prints its own breakdown at setup (`sess.mem_report`). Record it on the first arm.
 

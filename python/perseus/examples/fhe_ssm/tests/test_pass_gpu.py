@@ -1,9 +1,11 @@
 # SPDX-License-Identifier: MIT
 """The planned driver under the pass kernels on a device (skipped without the GPU build of ``perseus._pc``; a failure
 instead under ``FHE_SSM_REQUIRE_DEVICE=1``): one block at the model's width (d = 1,024, synthetic weights, every linear
-PCMM at 24 bits), captured under the pass kernels in the tick configuration with the LANDING=high runtime switches
-(``run_gpu.sh``'s ``CAPENV``) and planned by the high recipe, then run with in-process keys under the ``tick``,
-``mixed`` and ``doc`` scenarios. On every timed pass: each stage replayed from its captured graph (``served`` all
+PCMM at 24 bits), captured under the pass kernels in the four capture configurations (``passmasks.capture_configurations``:
+tick, one sequence fresh, the same carried, mixed) with the LANDING=high runtime switches (``run_gpu.sh``'s ``CAPENV``),
+merged under ``max_each`` and planned by the high recipe (a plan cut on the tick configuration alone sizes its refreshes
+by the tick's magnitudes, and a failure on ``mixed`` or ``doc`` would then not separate a staging fault from an
+under-sized refresh), then run with in-process keys under the ``tick``, ``mixed`` and ``doc`` scenarios. On every timed pass: each stage replayed from its captured graph (``served`` all
 ``r``); on a pass that restaged pass masks, no graph capture and no invalidation (the in-place re-encode keeps the
 graphs: ``crates/pc-py/src/store.rs``, ``crates/pc-program/src/replay.rs``); relErrRms < 1e-3 on every live lane-slot
 against ``ref.ExactModel.pass_`` (the port's device tolerance, ``tests/test_planned_gpu.py``); the reply at every
@@ -20,7 +22,7 @@ import subprocess
 import numpy as np
 import pytest
 
-from perseus.examples.fhe_ssm import passmasks, run_fake, run_planned
+from perseus.examples.fhe_ssm import passmasks, passmerge, run_fake, run_planned
 from perseus.examples.fhe_ssm.synthetic import synthetic
 
 pytestmark = pytest.mark.gpu
@@ -65,21 +67,29 @@ def high_switches():
 
 @pytest.fixture(scope="module")
 def one_block_pass(tmp_path_factory):
-    """A 1-block checkpoint at d = 1,024, its capture under the pass kernels (the tick configuration, capture tick 1,
-    the high switches) and the LANDING=high plan of it."""
+    """A 1-block checkpoint at d = 1,024, the four capture configurations' captures under the pass kernels (capture
+    tick 1, the high switches) merged under ``max_each``, and the LANDING=high plan of the merge."""
     device()
     d = tmp_path_factory.mktemp("pass_gpu")
-    _params, w, seeds, cfg = synthetic(L=1, d=1024, dff=4096, seed=13)
+    params, w, seeds, cfg = synthetic(L=1, d=1024, dff=4096, seed=13)
     np.savez(d / "w.npz", **w)
     (d / "s.json").write_text(json.dumps(seeds))
     (d / "c.json").write_text(json.dumps(cfg))
     base = ["--weights", str(d / "w.npz"), "--seeds", str(d / "s.json"), "--config", str(d / "c.json"), "--levels", "preset",
             "--linear", "pcmm", "--pcmm-wbits", "24", "--pass-kernels", "on"]  # fmt: skip
-    cap = d / "cap"
+    caps = {}
     with high_switches():
-        rc = run_fake.main([*base, "--scenario", "tick:2", "--capture", str(cap), "--capture-tick", "1", "--out",
-                            str(d / "cap.json")])  # fmt: skip
-    assert rc == 0
+        for lab, cfgs in passmasks.capture_configurations(params.vocab).items():
+            f = d / f"{lab}.passes.json"
+            f.write_text(json.dumps(passmasks.dump_list(cfgs)))
+            rc = run_fake.main([*base, "--lane-config", str(f), "--capture", str(d / f"cap_{lab}"), "--capture-tick",
+                                "1", "--out", str(d / f"{lab}.json")])  # fmt: skip
+            assert rc == 0, lab
+            caps[lab] = d / f"cap_{lab}"
+    cap = d / "cap"
+    labels = list(passmasks.CAPTURE_LABELS)
+    passmerge.merge(caps[labels[0]], [caps[x] for x in labels[1:]], cap, labels=labels, log=lambda _s: None,
+                    rule="max_each")  # fmt: skip
     e = {**os.environ, "PLAN_ROOT": str(d), "MEMGUARD_GB": "", "CUDA_VISIBLE_DEVICES": "", "LANDING": "high"}
     p = subprocess.run(
         ["bash", str(W / "tools" / "fhe_ssm" / "make_plan.sh"), str(cap), "pass_high"],
@@ -132,7 +142,7 @@ def test_per_pass_staging_keeps_the_graphs_and_the_replies(one_block_pass, spec,
     if d["pass_list"]["configurations"] > 1:
         assert any(t["staged"] for t in passes)  # a configuration change restaged in place
     assert len({t["mem_free_bytes"] for t in passes}) == 1  # no device allocation after setup
-    assert set(d["warmup"]["served"]) <= {"c", "e", "r"}
+    assert set(d["warmup"]["served"]) == {"c"}  # the warm-up captured every stage's graph
 
 
 def config_of(t) -> passmasks.PassConfig:

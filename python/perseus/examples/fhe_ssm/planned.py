@@ -477,18 +477,32 @@ class NotStatic(RuntimeError):
 
 
 def compile_programs(
-    work_dir, plan_dir, cfg, labels, live, metas, schedule, *, recs, infos=None, check_bin=None, log=print
+    work_dir,
+    plan_dir,
+    cfg,
+    labels,
+    live,
+    metas,
+    schedule,
+    *,
+    recs,
+    infos=None,
+    check_bin=None,
+    cpu_check=False,
+    log=print,
 ):
     """``{label: program}`` of the recorded stream under ``plan_dir``: ``_pc.Program.compile`` with the schedule on
-    the device build; on the CPU-only build tools/fhe_ssm/compile_check on the same directories (its compile is the
-    same call without ``live_out`` / ``input_metas``: the carried inputs take the compiler's seeds) and
-    ``CheckedProgram``s (from ``infos`` {label: stream_info} for records whose nodes were streamed out).
-    Returns ``(programs, "device" | "cpu-check")``."""
+    the device build; on the CPU-only build, or on any build under ``cpu_check=True`` (the CPU part of a run,
+    ``run_planned --prepare-only``: its staging dry run reads ``CheckedProgram.pt_keys``, where a device program that
+    no session has bound raises), tools/fhe_ssm/compile_check on the same directories (its compile is the same call
+    without ``live_out`` / ``input_metas``: the carried inputs take the compiler's seeds) and ``CheckedProgram``s (from
+    ``infos`` {label: stream_info} for records whose nodes were streamed out). Returns ``(programs, "device" |
+    "cpu-check")``."""
     from perseus import _pc  # type: ignore[attr-defined]
 
     if schedule not in SCHEDULES:
         raise ValueError(f"schedule must be one of {SCHEDULES}, got {schedule!r}")
-    if hasattr(_pc, "Program"):
+    if hasattr(_pc, "Program") and not cpu_check:
         progs = _pc.Program.compile(
             str(work_dir),
             str(plan_dir),
@@ -552,7 +566,8 @@ class PlannedSsmRun(PlannedRun):
     """``PlannedRun`` for this model (the module docstring). ``model``: the twin ``FheSsmModel`` the recorder runs
     (its geometry and weights); ``bundle``: a client's key bundle file (``from_bundle``; None: in-process keys);
     ``client``: a ``_pc.Client`` holding the client's secret, which decrypts the exported reply (None on a bundle
-    session: the reply is returned as a frame); ``check_bin``: the CPU compile check's binary; ``passes``: under the
+    session: the reply is returned as a frame); ``check_bin``: the CPU compile check's binary, ``cpu_check``: take it
+    on any build (the CPU part, ``run_planned --prepare-only``, and the tests' stand-ins); ``passes``: under the
     pass kernels (``model.pass_kernels == "on"``, and only then) the pass list, ``passmasks.PassConfig`` per pass, its
     first configuration the probes' and the warm-up's (README.md "A pass in any lane configuration")."""
 
@@ -579,6 +594,7 @@ class PlannedSsmRun(PlannedRun):
         profile=False,
         profile_every=1,
         check_bin=None,
+        cpu_check=False,
         ref_token=1,
         probe=2,
         pt_rows=28,
@@ -639,6 +655,7 @@ class PlannedSsmRun(PlannedRun):
         self.n_conv = n_conv  # reply() unpacks n_conv rows; the parked lanes are dropped
         self.schedule, self.bundle, self.client = schedule, bundle, client
         self.pcmm_cf, self.check_bin = int(pcmm_cf), check_bin
+        self.cpu_check = bool(cpu_check)
         self.diag_source = diag_source
         self.tiles_uploaded: list[str] = []
         #: TEST ONLY (a negative control): {tile: factor} uploaded scaled, the twin and the exact forward unchanged
@@ -749,6 +766,7 @@ class PlannedSsmRun(PlannedRun):
             recs={self.labels[b]: r for b, r in ref.items()},
             infos=infos,
             check_bin=self.check_bin,
+            cpu_check=self.cpu_check,
             log=self.log,
         )
         dyn: dict[int, set] = {b: set() for b in ref}
