@@ -57,7 +57,9 @@
 # DIAG_F (diag-tests: 1 = also run (e) the model shape and (f) the timings), REPLAN (1: plan re-cuts an existing plan).
 # `run`, `prepare` and `keyspec` pass the driver --capture <the capture the arm's plan was cut from>, which must be in
 # $OUT (the plan's graph= line names the machine it was cut on, so without it the md5 check does not run; ALLOW_UNCHECKED=1
-# runs without it, recorded as capture.checked false).
+# runs without it, recorded as capture.checked false). CFG_ONLY=<label> (capture, a cfg-* arm): make that one of the four
+# configuration captures and stop, so a small machine makes them under separate memory guards (four in one guarded call
+# accumulated 8.3 GB of swap growth on a 16 GB Mac and tripped the guard); a later call without it reuses them and merges.
 # Nothing here edits a tracked file; captures, plans and records go under OUT.
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
@@ -274,10 +276,12 @@ for lab, cs in passmasks.capture_configurations(p.vocab).items():
     print(lab, cs[1].describe())
 " "$WEIGHTS" "$SEEDS" "$CONFIG" "$d" ) > "$d/configurations.txt" 2>&1 || { cat "$d/configurations.txt"; die "capture $a: the capture configurations"; }
         fi
-        for lab in tick seqfresh seqcarry mixed; do
+        for lab in ${CFG_ONLY:-tick seqfresh seqcarry mixed}; do
+            case " tick seqfresh seqcarry mixed " in *" $lab "*) ;; *) die "capture $a: CFG_ONLY=$lab is not one of tick seqfresh seqcarry mixed" ;; esac
             cc="${c}__$lab"
             [ -f "$d/$lab.passes.json" ] || die "capture $a: no $d/$lab.passes.json (CFG_CONFIGS holds the four lane-config files)"
             if [ -f "$cc/capture_config.json" ]; then log "capture $a: reusing $cc"; continue; fi
+            rm -rf "$cc.part"
             log "capture $a __$lab -> $cc (CPU only): $CAPENV run_fake $CAP --lane-config $d/$lab.passes.json"
             ( cd "$W" && env CUDA_VISIBLE_DEVICES="" PYTHONPATH="$W/python" $CAPENV "$PY" -m perseus.examples.fhe_ssm.run_fake \
                 $MODEL_ARGS $CAP --lane-config "$d/$lab.passes.json" --capture "$cc.part" --capture-tick 1 --out "$cc.fake.json" ) \
@@ -285,6 +289,7 @@ for lab, cs in passmasks.capture_configurations(p.vocab).items():
             high_stamp "$cc.part"
             rm -rf "$cc"; mv "$cc.part" "$cc"
         done
+        if [ -n "${CFG_ONLY:-}" ]; then log "capture $a: __$CFG_ONLY captured in $(( $(date +%s) - t0 )) s, no merge (CFG_ONLY; a call without it reuses the four and merges)"; exit 0; fi
         rm -rf "$c.part"
         ( cd "$W" && env PYTHONPATH="$W/python" "$PY" -m perseus.examples.fhe_ssm.passmerge merge "$c.part" "${c}__tick" \
             "${c}__seqfresh" "${c}__seqcarry" "${c}__mixed" --labels tick seqfresh seqcarry mixed --rule max_each --json "$c.merge.json" ) \
