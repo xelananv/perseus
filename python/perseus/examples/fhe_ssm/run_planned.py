@@ -3,19 +3,26 @@
 
     python -m perseus.examples.fhe_ssm.run_planned --weights W --seeds S --config C [--levels preset] [axis flags]
         --plan DIR --ticks T [--tokens tokens.json [--free-run]] [--schedule program|siblings] [--profile]
-        [--diag-source values|generated] --keys inproc|bundle|DIR | --insecure-test-keys --out record.json
+        [--diag-source values|generated] [--capture DIR] --keys inproc|bundle|DIR | --insecure-test-keys --out record.json
+    ... --pass-kernels on [--scenario tick[:K] | prefill:T | doc:T:readers | mixed | churn | --lane-config FILE]
+                                         a pass in any lane configuration (--ticks = the pass count of tick)
     ... --prepare-only [--lean]          the CPU part: record the twin, compile (check) against the plan, no session
     ... --keyspec [FILE]                 the key request: the model's needs, and the session's on the device build
     ... --keygen DIR --keyspec-file F    the client role: a secret and the bundle DIR/keys.pckb for a key request
 
 The record (rewritten after every tick) holds per tick the wall, the stage walls under --profile, the runtime's
 counters, the reply's relErrRms against the exact forward and the tied head's top-1 agreement, the free run's
-picks. README.md "Running under a plan on a GPU" names what each field measures and what is GPU-only.
+picks. Under ``--pass-kernels on`` each entry of ``ticks`` is one pass: its configuration, what was restaged before it
+and in how long, the live lane-slots it scored against ``ref.ExactModel.pass_`` (the worst one, top-1 at every
+sequence's last position and every live conversation), the counters; ``--prepare-only`` adds the staging's dry run on
+the CPU stand-in. README.md "Running under a plan on a GPU" and "A pass in any lane configuration" name what each field
+measures and what is GPU-only.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import hashlib
 import json
 import os
@@ -25,7 +32,7 @@ import shutil
 import subprocess
 import sys
 import time
-from typing import Any
+from typing import Any, cast
 
 import numpy as np
 
@@ -33,14 +40,22 @@ from perseus import config
 from perseus._paths import resolve
 from perseus.plan import contract
 
-from . import diaggen, fakes, run_fake
+from . import diaggen, fakes, passmasks, run_fake
 from . import scales as scales_mod
 from .block import PACK_STATS
 from .decode import FreeRun, Policy, prompt_lengths, streams_from_record
 from .geometry import LINEARS, PCMM_WBITS, ROUTES
-from .model import FheSsmModel
+from .model import PASS_KERNELS, FheSsmModel
 from .norm import NEWTON_FORMS, NEWTON_SITES
-from .planned import LOCKSTEP_REFUSED, N32_Q_PRIMES, SCHEDULES, PlannedSsmRun, SsmRecorder, key_needs
+from .planned import (
+    LOCKSTEP_REFUSED,
+    N32_Q_PRIMES,
+    SCHEDULES,
+    NotStatic,
+    PlannedSsmRun,
+    SsmRecorder,
+    key_needs,
+)
 from .ref import ExactModel, MirrorModel, rel_err_rms
 from .weights import LANE_MIX, load_model
 
@@ -241,6 +256,106 @@ def token_streams(a, vocab: int, n: int, ticks: int) -> tuple[list[list[int]], F
     return streams, free, meta
 
 
+# ── the passes (the pass kernels) ───────────────────────────────────────────────────────────────────────────────
+
+
+def pass_list_of(a, vocab: int, capacity: int) -> tuple[list[passmasks.PassConfig], dict]:
+    """The pass list a run names (``--lane-config FILE`` or ``--scenario``; ``tick`` alone is ``tick:<--ticks>``),
+    validated through one ``passmasks.Tracker``, and what the record keeps of it."""
+    if a.lane_config:
+        cfgs = passmasks.load_list(a.lane_config)
+        spec = None
+    else:
+        spec = a.scenario or "tick"
+        if spec == "tick":
+            if a.ticks < 1:
+                raise SystemExit(f"--scenario tick runs --ticks passes, got --ticks {a.ticks}")
+            spec = f"tick:{int(a.ticks)}"
+        if a.conversations is not None and not spec.startswith("tick"):
+            raise SystemExit(
+                "--conversations shapes the tick scenario only (a configuration names its own lane-slots)"
+            )
+        try:
+            cfgs = passmasks.scenario(
+                spec, vocab=vocab, seed=a.seed, lane_slots=capacity, conversations=a.conversations
+            )
+        except ValueError as e:
+            raise SystemExit(f"--scenario {spec}: {e}") from None
+    bad = sorted({c.lane_slots for c in cfgs} - {capacity})
+    if bad:
+        raise SystemExit(f"a configuration of {bad} lane-slots for a layout of {capacity}")
+    try:
+        passmasks.validate_list(cfgs)
+    except ValueError as e:
+        raise SystemExit(f"the pass list: {e}") from None
+    keys: list[tuple] = []
+    for c in cfgs:
+        if c.mask_key() not in keys:
+            keys.append(c.mask_key())
+    meta = {
+        "scenario": spec,
+        "lane_config": a.lane_config,
+        "lane_config_sha256": sha256_file(a.lane_config) if a.lane_config else None,
+        "passes": len(cfgs),
+        "configurations": len(keys),
+        "config_ids": [keys.index(c.mask_key()) for c in cfgs],
+        "list": passmasks.dump_list(cfgs),
+    }
+    return cfgs, meta
+
+
+def redrawn(cfg: passmasks.PassConfig, rng, vocab: int) -> passmasks.PassConfig:
+    """``cfg`` with fresh random tokens on its live lane-slots, padding and parked lane-slots copying their sources:
+    the probes' and the warm-up's public rows (the configuration fixed, never a pass's own tokens)."""
+    toks = [int(x) for x in rng.integers(0, vocab, cfg.lane_slots)]
+    for seg in cfg.segments:
+        for q in seg.padding:
+            toks[q] = toks[seg.q0]
+    for seg in cfg.segments:
+        if seg.entry == "parked":
+            toks[seg.q0] = toks[int(seg.parked_from)]  # type: ignore[arg-type]
+    out = dataclasses.replace(cfg, tokens=tuple(toks))
+    passmasks.validate(out)
+    return out
+
+
+def pass_census(cfg: passmasks.PassConfig) -> dict:
+    """What a pass serves (the numbers table's inputs): token-values = the live lane-slots (sequence positions and live
+    conversations; padding and parked lane-slots excluded), the positions per sequence, the conversations."""
+    return {
+        "token_values": len(cfg.live_slots()),
+        "sequences": {str(s.stream): len(s.positions) for s in cfg.segments if s.kind == "seq"},
+        "conversations": sum(1 for s in cfg.segments if s.kind == "conv" and s.live),
+        "parked": sum(1 for s in cfg.segments if s.entry == "parked"),
+        "padding": sum(len(s.padding) for s in cfg.segments),
+    }
+
+
+def score_pass(cfg: passmasks.PassConfig, got, want, emb) -> dict:
+    """The reply of one pass against the exact reference, per lane-slot (``q`` order): relErrRms over the live
+    lane-slots, the worst one, the logits' relErrRms, top-1 of the tied head at every next-token lane-slot (each
+    sequence's last position, each live conversation)."""
+    live, ends = cfg.live_slots(), cfg.next_token_slots()
+    per = {q: rel_err_rms(got[q], want[q]) for q in live}
+    worst = max(per, key=lambda q: per[q])
+    top_g = np.argmax(np.asarray(got[ends]) @ emb.T, axis=1)
+    top_w = np.argmax(np.asarray(want[ends]) @ emb.T, axis=1)
+    return {
+        "relErrRms_vs_exact": rel_err_rms(got[live], want[live]),
+        "relErrRms_vs_exact_worst_lane_slot": {"q": int(worst), "relErrRms": per[worst]},
+        "logits_relErrRms_vs_exact": rel_err_rms(
+            np.asarray(got[live]) @ emb.T, np.asarray(want[live]) @ emb.T
+        ),
+        "top1": {
+            "agree": int(np.sum(top_g == top_w)),
+            "of": len(ends),
+            "slots": [int(q) for q in ends],
+            "disagree": [int(q) for q, g, w in zip(ends, top_g, top_w, strict=True) if g != w],
+        },
+        "top1_agree_vs_exact": float(np.mean(top_g == top_w)),
+    }
+
+
 # ── the keys ────────────────────────────────────────────────────────────────────────────────────────────────────
 
 
@@ -369,6 +484,13 @@ def add_model_args(ap: argparse.ArgumentParser) -> None:
     ap.add_argument("--newton-min-iters", type=int, default=12)
     ap.add_argument("--no-carry", action="store_true", help="refused: a plan binds the carried circuit")
     ap.add_argument("--streams", type=int, default=1, help="ciphertext sets per stage (only 1 is captured)")
+    ap.add_argument(
+        "--pass-kernels",
+        default="off",
+        choices=PASS_KERNELS,
+        help="on = a pass in any lane configuration (passmasks.py): the scan, the token shift and the carry prep as "
+        "the pass kernels; the passes from --scenario or --lane-config (a capture flag too: the capture name carries it)",
+    )
 
 
 def parser() -> argparse.ArgumentParser:
@@ -386,7 +508,22 @@ def parser() -> argparse.ArgumentParser:
         metavar="DIR",
         help="the capture the plan was cut from (md5-checked; default: the plan's own path when present)",
     )
-    g.add_argument("--ticks", type=int, default=2, help="timed ticks after the warm-up")
+    g.add_argument(
+        "--ticks", type=int, default=2, help="timed ticks after the warm-up (--scenario tick: the pass count)"
+    )
+    g.add_argument(
+        "--scenario",
+        default=None,
+        metavar="NAME",
+        help="with --pass-kernels on: tick[:K] | prefill:T | doc:T:readers | mixed | churn (default tick; tick alone "
+        "runs --ticks passes); a run flag, never a capture's",
+    )
+    g.add_argument(
+        "--lane-config",
+        default=None,
+        metavar="FILE",
+        help="with --pass-kernels on: a JSON list of pass configurations, one per pass (passmasks.PassConfig.to_json)",
+    )
     g.add_argument("--tokens", default=None, help="a serve run's token record (teacher-forced)")
     g.add_argument(
         "--free-run",
@@ -535,7 +672,7 @@ def make_twin(a):
     model = FheSsmModel(
         inf, params, core=core, unit=a.unit, newton_form=a.newton_form, canonical_carry=True, resident_weights=False,
         layout=a.layout, payload=a.payload, pair_route=a.pair_route, scales=scales, pack_stats=a.pack_stats,
-        linear=a.linear, diag_hint=a.diag_hint, pcmm_wbits=a.pcmm_wbits,
+        linear=a.linear, diag_hint=a.diag_hint, pcmm_wbits=a.pcmm_wbits, pass_kernels=a.pass_kernels,
     )  # fmt: skip
     run_fake._rot_band(fhe, model)
     diaggen.use_source(inf, a.diag_source)
@@ -629,6 +766,7 @@ def prepare_report(run: PlannedSsmRun) -> dict:
         "sums": sum_census(run),
         "prepare_s": round(run.prepare_s, 1),
         "rotation_steps": sorted({int(s) for p in run.progs.values() for s in p.rot_steps()}),
+        "pass_kernels": run.pass_mode,
     }
     if run.pcmm_specs():
         rep["pcmm"] = {"declared": [s[0] for s in run.pcmm_specs()], **run.check_pcmm_names()}
@@ -639,6 +777,85 @@ def prepare_report(run: PlannedSsmRun) -> dict:
             "bytes": sum(8 * d_in * d_out for d_in, d_out, _t in tiles.values()),
         }
     return rep
+
+
+def run_passes(
+    a, run: PlannedSsmRun, params, pass_list: list[passmasks.PassConfig], header: dict, out, log
+) -> None:
+    """The device passes under the pass kernels: the warm-up (the first pass's configuration on random public tokens,
+    from zero state: it captures the CUDA graphs), then every pass of the list, each staged (the keys whose values
+    change, in place, inside the clock), issued, read and scored per lane-slot against ``ref.ExactModel.pass_``; a
+    generated token is the tied head's argmax on the previous pass's decrypted reply at its lane-slot. Each pass's row
+    goes into ``header["ticks"]``, the record rewritten after every pass."""
+    cap = run.model.capacity
+    emb = np.asarray(params.emb, dtype=np.float64)
+    replies = pathlib.Path(out).with_name(pathlib.Path(out).stem + ".replies")
+    mirror = (
+        MirrorModel(
+            params, cap, run.model.form, scales=run.model.scales, linear=a.linear, pcmm_wbits=a.pcmm_wbits
+        )
+        if a.mirror
+        else None
+    )
+    meta = cast("dict", header["pass_list"])
+    ids = meta["config_ids"]
+
+    def one(p: int, cfg, rows_q, exact, timed: bool):
+        c0 = run.counters()
+        t1 = time.perf_counter()
+        st = run.stage_pass(cfg)
+        reg, host = run.token(p, {p: rows_q})
+        got, frame, level = run.reply(reg)
+        seconds = time.perf_counter() - t1
+        c1 = run.counters()
+        row = {
+            "pass": p, "timed": timed, "config": cfg.name, "config_id": ids[p] if timed else ids[0],
+            "segments": [s.to_json() for s in cfg.segments], "describe": cfg.describe(),
+            "seconds": round(seconds, 3), "fenced": host["fenced"], "issue_s": host["issue_s"], "served": host["served"],
+            "restaged": st["staged"] > 0, **st, "out_level": level,
+            "refreshes_planned": header["prepare"]["refreshes_planned"],
+            "counters": stats_delta(c0["planned_stats"], c1["planned_stats"]), "mem_free_bytes": c1["mem_free_bytes"],
+            "stages": host["stages"] if a.profile else None, **pass_census(cfg),
+            "diag": {k: c1["diag_stats"][k] - c0["diag_stats"][k] for k in DIAG_COUNTERS} if "diag_stats" in c1 else None,
+        }  # fmt: skip
+        want = exact.pass_(cfg, rows_q)
+        if got is None:
+            replies.mkdir(parents=True, exist_ok=True)
+            f = replies / f"pass_{p}{'' if timed else '_warmup'}.ct"
+            f.write_bytes(frame)
+            row["reply_frame"] = str(f)
+            return row, None
+        row.update(score_pass(cfg, got, want, emb))
+        if mirror is not None and timed:
+            live = cfg.live_slots()
+            row["relErrRms_vs_mirror"] = rel_err_rms(got[live], mirror.pass_(cfg, rows_q)[live])
+        return row, got
+
+    if not a.no_warmup:
+        wcfg = redrawn(pass_list[0], np.random.default_rng(a.seed + 1), params.vocab)
+        row, _ = one(0, wcfg, passmasks.pass_rows(wcfg, params.emb_row), ExactModel(params, cap), False)
+        row["note"] = (
+            "untimed: the first pass's configuration on random public tokens, from zero state; captures the CUDA graphs"
+        )
+        header["warmup"] = row
+        write_json(out, header)
+        log(json.dumps({k: v for k, v in row.items() if k not in ("stages", "segments")}, default=_jsonable))
+    exact = ExactModel(params, cap)
+    prev = None
+    resolved: list[passmasks.PassConfig] = []
+    for p, cfg0 in enumerate(pass_list):
+        if passmasks.GENERATED in cfg0.tokens and prev is None:
+            raise SystemExit(
+                f"pass {p} ({cfg0.name}): a generated token needs the previous pass's decrypted reply; this session "
+                "exports frames only (a bundle without client_secret.bin)"
+            )
+        cfg = passmasks.resolve_generated(cfg0, prev, emb)
+        resolved.append(cfg)
+        row, prev = one(p, cfg, passmasks.pass_rows(cfg, params.emb_row), exact, True)
+        header["ticks"].append(row)
+        meta["resolved"] = passmasks.dump_list(resolved)
+        write_json(out, header)
+        log(json.dumps({k: v for k, v in row.items() if k not in ("stages", "segments")}, default=_jsonable))
 
 
 def run_mode(a) -> str:
@@ -664,6 +881,16 @@ def main(argv=None) -> int:
         raise SystemExit(f"--ref-token {a.ref_token} must be >= 1 and below --probe {a.probe}")
     if a.free_run and not a.tokens:
         raise SystemExit("--free-run needs --tokens: a serve record's prompts and decode policy")
+    if a.pass_kernels == "on":
+        if a.free_run or a.tokens:
+            raise SystemExit(
+                "--pass-kernels on: a pass's tokens are its configuration's (--scenario / --lane-config); --tokens and "
+                "--free-run are the ticks' (a free run per lane-slot is not built)"
+            )
+        if a.lane_config and a.scenario:
+            raise SystemExit("--lane-config and --scenario name the passes twice: give one")
+    elif a.lane_config or a.scenario:
+        raise SystemExit("--lane-config / --scenario need --pass-kernels on")
     mode = run_mode(a)
     if mode == "keygen":
         return keygen(a)
@@ -709,9 +936,24 @@ def main(argv=None) -> int:
     if a.diag_batch is not None:
         cfg["host.diag_batch"] = int(a.diag_batch)
     ticks = max(int(a.ticks), 0)
-    streams, free, tok_meta = token_streams(a, params.vocab, n, max(ticks, a.probe))
-    # a free run feeds its picks back into its own copy of the streams: the rows read that copy
-    rows = TokenRows(params, streams if free is None else free.streams, max(ticks, a.probe))
+    pass_on = a.pass_kernels == "on"
+    pass_list: list[passmasks.PassConfig] | None = None
+    pass_meta: dict | None = None
+    free: FreeRun | None = None
+    rows: Any
+    if pass_on:
+        pass_list, pass_meta = pass_list_of(a, params.vocab, model.capacity)
+        # the probes record the first pass's configuration (PlannedSsmRun.probe_cfg) on fresh random tokens each
+        rng = np.random.default_rng(a.seed + 2)
+        rows = [
+            passmasks.pass_rows(redrawn(pass_list[0], rng, params.vocab), params.emb_row)
+            for _ in range(a.probe)
+        ]
+        tok_meta: dict = {"tokens": f"the pass list's; the probes and the warm-up random (seed {a.seed})"}
+    else:
+        streams, free, tok_meta = token_streams(a, params.vocab, n, max(ticks, a.probe))
+        # a free run feeds its picks back into its own copy of the streams: the rows read that copy
+        rows = TokenRows(params, streams if free is None else free.streams, max(ticks, a.probe))
     labels = [f"block_{b}" for b in range(model.n_layers + 1)]
     keys = _pc.KeySource.generate([], conj=True, layout="packed") if device else None
     out = pathlib.Path(a.out)
@@ -723,9 +965,9 @@ def main(argv=None) -> int:
         )
     run = PlannedSsmRun(
         SsmRecorder(model, model.n_layers, lean=a.lean and mode != "run"), plan, cfg, labels, keys, model=model,
-        conversations=n, work_dir=work, schedule=a.schedule, bundle=None if bundle is None else bundle / "keys.pckb", client=client,
+        conversations=None if pass_on else n, work_dir=work, schedule=a.schedule, bundle=None if bundle is None else bundle / "keys.pckb", client=client,
         pcmm_cf=a.pcmm_cf, diag_source=a.diag_source, profile=a.profile, profile_every=a.profile_every, ref_token=a.ref_token, probe=a.probe,
-        pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool, log=log,
+        pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool, passes=pass_list, log=log,
     )  # fmt: skip
     needs = key_needs(model)
     header: dict = {
@@ -748,8 +990,10 @@ def main(argv=None) -> int:
         "axes": model.axes(),
         "diag_source": a.diag_source,
         "levels": levels,
-        "conversations": n,
+        "conversations": run.n_conv,
         "capacity": model.capacity,
+        "pass_kernels": a.pass_kernels,
+        "pass_list": pass_meta,
         "key_needs": needs,
         "keys": {
             "mode": "insecure-inproc" if keys_mode == KEYS_INPROC else keys_mode,
@@ -764,7 +1008,13 @@ def main(argv=None) -> int:
         header["scales_file"] = {"path": str(path), "sha256": sha256_file(path)}
     if keys_mode == KEYS_INPROC:
         log(f"[planned] {INSECURE_BANNER}")
-    run.prepare(rows)
+    try:
+        run.prepare(rows)
+    except NotStatic as e:  # the pass kernels: one op stream for every configuration, or no run
+        header["prepare"] = prepare_report(run)
+        header["ticks"] = []
+        write_json(out, header)
+        raise SystemExit(f"{e} (record {out})") from None
     header["prepare"] = prepare_report(run)
     if mode == "keyspec":
         doc: dict[str, Any] = {"model": needs, "session": None, "note": None}
@@ -781,6 +1031,14 @@ def main(argv=None) -> int:
             pathlib.Path(a.keyspec).write_text(text, encoding="utf-8")
         return 0
     if mode == "prepare":
+        if pass_on:
+            # the setup's and every pass's staging on the CPU stand-ins (FakeStore; a lean record stages digests)
+            dry = run.staging_dry_run(keep_values=not run.rec.lean)
+            header["prepare"]["staging_dry_run"] = dry
+            log(
+                f"[planned] staging dry run: {dry['setup_staged']} items at setup ({dry['store_keys']} store keys, "
+                f"{dry['pass_keys']} pass keys), staged per pass {[r['staged'] for r in dry['passes']]}"
+            )
         header["ticks"] = []
         write_json(out, header)
         errs = header["prepare"]["check_errors"]
@@ -790,12 +1048,14 @@ def main(argv=None) -> int:
         return 1 if errs else 0
     # the device path
     budget = header["prepare"]["plaintexts"]
-    if budget["bytes"] > a.pt_budget_gb * GiB:
+    held = budget["by_alias"]  # the store holds one slot per distinct (alias, level) pair (session_kwargs)
+    if held["bytes"] > a.pt_budget_gb * GiB:
         raise SystemExit(
-            f"--linear {a.linear}: the programs read {budget['plaintexts']} distinct plaintexts, resident at "
-            f"{budget['rows']} rows each = {budget['bytes'] / GiB:.1f} GiB (PlannedRun keeps one slot per plaintext); "
-            f"over --pt-budget-gb {a.pt_budget_gb}. The diagonal linears run on the device diagonal encoder "
-            "(--diag-source generated: no store slot per diagonal; README.md); the PCMM arms run resident"
+            f"--linear {a.linear}: the programs read {budget['plaintexts']} distinct plaintexts ({held['slots']} "
+            f"distinct store slots by alias), resident at {budget['rows']} rows each = {held['bytes'] / GiB:.1f} GiB "
+            f"(one slot per distinct value and level); over --pt-budget-gb {a.pt_budget_gb}. The diagonal linears run "
+            "on the device diagonal encoder (--diag-source generated: no store slot per diagonal; README.md); the PCMM "
+            "arms run resident"
         )
     if bundle is not None:
         header["keys"]["bundle_info"] = check_bundle(bundle, cfg, needs)
@@ -821,6 +1081,8 @@ def main(argv=None) -> int:
         "rotation_keys": list(run.rot_keys),
         "registers": run.n_regs,
         "pcmm_uploaded": list(run.uploaded),
+        "plaintexts_staged": run.staged_at_setup,
+        "pass_masks": run.pass_setup,
         "diag_tiles_uploaded": len(run.tiles_uploaded),
         "diag": run.counters().get("diag_stats"),
         "has_secret": bool(run.sess.has_secret),
@@ -833,6 +1095,10 @@ def main(argv=None) -> int:
         log(f"[planned] diag probe: {json.dumps(header['setup']['diag_probe']['levels'])}")
     header["ticks"] = []
     write_json(out, header)
+    if pass_list is not None:
+        run_passes(a, run, params, pass_list, header, out, log)
+        run.close()
+        return 0
     exact = ExactModel(params, n)
     mirror = (
         MirrorModel(params, n, model.form, scales=model.scales, linear=a.linear, pcmm_wbits=a.pcmm_wbits)

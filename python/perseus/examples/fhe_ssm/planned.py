@@ -10,7 +10,14 @@ without per-tick recording (the stream is the same every tick, verified on the p
 process or exported as a frame for the client, and a device fence per stage under ``--profile``. On the CPU-only
 build ``prepare`` compiles through ``tools/fhe_ssm/compile_check`` and ``CheckedProgram`` stands in for the
 programs. Under ``diag_source="generated"`` (``diaggen``) the diagonals are made on the device from declared tiles.
-README.md "Running under a plan on a GPU", "The device diagonal encoder".
+Under the pass kernels (``FheSsmModel(pass_kernels="on")`` and ``passes=`` a list of ``passmasks.PassConfig``) one op
+stream serves every lane configuration: the twin records the probe configuration (the first pass's), keeping each
+pass-mask product as a ``PassPt`` (its mask id and values); the store keys of the masks are aliased by mask id and the
+static ones by value digest, the store is sized by the distinct (alias, level) pairs, and before every pass the keys
+whose values change are re-encoded in place (``stage_pass``); block 0's input and the reply go through the lane-slot
+permutation (``passmasks.to_layout`` / ``from_layout``). ``CheckedProgram.pt_keys`` / ``alias_pts`` and ``FakeStore``
+stand in for the device's on the CPU. README.md "Running under a plan on a GPU", "The device diagonal encoder", "A pass
+in any lane configuration".
 """
 
 from __future__ import annotations
@@ -30,7 +37,7 @@ from perseus.impl import pcmm as pcmm_mod
 from perseus.impl.driver import PlannedRun, Recorder, diff_block
 from perseus.impl.ops import FheOps
 
-from . import diaggen, filling, pairs
+from . import diaggen, filling, pairs, passmasks
 from .geometry import KINDS, PairGeometry, park
 from .model import STATE_NAMES, FheSsmModel
 
@@ -59,6 +66,10 @@ PROGRAM_FIELDS = (
     "check",
     "mem",
 )
+#: a pass-mask plaintext's store alias is its mask id (``passmasks.mask_id``: ``pass/b<b>/...`` or ``pass/k2/...``), a
+#: static plaintext's ``v/<the digest of its values>``: the two prefixes keep the partitions apart
+PASS_PREFIX = "pass/"
+STATIC_PREFIX = "v/"
 
 
 # ── what the layout asks of the keys ────────────────────────────────────────────────────────────────────────────
@@ -102,9 +113,54 @@ class LeanValues:
         self.digest, self.shape = digest(a), tuple(a.shape)
 
 
+class PassPt:
+    """What the planned twin's recorder keeps for a pass-mask plaintext (``passkernel.pass_mult_recorder``: a ``Pt`` with
+    ``src = ("pass", mask_id)``): the mask id and its full slot vector in every mode (``LeanValues`` of it under
+    ``--lean``). Never a marker without values: a marker staged on the device would reach ``PtStore.stage``'s float64
+    conversion (``crates/pc-py/src/store.rs`` ``host_values``). The driver stages a pass key under its id and restages it
+    per pass from ``passmasks.masks`` (``PlannedSsmRun.stage_static`` / ``stage_pass``); the recorded values are the
+    probe configuration's."""
+
+    __slots__ = ("_digest", "mask_id", "vec")
+
+    def __init__(self, mask_id: str, vec):
+        mask_id = str(mask_id)
+        if not mask_id.startswith(PASS_PREFIX) or "#" in mask_id:
+            raise ValueError(f"a pass mask id starts with {PASS_PREFIX!r} and holds no '#': {mask_id!r}")
+        self.mask_id, self.vec = mask_id, vec
+        self._digest: str | None = None
+
+    @property
+    def digest(self) -> str:
+        """The digest of the values (``digest``; a lean record's own)."""
+        if self._digest is None:
+            self._digest = self.vec.digest if isinstance(self.vec, LeanValues) else digest(self.vec)
+        return self._digest
+
+    def __repr__(self) -> str:
+        return f"PassPt({self.mask_id!r}, {self.digest})"
+
+
+def store_alias(v) -> str:
+    """The store alias of a recorded plaintext (``PlannedSsmRun.pt_aliases``): a ``PassPt`` by identity, its mask id; any
+    other plaintext by value, ``v/<digest>`` (a ``LeanValues`` carries the same digest as the values it stands for)."""
+    if isinstance(v, PassPt):
+        return v.mask_id
+    if isinstance(v, diaggen.GeneratedPt):
+        raise TypeError(f"{v!r} is generated inside a fused sum: it has no store slot")
+    return STATIC_PREFIX + (v.digest if isinstance(v, LeanValues) else digest(v))
+
+
 def values_equal(a, b) -> bool:
     if isinstance(a, diaggen.GeneratedPt) or isinstance(b, diaggen.GeneratedPt):
         return a == b
+    if isinstance(a, PassPt) or isinstance(b, PassPt):
+        return (
+            isinstance(a, PassPt)
+            and isinstance(b, PassPt)
+            and a.mask_id == b.mask_id
+            and values_equal(a.vec, b.vec)
+        )
     if isinstance(a, LeanValues) or isinstance(b, LeanValues):
         return isinstance(a, LeanValues) and isinstance(b, LeanValues) and a.digest == b.digest
     return a is b or bool(np.array_equal(a, b))
@@ -160,7 +216,9 @@ class SsmRecorder(Recorder):
     ``FheSsmModel.name_state`` at stage entry would never enter ``_rec_objs`` and ``prepare`` would not carry it.
     ``lean``: a bind check without a session on a small machine: plaintext values kept as digests (``LeanValues``),
     and each block's nodes reduced to ``stream_info`` at stage end (``infos[(t, b)]``), the reference token's graph
-    written to ``sink = (work_dir, ref_token)`` as it goes (the model's 25 stages hold about 280 MB of nodes each)."""
+    written to ``sink = (work_dir, ref_token)`` as it goes (the model's 25 stages hold about 280 MB of nodes each). A
+    pass-mask product (``src = ("pass", mask_id)``, the pass kernels) is kept as a ``PassPt``: the id and the full vector
+    in every mode (its ``LeanValues`` when lean)."""
 
     def __init__(self, model, n_layers, lean=False, sink=None):
         super().__init__(model, n_layers)
@@ -180,11 +238,21 @@ class SsmRecorder(Recorder):
                 fhe._rec_metas[name] = (int(ct.level), int(ct.noise_deg))
 
         fhe.name_ct = rec_name_ct
-        # a generated diagonal (diaggen.diag_sum_recorder) is kept by name, never by its vector, in every mode
+        # a generated diagonal (diaggen.diag_sum_recorder) is kept by name, never by its vector, in every mode; a pass
+        # mask (passkernel.pass_mult_recorder) as a PassPt: its id and its full vector (a digest of it when lean)
         kept_pt_var = fhe.pt_var  # Recorder's rec_pt_var (this recorder's), wrapped below once more when lean
         base_pt_var = fhe._rec_orig[0]
 
+        def pass_pt_var(pt):
+            new = not (pt.gen == fhe.gen and pt.name)
+            name = base_pt_var(pt)
+            if new and fhe.nodes is not None:
+                fhe._rec_pts[name] = PassPt(pt.src[1], LeanValues(pt.vec) if self.lean else pt.vec)
+            return name
+
         def diag_pt_var(pt):
+            if pt.src[0] == "pass":
+                return pass_pt_var(pt)
             if pt.src[0] != "diag":
                 return kept_pt_var(pt)
             new = not (pt.gen == fhe.gen and pt.name)
@@ -198,7 +266,7 @@ class SsmRecorder(Recorder):
             pt_var = fhe._rec_orig[0]
 
             def lean_pt_var(pt):
-                if pt.src[0] == "diag":
+                if pt.src[0] in ("diag", "pass"):
                     return diag_pt_var(pt)
                 new = not (pt.gen == fhe.gen and pt.name)
                 name = pt_var(pt)
@@ -260,7 +328,12 @@ def default_check_bin() -> str:
 class CheckedProgram:
     """What ``PlannedRun.prepare`` reads of a compiled ``_pc.Program``, on the CPU-only build: the inputs, outputs
     and plaintext references from the recorded stream, the counters from the compile check's row
-    (``compile_check --json``). The device's ``bind`` / ``run`` / ``pt_keys`` raise."""
+    (``compile_check --json``). The staging's stand-in (with ``FakeStore``): ``pt_keys`` derived from the recorded
+    references as the bind names them (a graph's ``pt_N`` under its block, ``<block>/pt_N``, at its level; a plaintext
+    generated inside a fused sum holds no key: ``crates/pc-program/src/bind.rs``), ``alias_pts`` renaming them and
+    recording its map (refused once ``n_graphs`` > 0, as the device refuses it after a graph capture). The levels are the
+    twin's recorded ones; a device program's are the compiled ones. The device's ``bind`` / ``run`` / ``mark_dynamic``
+    raise."""
 
     def __init__(self, label: str, rec, live: list[str], row: dict, info: dict | None = None):
         self.label, self.row = label, dict(row)
@@ -273,6 +346,13 @@ class CheckedProgram:
         self.outputs = [(n, *by_out.get(n, (0, 1)), 0.0) for n in live]
         self._out_pos = {n: i for i, n in enumerate(live)}
         self.pt_refs = list(info["pt_refs"])
+        # one key per store reference, in reference order, renamed in place by alias_pts (Bound.pts on the device)
+        self._keys: list[list] = [
+            [f"{label}/{nm}", int(lv)] for nm, lv, _d, f in self.pt_refs if f not in GENERATED_FORMS
+        ]
+        #: alias_pts' maps, merged ({store name: alias}); a stand-in graph capture counter (alias_pts refused after one)
+        self.aliases: dict[str, str] = {}
+        self.n_graphs = 0
         self._rot = list(info["rot_steps"])
         self.n_ops = int(info["n_ops"])
         self.n_launches = int(row.get("launches", 0))
@@ -309,14 +389,91 @@ class CheckedProgram:
     def run(self, *_a, **_k):
         self._device("run")
 
-    def pt_keys(self):
-        self._device("pt_keys")
+    def pt_keys(self) -> list[tuple[str, int]]:
+        """``Program.pt_keys`` on the CPU: the distinct ``(store name, level)`` keys in first-use order, under their
+        aliases once ``alias_pts`` renamed them (``Bound::pt_keys``)."""
+        out: list[tuple[str, int]] = []
+        seen: set[tuple[str, int]] = set()
+        for nm, lv in self._keys:
+            k = (str(nm), int(lv))
+            if k not in seen:
+                seen.add(k)
+                out.append(k)
+        return out
 
-    def alias_pts(self, *_a):
-        self._device("alias_pts")
+    def alias_pts(self, alias: dict[str, str]) -> int:
+        """``Program.alias_pts`` on the CPU: every reference whose store name ``alias`` maps is renamed (the count is
+        returned, as the device's); refused after a graph capture (``crates/pc-py/src/program.rs``: the alias map is
+        permanent once a graph baked the rows)."""
+        if self.n_graphs > 0:
+            raise RuntimeError(f"{self.label}: alias_pts after a graph capture")
+        n = 0
+        for k in self._keys:
+            to = alias.get(k[0])
+            if to is not None:
+                k[0] = str(to)
+                n += 1
+        self.aliases.update(alias)
+        return n
 
     def mark_dynamic(self, *_a):
         self._device("mark_dynamic")
+
+
+class FakeStore:
+    """The CPU stand-in of the session's ``PtStore`` (``crates/pc-py/src/store.rs``) for the staging the driver does:
+    ``stage`` takes ``[(name, level, values[, deg])]`` as the device's does and returns the count; each key stays
+    resident under its ``(name, level)`` and keeps its slot when staged again (the device re-encodes a resident key in
+    place); ``log`` holds ``(name, level, digest)`` per staged item, ``calls`` the items per call. ``keep_values=False``
+    keeps digests only (a lean recorder's static plaintexts are digests: the model-shape dry run). Values must be what
+    the device converts (a real or complex numpy vector): a recorder's marker (``PassPt``, ``GeneratedPt``) is refused,
+    as is a digest where values are kept."""
+
+    def __init__(self, keep_values: bool = True):
+        self.keep_values = bool(keep_values)
+        self.resident: dict[tuple[str, int], np.ndarray] = {}
+        self.digests: dict[tuple[str, int], str] = {}
+        self.slots: dict[tuple[str, int], int] = {}
+        self.log: list[tuple[str, int, str]] = []
+        self.calls: list[int] = []
+
+    def stage(self, items) -> int:
+        n = 0
+        for it in items:
+            if len(it) < 3:
+                raise ValueError("FakeStore.stage item = (name, level, values[, deg])")
+            name, level, v = str(it[0]), int(it[1]), it[2]
+            if isinstance(v, (PassPt, diaggen.GeneratedPt)):
+                raise TypeError(f"FakeStore.stage {name}@{level}: {v!r} is a recorder's record, not values")
+            key = (name, level)
+            if isinstance(v, LeanValues):
+                if self.keep_values:
+                    raise TypeError(f"FakeStore.stage {name}@{level}: a digest where the store keeps values")
+                dg = v.digest
+            else:
+                a = np.ascontiguousarray(v)
+                if a.ndim != 1 or a.dtype.kind not in "fc":
+                    raise TypeError(f"FakeStore.stage {name}@{level}: a {a.dtype} array of shape {a.shape}")
+                dg = digest(a)
+                if self.keep_values:
+                    self.resident[key] = a
+            self.slots.setdefault(key, len(self.slots))
+            self.digests[key] = dg
+            self.log.append((name, level, dg))
+            n += 1
+        self.calls.append(n)
+        return n
+
+    def has(self, name: str, level: int) -> bool:
+        return (str(name), int(level)) in self.digests
+
+    def __len__(self) -> int:
+        return len(self.digests)
+
+
+class NotStatic(RuntimeError):
+    """``prepare`` under the pass kernels found the stream not static across the probes: refused (a configuration may
+    enter the stream only through pass-mask plaintexts, never through a scalar, a rotation step or a skipped op)."""
 
 
 def compile_programs(
@@ -395,7 +552,13 @@ class PlannedSsmRun(PlannedRun):
     """``PlannedRun`` for this model (the module docstring). ``model``: the twin ``FheSsmModel`` the recorder runs
     (its geometry and weights); ``bundle``: a client's key bundle file (``from_bundle``; None: in-process keys);
     ``client``: a ``_pc.Client`` holding the client's secret, which decrypts the exported reply (None on a bundle
-    session: the reply is returned as a frame); ``check_bin``: the CPU compile check's binary."""
+    session: the reply is returned as a frame); ``check_bin``: the CPU compile check's binary; ``passes``: under the
+    pass kernels (``model.pass_kernels == "on"``, and only then) the pass list, ``passmasks.PassConfig`` per pass, its
+    first configuration the probes' and the warm-up's (README.md "A pass in any lane configuration")."""
+
+    #: the pass kernels' state (class defaults, so a run built without ``__init__`` reads the off path)
+    pass_mode = False
+    passes: list[passmasks.PassConfig] | None = None
 
     def __init__(
         self,
@@ -421,6 +584,7 @@ class PlannedSsmRun(PlannedRun):
         pt_rows=28,
         stc_cache=8,
         pool=16,
+        passes=None,
         log=print,
     ):
         if schedule not in SCHEDULES:
@@ -434,6 +598,17 @@ class PlannedSsmRun(PlannedRun):
         if ref_token < 1 or probe <= ref_token:
             raise ValueError(
                 f"the reference token must read a carried state (ref_token >= 1) and be probed: got {ref_token} / {probe}"
+            )
+        pass_mode = getattr(model, "pass_kernels", "off") == "on"
+        if pass_mode != (passes is not None):
+            raise ValueError(
+                "a pass list runs on a model with pass_kernels='on', and such a model runs a pass list: model "
+                f"pass_kernels={getattr(model, 'pass_kernels', 'off')!r}, passes {'given' if passes is not None else 'None'}"
+            )
+        if pass_mode and conversations not in (None, model.capacity):
+            raise ValueError(
+                f"under the pass kernels a pass decodes every lane-slot ({model.capacity}); the conversations of a "
+                f"tick scenario are its configuration's, got conversations={conversations}"
             )
         n_conv = model.capacity if conversations is None else int(conversations)
         if not 1 <= n_conv <= model.capacity:
@@ -470,11 +645,32 @@ class PlannedSsmRun(PlannedRun):
         self.tile_scale: dict[str, float] = {}
         self.profile, self.profile_every = bool(profile), max(1, int(profile_every))
         self.static = False
+        self.staged_at_setup: int | None = None
+        self.pass_setup: dict | None = None
         self.compiled_by: str | None = None
         self.stage_walls: list[dict] = []
         self._fence = False
         self.ops: FheOps | None = None
         self.uploaded: list[str] = []
+        self.pass_mode = pass_mode
+        self.probe_cfg: passmasks.PassConfig | None = None
+        if pass_mode:
+            self.passes = list(passes)
+            passmasks.validate_list(self.passes)
+            if passmasks.GENERATED in self.passes[0].tokens:
+                raise ValueError("pass 0 holds a generated token: no previous reply to generate it from")
+            # the probes record one fixed configuration, the first pass's (the warm-up runs it too, so its masks are the
+            # resident ones when the graphs are captured); the static check across the probes then proves the masks a
+            # pure function of the configuration
+            self.probe_cfg = self.passes[0]
+        #: {(program label, pt name): store alias} (pt_aliases); the pass keys {(mask id, level): a block reading it}
+        self._aliases: dict[tuple[str, str], str] | None = None
+        self._pass_pairs: dict[tuple[str, int], int] = {}
+        #: the digest each pass key holds in the store now (stage_static, stage_pass)
+        self._pass_staged: dict[tuple[str, int], str] = {}
+        #: per configuration (its mask_key): {(mask id, level): (values, digest)}, and the seconds it took
+        self._mask_cache: dict[tuple, dict[tuple[str, int], tuple[Any, str]]] = {}
+        self.mask_seconds: dict[tuple, float] = {}
 
     # ── setup (CPU) ──
     def prepare(self, rows, argmax=False):
@@ -483,6 +679,9 @@ class PlannedSsmRun(PlannedRun):
         checked static across the probes."""
         if argmax:
             raise ValueError("this model has no CutMax stage")
+        if self.pass_mode:
+            # the probes' configuration, fixed across the probes
+            self.model.set_pass(cast("passmasks.PassConfig", self.probe_cfg))
         t0 = time.time()
         # structure only unless debugging; PCMM's fake computes its products on the slot vectors (impl.pcmm
         # Pcmm._fake reshapes the input's values), so a PCMM arm records with values
@@ -598,6 +797,12 @@ class PlannedSsmRun(PlannedRun):
             f"{sum(len(v) for v in dyn.values())} dynamic steps, {n} registers, stream "
             f"{'static' if self.static else 'NOT static'}, {self.prepare_s:.1f} s"
         )
+        if self.pass_mode and not self.static:
+            raise NotStatic(
+                "under the pass kernels the stream must be static across the probes (one op stream for every "
+                f"configuration, which enters through pass-mask plaintexts only): {sum(len(v) for v in dyn.values())} "
+                "dynamic steps, or a plaintext that changed between the probes; refused"
+            )
         return self
 
     def _static_stream(self) -> bool:
@@ -634,14 +839,77 @@ class PlannedSsmRun(PlannedRun):
             if f not in GENERATED_FORMS
         }
 
+    def pt_aliases(self) -> dict[tuple[str, str], str]:
+        """``{(program label, pt name): store alias}`` for every plaintext the programs read from the store (their
+        ``pt_refs``, the forms generated inside a fused sum left out): a pass mask (a ``PassPt`` of the reference
+        stream) by identity, its mask id (``pass/b<b>/...`` per block, ``pass/k2/...`` shared by every block, at the
+        levels each block reads it); every other plaintext by the digest of its values (``v/<digest>``, the name
+        ``PlannedRun.precompute`` gives a slot). Built from the compiled programs and the twin's reference record, so it
+        exists before the session (``session_kwargs`` sizes the store by it) and ``stage_static`` applies the same map.
+        No pass alias equals a static one (the prefixes differ: checked)."""
+        if self._aliases is not None:
+            return self._aliases
+        out: dict[tuple[str, str], str] = {}
+        for b in sorted(self.ref):
+            lab, r = self.labels[b], self.ref[b]
+            for nm, _lv, _d, f in self.progs[lab].pt_refs:
+                if f in GENERATED_FORMS:
+                    continue
+                if nm not in r.pts:
+                    raise RuntimeError(
+                        f"{lab}: the program reads {nm}, which the twin's reference record does not hold"
+                    )
+                out[(lab, nm)] = store_alias(r.pts[nm])
+        passes = {a for a in out.values() if a.startswith(PASS_PREFIX)}
+        odd = sorted(a for a in out.values() if not a.startswith((PASS_PREFIX, STATIC_PREFIX)))
+        if odd:
+            raise RuntimeError(f"pt_aliases: aliases in neither partition (pass/, v/): {odd[:4]}")
+        if passes and not self.pass_mode:
+            raise RuntimeError(
+                "pt_aliases: pass-mask plaintexts in a stream recorded without the pass kernels"
+            )
+        self._aliases = out
+        return out
+
+    def plaintext_pairs(self) -> set[tuple[str, int]]:
+        """The distinct (store alias, level) pairs the programs read: one store slot each (``session_kwargs``)."""
+        al = self.pt_aliases()
+        return {
+            (al[(lab, nm)], int(lv))
+            for lab, p in self.progs.items()
+            for nm, lv, _d, f in p.pt_refs
+            if f not in GENERATED_FORMS
+        }
+
     def plaintext_budget(self) -> dict:
-        """What the resident plaintexts would take on the device: one slot per distinct (program, name, level)
-        reference of ``pt_rows`` rows (at least the rows of the deepest plaintext, n32: 54 - level)."""
+        """What the resident plaintexts would take on the device, both ways: by references, one slot per distinct
+        (program, name, level) (``plaintexts``, ``bytes``: what ``PlannedRun.session_kwargs`` reserves upstream), and by
+        aliases, one slot per distinct (store alias, level) (``by_alias``: what this driver reserves, ``reserved``), each
+        slot of ``pt_rows`` rows (at least the rows of the deepest plaintext, n32: 54 - level). The pass masks' share is
+        named in both (``pass_refs``; ``by_alias.pass``, ``by_alias.pass_ids``)."""
         refs = self.plaintext_refs()
+        pairs = self.plaintext_pairs()
+        al = self.pt_aliases()
         levels = [lv for _lab, _nm, lv in refs]
         rows = self.pt_rows and max(self.pt_rows, N32_Q_PRIMES - min(levels, default=N32_Q_PRIMES))
-        rows = rows or N32_Q_PRIMES
-        return {"plaintexts": len(refs), "rows": int(rows), "bytes": len(refs) * int(rows) * SLOT_ROW_BYTES}
+        rows = int(rows or N32_Q_PRIMES)
+        pass_refs = sum(1 for lab, nm, _lv in refs if al[(lab, nm)].startswith(PASS_PREFIX))
+        pass_pairs = [a for a, _lv in pairs if a.startswith(PASS_PREFIX)]
+        return {
+            "plaintexts": len(refs),
+            "rows": rows,
+            "bytes": len(refs) * rows * SLOT_ROW_BYTES,
+            "pass_refs": pass_refs,
+            "static_refs": len(refs) - pass_refs,
+            "by_alias": {
+                "slots": len(pairs),
+                "pass": len(pass_pairs),
+                "static": len(pairs) - len(pass_pairs),
+                "pass_ids": len(set(pass_pairs)),
+                "bytes": len(pairs) * rows * SLOT_ROW_BYTES,
+            },
+            "reserved": "by_alias",
+        }
 
     def linears(self) -> dict[str, pcmm_mod.PcmmLinear]:
         """The PCMM linears by the name their finishes carry (``b<b>.<kind>``), from the twin's weights."""
@@ -729,14 +997,11 @@ class PlannedSsmRun(PlannedRun):
         specs = self.pcmm_specs()
         kw["pcmm"] = specs or None
         kw["pcmm_cf"] = self.pcmm_cf
-        # the store holds the plaintexts read from it only: PlannedRun.session_kwargs (driver.py:725-731) counts
-        # every reference, generated ones included (344,064 diagonals per tick at the model shape)
-        progs = kw["programs"]
-        kw["pt_levels"] = [
-            lv
-            for p in progs
-            for _nm, lv in sorted({(nm, lv) for nm, lv, _d, f in p.pt_refs if f not in GENERATED_FORMS})
-        ]
+        # the store holds the plaintexts read from it only, one slot per distinct (store alias, level) pair, which is
+        # what stage_static stages: PlannedRun.session_kwargs (driver.py:725-731) counts every reference, generated
+        # ones included (344,064 diagonals per tick at the model shape), and every pass-mask product is a reference of
+        # its own (+2,448 per pass at 28 rows: +16.8 GiB [derived])
+        kw["pt_levels"] = [lv for _a, lv in sorted(self.plaintext_pairs())]
         kw["pt_slots"] = len(kw["pt_levels"]) + 8
         if kw["pt_levels"] and self.pt_rows:
             kw["pt_rows"] = max(self.pt_rows, N32_Q_PRIMES - min(kw["pt_levels"]))
@@ -765,7 +1030,8 @@ class PlannedSsmRun(PlannedRun):
 
     def setup(self, rows, argmax=False):
         """``PlannedRun.setup`` (the session, every program bound, the arena frozen), then the PCMM planes uploaded
-        by name and every plaintext staged once."""
+        by name and every plaintext staged once; under the pass kernels the first pass's masks staged with the static
+        plaintexts and every configuration's masks computed (``precompute_passes``)."""
         from perseus import _pc  # type: ignore[attr-defined]
 
         if self.diag_tiles() and not self.device_has_encoder():
@@ -782,9 +1048,12 @@ class PlannedSsmRun(PlannedRun):
             self.uploaded.append(name)
         self.upload_tiles()
         n = self.stage_static()
+        self.staged_at_setup = n
+        self.pass_setup = self.precompute_passes() if self.pass_mode else None
         self.log(
             f"[planned] {len(self.uploaded)} PCMM linears uploaded, {len(self.tiles_uploaded)} diagonal tiles "
             f"uploaded, {n} plaintext slots staged"
+            + (f"; pass masks: {json.dumps(self.pass_setup)}" if self.pass_setup else "")
         )
         return self
 
@@ -808,36 +1077,183 @@ class PlannedSsmRun(PlannedRun):
             raise RuntimeError(f"declared tiles never uploaded: {missing[:8]}")
         return len(self.tiles_uploaded)
 
+    def _keeps_values(self) -> bool:
+        return bool(getattr(self.store, "keep_values", True))
+
     def stage_static(self) -> int:
-        """Every plaintext the programs read, from the reference stream, staged once; equal values share one slot
-        (``alias_pts`` by digest, as ``PlannedRun.precompute`` does per position). Returns the slots staged."""
+        """Every plaintext the programs read staged once, before the warm-up captures the graphs: the alias map is
+        permanent (``alias_pts`` is refused after a graph capture, ``crates/pc-py/src/program.rs``), so it is built here
+        once (``pt_aliases``). A static plaintext shares a slot with every equal one, by the digest of its values (as
+        ``PlannedRun.precompute`` names a slot per position); a pass mask (the pass kernels) is aliased by its mask id,
+        never by value (one configuration's all-zero masks would otherwise share one slot that the next configuration
+        needs nonzero), and staged at each level a program reads it (``(alias, compiled level)``) with the first
+        pass's values; ``stage_pass`` restages it per pass. One item per distinct (alias, level) pair, the slots the
+        store holds (``session_kwargs``). Returns the items staged."""
         if self._alias:
             raise RuntimeError("stage_static: the plaintexts are already staged")
         if not self.static:
             raise RuntimeError(
                 "stage_static: the stream is not static (prepare found a dynamic step or a changed plaintext)"
             )
+        al = self.pt_aliases()
         items: dict[tuple[str, int], Any] = {}
         alias: dict[str, str] = {}
+        pairs: dict[tuple[str, int], int] = {}
         for b in sorted(self.ref):
             lab, r = self.labels[b], self.ref[b]
             keys = self.progs[lab].pt_keys()
+            amap: dict[str, str] = {}
             for nm, lv in keys:
                 if "#" in nm:  # Bound::pt_keys skips every plaintext generated inside a sum (bind.rs in_sum)
                     raise RuntimeError(f"stage_static: {nm} is a generated plaintext, not a store key")
-                v = r.pts[nm.split("/", 1)[1]]
-                if isinstance(v, LeanValues):
+                pt = nm.split("/", 1)[1]
+                a = al.get((lab, pt))
+                if a is None:
+                    raise RuntimeError(f"stage_static: {lab} reads {nm}, which no plaintext reference names")
+                amap[nm] = a
+                if a.startswith(PASS_PREFIX):
+                    pairs.setdefault((a, int(lv)), b)
+                    continue
+                v = r.pts[pt]
+                if isinstance(v, LeanValues) and self._keeps_values():
                     raise TypeError("stage_static: a lean recorder holds digests, not values")
-                alias[nm] = "v/" + digest(v)
-                items.setdefault((alias[nm], int(lv)), v)
-            self.progs[lab].alias_pts({nm: alias[nm] for nm, _lv in keys})
+                items.setdefault((a, int(lv)), v)
+            self.progs[lab].alias_pts(amap)
+            alias.update(amap)
         self._alias = alias
-        return int(self.store.stage([(nm, lv, v) for (nm, lv), v in items.items()]))
+        self._pass_pairs = pairs
+        if pairs and not self.pass_mode:
+            raise RuntimeError("stage_static: pass-mask keys in a stream recorded without the pass kernels")
+        staged = [(nm, lv, v) for (nm, lv), v in items.items()]
+        if self.pass_mode:
+            staged += self._pass_items(cast("list[passmasks.PassConfig]", self.passes)[0], every=True)
+        return int(self.store.stage(staged))
+
+    # ── the pass kernels' per-pass staging ──
+    def pass_masks(self, cfg: passmasks.PassConfig) -> dict[tuple[str, int], tuple[Any, str]]:
+        """``{(mask id, level): (values, digest)}`` of configuration ``cfg`` for every pass key the programs read
+        (``stage_static`` found them): ``passmasks.masks`` per block from the cached decay and mix
+        (``FheSsmModel.block_decay``), one vector per id (a block-independent id, ``pass/k2/...``, is checked equal in
+        every block), cached per ``cfg.mask_key()`` with its seconds (``mask_seconds``). Values are kept only when the
+        store keeps them (``FakeStore(keep_values=False)``: digests)."""
+        key = cfg.mask_key()
+        got = self._mask_cache.get(key)
+        if got is not None:
+            return got
+        if not self._pass_pairs:
+            raise RuntimeError("pass_masks before stage_static (no pass key is known yet)")
+        t0 = time.perf_counter()
+        keep = self._keeps_values()
+        levels: dict[str, list[int]] = {}
+        for mid, lv in self._pass_pairs:
+            levels.setdefault(mid, []).append(lv)
+        per_id: dict[str, tuple[Any, str]] = {}
+        first: dict[str, int] = {}
+        for b in range(self.rec.n_layers):
+            for mid, vec in passmasks.masks(cfg, self.model.block_decay(b), b).items():
+                if mid not in levels:
+                    continue
+                dg = digest(vec)
+                if mid in per_id:
+                    if per_id[mid][1] != dg:
+                        raise RuntimeError(
+                            f"pass mask {mid}: block {b}'s values differ from block {first[mid]}'s (one alias for "
+                            "every block needs one value)"
+                        )
+                    continue
+                per_id[mid], first[mid] = (vec if keep else LeanValues(vec), dg), b
+        missing = sorted(set(levels) - set(per_id))
+        if missing:
+            raise RuntimeError(
+                f"pass_masks: the programs read {missing[:4]}, which passmasks.masks does not make"
+            )
+        out = {(mid, lv): per_id[mid] for mid, lvs in levels.items() for lv in lvs}
+        self._mask_cache[key] = out
+        self.mask_seconds[key] = time.perf_counter() - t0
+        return out
+
+    def _pass_items(self, cfg: passmasks.PassConfig, every: bool = False) -> list[tuple[str, int, Any]]:
+        """The pass keys to stage before a pass of ``cfg``: those whose digest differs from the resident one (every key
+        with ``every``), the bookkeeping updated."""
+        masks = self.pass_masks(cfg)
+        out = []
+        for k in sorted(self._pass_pairs):
+            vec, dg = masks[k]
+            if every or self._pass_staged.get(k) != dg:
+                out.append((k[0], k[1], vec))
+                self._pass_staged[k] = dg
+        return out
+
+    def precompute_passes(self) -> dict:
+        """Setup: the masks and digests of every configuration of the pass list (``pass_masks``), so a pass's in-clock
+        work is staging what changed. Returns what was computed."""
+        if not self.pass_mode:
+            raise RuntimeError("precompute_passes: the pass kernels are off")
+        t0 = time.perf_counter()
+        keys = []
+        for cfg in cast("list[passmasks.PassConfig]", self.passes):
+            if cfg.mask_key() not in keys:
+                keys.append(cfg.mask_key())
+                self.pass_masks(cfg)
+        return {
+            "configurations": len(keys),
+            "pass_keys": len(self._pass_pairs),
+            "seconds": round(time.perf_counter() - t0, 3),
+            "per_configuration_s": [round(self.mask_seconds[k], 3) for k in keys],
+        }
+
+    def stage_pass(self, cfg: passmasks.PassConfig) -> dict:
+        """Before a pass of ``cfg``: every pass key whose values differ from the resident ones (by digest) restaged in
+        place (``PtStore.stage``: the key's resident slot re-encoded, so the captured graphs keep replaying; never an
+        evict, never a new key). ``{"staged", "stage_s", "masks_s"}``: ``masks_s`` > 0 only for a configuration first
+        seen here, its masks computed in the clock."""
+        if not self.pass_mode:
+            raise RuntimeError("stage_pass: the pass kernels are off")
+        if not self._alias:
+            raise RuntimeError("stage_pass before stage_static")
+        t0 = time.perf_counter()
+        new = cfg.mask_key() not in self._mask_cache
+        items = self._pass_items(cfg)
+        t1 = time.perf_counter()
+        n = int(self.store.stage(items)) if items else 0
+        return {
+            "staged": n,
+            "stage_s": round(time.perf_counter() - t0, 4),
+            "masks_s": round(t1 - t0, 4) if new else 0.0,
+        }
+
+    def staging_dry_run(self, keep_values: bool = True) -> dict:
+        """The setup's and every pass's staging on the CPU stand-ins (``FakeStore``, ``CheckedProgram.pt_keys`` /
+        ``alias_pts``), before any session: what ``setup`` and each pass would stage, the warm-up first (the first
+        pass's configuration). ``keep_values=False`` stages digests (a lean record). The programs stay aliased."""
+        if not self.pass_mode:
+            raise RuntimeError("staging_dry_run: the pass kernels are off")
+        self.store = FakeStore(keep_values=keep_values)
+        t0 = time.perf_counter()
+        n0 = self.stage_static()
+        setup_s = time.perf_counter() - t0
+        pre = self.precompute_passes()
+        passes = cast("list[passmasks.PassConfig]", self.passes)
+        rows = [{"pass": "warmup", "config": passes[0].name, **self.stage_pass(passes[0])}]
+        rows += [{"pass": p, "config": c.name, **self.stage_pass(c)} for p, c in enumerate(passes)]
+        held = {k for p in self.progs.values() for k in p.pt_keys()}
+        return {
+            "store": "FakeStore (the CPU stand-in)",
+            "keep_values": keep_values,
+            "setup_staged": n0,
+            "setup_s": round(setup_s, 3),
+            "store_keys": len(self.store),
+            "pass_keys": len(self._pass_pairs),
+            "every_program_key_resident": held <= set(cast("FakeStore", self.store).digests),
+            "masks": pre,
+            "passes": rows,
+        }
 
     # ── per tick ──
     def input_ct(self, t, rows, p):
         """Block 0's input of tick ``t``: ``rows[t]`` (the conversations' rows) as split pairs at the compiled input
-        level (``p.inputs[0]``)."""
+        level (``p.inputs[0]``); under the pass kernels the ``2t`` lane-slot rows of pass ``t`` in ``q`` order, permuted
+        to the layout's row order here (``passmasks.to_layout``, the one place on this end)."""
         if self.ops is None:
             raise RuntimeError("input_ct before setup")
         level, deg = int(p.inputs[0][1]), int(p.inputs[0][2])
@@ -845,7 +1261,17 @@ class PlannedSsmRun(PlannedRun):
             raise RuntimeError(
                 f"block 0's input is compiled at degree {deg}; a fresh encryption has degree 1"
             )
-        return encode_pairs(self.ops, rows[t], self.d, self.t, level)
+        return encode_pairs(self.ops, self.layout_rows(rows[t]), self.d, self.t, level)
+
+    def layout_rows(self, rows) -> np.ndarray:
+        """Block 0's rows in the layout's order: under the pass kernels all ``2t`` lane-slot rows in ``q`` order through
+        ``passmasks.to_layout``; else as given."""
+        if not self.pass_mode:
+            return rows
+        rows = np.asarray(rows, dtype=np.float64)
+        if rows.shape != (2 * self.t, self.d):
+            raise ValueError(f"a pass packs all {2 * self.t} lane-slots in q order, got {rows.shape}")
+        return passmasks.to_layout(rows)
 
     def _run_block(self, b, t, zero, first_in, variant=None):
         t0 = time.perf_counter()
@@ -866,6 +1292,10 @@ class PlannedSsmRun(PlannedRun):
         if argmax or variant is not None:
             raise ValueError("this model has no CutMax stage and no program variants")
         if not self.static:
+            if self.pass_mode:
+                raise NotStatic(
+                    "token: under the pass kernels the stream must be static (prepare refuses otherwise)"
+                )
             return super().token(t, rows, argmax, entry, variant)
         tt = time.time()
         self.stage_walls = []
@@ -889,7 +1319,8 @@ class PlannedSsmRun(PlannedRun):
     def reply(self, reg):
         """The reply register read: ``(rows, frame, level)`` with ``rows`` the ``(conversations, d)`` values when a
         secret is at hand (the session's own, or the client's through ``_pc.Client``), else None and the exported
-        frame for the client. Synchronous (waits for the tick)."""
+        frame for the client; under the pass kernels the ``2t`` lane-slot rows in ``q`` order (``passmasks.from_layout``,
+        the one place on this end). Synchronous (waits for the tick)."""
         from perseus import _pc  # type: ignore[attr-defined]
 
         ct = self.ct(reg)
@@ -903,7 +1334,8 @@ class PlannedSsmRun(PlannedRun):
             vals = self.ops.decrypt_slots_complex(ct)
         else:
             return None, bytes(_pc.export_ct(self.sess, ct)), level
-        return filling.unpack_pairs(vals, self.d, self.n_conv), None, level
+        out = filling.unpack_pairs(vals, self.d, self.n_conv)
+        return (passmasks.from_layout(out) if self.pass_mode else out), None, level
 
     # ── the record ──
     def counters(self) -> dict:
