@@ -24,7 +24,8 @@
 #   bash tools/fhe_ssm/run_gpu.sh run ARM          the planned run: $DRIVER --ticks $TICKS --profile, nvidia-smi sampled
 #                                                  (diagonal linears only under DIAG_SOURCE=generated: the device
 #                                                  diagonal encoder; else the PCMM arms only); the cfg-* arms run the pass
-#                                                  kernels under --scenario $SCENARIO (tick: $TICKS passes)
+#                                                  kernels under --scenario $SCENARIO (tick: $TICKS passes) or
+#                                                  --lane-config $LANE_CONFIG
 #   bash tools/fhe_ssm/run_gpu.sh smoke            capture + plan + run of `pcmm24` at BLOCKS=1 (the first device contact)
 #   bash tools/fhe_ssm/run_gpu.sh diag-tests       the device diagonal encoder's device checks in acceptance order: 1 the
 #                                                  kernel selftest (encode / encode_many / diag_gather lines), 2 the crates'
@@ -43,7 +44,9 @@
 # replaces the whole model's plan), RUN_TAG (default empty: a further suffix _<tag> of every run, prepare and key
 # directory, run_<arm>[_bN][_<tag>], so the runs of one bracket never overwrite each other; [A-Za-z0-9._-] only),
 # SCENARIO (the cfg-* arms' --scenario: tick (default; $TICKS passes) | tick:K | prefill:T | doc:T:READERS | mixed |
-# churn; a run flag, never a capture's),
+# churn; a run flag, never a capture's), LANE_CONFIG (a cfg-* run's pass list from a file, the driver's --lane-config, in
+# place of SCENARIO; refused for an arm without the pass kernels), BENCH_EXTRA (bench: more pc-bench bts flags, word-split,
+# e.g. "--grid 8,13:0.5,1 --seeds 3": the precision grid, which replaces the timing table),
 # DATA (a directory holding the model's weights .npz, seeds .json and config .json; WEIGHTS / SEEDS / CONFIG override
 # each), DRIVER (the planned driver's python module, default perseus.examples.fhe_ssm.run_planned: its contract is in
 # RUNSHEET_GPU.md §4), TICKS (2), BLOCKS (all), GPU (0), KEYS (NO DEFAULT; run, smoke and matrix refuse without it:
@@ -79,6 +82,15 @@ DIAG_SOURCE=${DIAG_SOURCE:-values}
 case "$DIAG_SOURCE" in values|generated) ;; *) echo "run_gpu: DIAG_SOURCE=$DIAG_SOURCE (values | generated)" >&2; exit 2 ;; esac
 SCENARIO=${SCENARIO:-tick}; RUN_TAG=${RUN_TAG:-}
 [[ "$SCENARIO" =~ ^[a-z]+(:[0-9]+)*$ ]] || { echo "run_gpu: SCENARIO=$SCENARIO (tick[:K] | prefill:T | doc:T:READERS | mixed | churn)" >&2; exit 2; }
+# LANE_CONFIG: a cfg-* run's pass list from a file (the driver's --lane-config) in place of SCENARIO
+LANE_CONFIG=${LANE_CONFIG:-}
+if [ -n "$LANE_CONFIG" ]; then
+    [ -f "$LANE_CONFIG" ] || { echo "run_gpu: LANE_CONFIG=$LANE_CONFIG is not a file" >&2; exit 2; }
+    LANE_CONFIG=$(cd "$(dirname "$LANE_CONFIG")" && pwd)/$(basename "$LANE_CONFIG")   # the driver runs in the checkout
+    PASSF="--lane-config $LANE_CONFIG"
+else
+    PASSF="--scenario $SCENARIO"
+fi
 [[ -z "$RUN_TAG" || "$RUN_TAG" =~ ^[A-Za-z0-9._-]+$ ]] || { echo "run_gpu: RUN_TAG=$RUN_TAG ([A-Za-z0-9._-] only)" >&2; exit 2; }
 S=${BLOCKS:+_b$BLOCKS}   # the BLOCKS suffix of every product name (capname gives captures the same one)
 T=${RUN_TAG:+_$RUN_TAG}  # the RUN_TAG suffix of every run, prepare and key directory
@@ -110,7 +122,13 @@ resolve_data() {   # WEIGHTS / SEEDS / CONFIG, else the first match of each in D
 # --pass-kernels on is a capture flag (the capture name carries it); the shipped captures of these arms are the merged
 # ones (every configuration's magnitudes), the per-configuration ones beside them as <capname>__<label>. cfg-pcmm24-tick
 # shares cfg-pcmm24's capture flags but its plan was cut on <capname>__tick alone (a pure-kernel control): shipped only.
-ARMS="ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24 pcmm24 best lockstep2 lockstep4 cfg-pcmm24 cfg-pcmm24-tick cfg-ref"
+# The cfg-best* arms are best's capture flags under the pass kernels; their captures and plans are cut on the Mac (an
+# eleven-configuration max_each merge: the six above plus five passes of the owner scenario) and shipped, never cut here
+# (results BEST_ADDON_PLAN_20261102.md §2, §7-§9). cfg-best-k3 is that capture's plan at kappa 3 (PLAN_MAG_SAFETY=3),
+# cfg-best-em the same placements with PC_EM_FUSE_RESCALE=1 on the runtime= line, cfg-served cfg-best without per-site
+# (the served norms), cfg-pcmm24-own cfg-pcmm24's capture flags with a plan cut on the six plus the owner captures.
+BESTCAP="--newton-form depth2 --newton-sites per-site --pack-stats halves --linear pcmm --pcmm-wbits 24 --pass-kernels on"
+ARMS="ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24 pcmm24 best lockstep2 lockstep4 cfg-pcmm24 cfg-pcmm24-tick cfg-ref cfg-best cfg-best-k3 cfg-best-em cfg-served cfg-pcmm24-own"
 arm() {   # sets CAP, PLANENV, RUNF, NOTE, DEVICE, PLANCAP (the suffix of the capture its plan was cut from), SHIPPED
     CAP=""; PLANENV="LANDING=stock"; RUNF=""; NOTE=""; PLANCAP=""; SHIPPED=0
     case "$1" in
@@ -129,14 +147,27 @@ arm() {   # sets CAP, PLANENV, RUNF, NOTE, DEVICE, PLANCAP (the suffix of the ca
         lockstep2|lockstep4)
                     CAP="--streams ${1#lockstep}"; PLANENV="LANDING=high"; RUNF="--schedule lockstep"
                     NOTE="BLOCKED until the port captures k ciphertext sets per stage (RUNSHEET_GPU.md §3)" ;;
-        cfg-pcmm24) CAP="--linear pcmm --pcmm-wbits 24 --pass-kernels on"; PLANENV="LANDING=high"; RUNF="--scenario $SCENARIO"
+        cfg-pcmm24) CAP="--linear pcmm --pcmm-wbits 24 --pass-kernels on"; PLANENV="LANDING=high"; RUNF="$PASSF"
                     NOTE="the pass kernels on pcmm24 (its plan a merged capture's: six configurations shipped for the whole model, four captured here); compare with pcmm24" ;;
         cfg-pcmm24-tick)
-                    CAP="--linear pcmm --pcmm-wbits 24 --pass-kernels on"; PLANENV="LANDING=high"; RUNF="--scenario $SCENARIO"
+                    CAP="--linear pcmm --pcmm-wbits 24 --pass-kernels on"; PLANENV="LANDING=high"; RUNF="$PASSF"
                     PLANCAP="__tick"; SHIPPED=1
                     NOTE="cfg-pcmm24's kernels, plan cut on the tick configuration's capture alone (shipped, never cut here); compare with cfg-pcmm24" ;;
-        cfg-ref)    CAP="--pass-kernels on"; RUNF="--scenario $SCENARIO"
+        cfg-ref)    CAP="--pass-kernels on"; RUNF="$PASSF"
                     NOTE="the pass kernels on the reference (diagonal linears: a device arm under DIAG_SOURCE=generated); compare with ref" ;;
+        cfg-best)   CAP="$BESTCAP"; PLANENV="LANDING=high PAIR=1"; RUNF="--schedule siblings $PASSF"
+                    NOTE="the pass kernels on best (whole model: the eleven-configuration merge's plan, shipped); compare with pcmm24" ;;
+        cfg-best-k3) CAP="$BESTCAP"; PLANENV="LANDING=high PAIR=1 PLAN_MAG_SAFETY=3"; RUNF="--schedule siblings $PASSF"
+                    NOTE="cfg-best's capture, its plan at kappa 3 (an under-sized refresh's fallback, shipped); compare with cfg-best" ;;
+        cfg-best-em) CAP="$BESTCAP"; PLANENV="LANDING=high PAIR=1 RUNTIME_EXTRA=PC_EM_FUSE_RESCALE=1"; RUNF="--schedule siblings $PASSF"
+                    NOTE="cfg-best's placements, PC_EM_FUSE_RESCALE=1 on the runtime= line (shipped); compare with cfg-best" ;;
+        cfg-served) CAP="--newton-form depth2 --pack-stats halves --linear pcmm --pcmm-wbits 24 --pass-kernels on"
+                    PLANENV="LANDING=high PAIR=1"; RUNF="--schedule siblings $PASSF"
+                    NOTE="cfg-best without per-site: the served norms 0.1/12 (shipped); compare with cfg-best" ;;
+        cfg-pcmm24-own)
+                    CAP="--linear pcmm --pcmm-wbits 24 --pass-kernels on"; PLANENV="LANDING=high"; RUNF="$PASSF"
+                    PLANCAP="__own"; SHIPPED=1
+                    NOTE="cfg-pcmm24's kernels, plan cut on the six configurations plus the owner scenario's captures (shipped, never cut here); compare with cfg-pcmm24" ;;
         *) die "unknown arm $1 (arms: $ARMS)" ;;
     esac
     case "$PLANENV" in *LANDING=high*) CAPENV="FIDESLIB_BTS_STC_FIRST=2 FIDESLIB_BTS_STC_FIRST_ROUTES=dense FIDESLIB_BTS_STC_FIRST_CF=13 FIDESLIB_BTS_RAISE_DROP=512:1 AUTO_BTS_LEVEL=44" ;;
@@ -157,6 +188,10 @@ arm() {   # sets CAP, PLANENV, RUNF, NOTE, DEVICE, PLANCAP (the suffix of the ca
         RUNF="${RUNF:+$RUNF }--diag-source generated"
         case "$NOTE" in BLOCKED*) ;; *) DEVICE=1 ;; esac
     fi
+}
+lane_check() {   # LANE_CONFIG names the passes of a pass-kernel arm only (any other arm would ignore it silently)
+    [ -z "$LANE_CONFIG" ] && return 0
+    case "$RUNF" in *"--lane-config "*) ;; *) die "$1: LANE_CONFIG=$LANE_CONFIG, but $1 takes no pass list (a cfg-* arm does)" ;; esac
 }
 capname() {   # the capture an arm uses: arms that differ only at plan or run time share one
     arm "$1"
@@ -247,7 +282,7 @@ verify)
 bench)
     gpu_free
     cuda_env
-    ( cd "$W" && CUDA_VISIBLE_DEVICES=$GPU cargo run --release -p pc-tools --bin pc-bench -- bts --all --k 1,8 --reps 20 --keys packed ) \
+    ( cd "$W" && CUDA_VISIBLE_DEVICES=$GPU cargo run --release -p pc-tools --bin pc-bench -- bts --all --k 1,8 --reps 20 --keys packed ${BENCH_EXTRA:-} ) \
         > "$OUT/bench_bts.txt" 2>&1 || { tail -20 "$OUT/bench_bts.txt"; die "pc-bench failed"; }
     tail -25 "$OUT/bench_bts.txt"; log "bench: $OUT/bench_bts.txt (set PLAN_BTS_MS from it for ILP_OBJECTIVE=ms); $(build_id)" ;;
 arms)
@@ -360,7 +395,7 @@ plan)
     grep -q "compile check: skipped" "$OUT/bootstrap_placements/plan_$a$S/summary.txt" && die "plan $a was not gated: the compile check is missing (run_gpu.sh verify builds it)"
     log "plan $a: $OUT/bootstrap_placements/plan_$a$S" ;;
 prepare)
-    a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a$S"
+    a=${1:?arm}; arm "$a"; lane_check "$a"; p="$OUT/bootstrap_placements/plan_$a$S"
     [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
     PYTHONPATH="$W/python" "$PY" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$DRIVER') else 1)" 2>/dev/null \
         || die "no driver module $DRIVER (RUNSHEET_GPU.md §4 is its contract)"
@@ -376,7 +411,7 @@ prepare)
     tail -8 "$r/prepare.log"
     [ $rc = 0 ] || die "prepare $a failed ($r/prepare.log)" ;;
 run)
-    a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a$S"
+    a=${1:?arm}; arm "$a"; lane_check "$a"; p="$OUT/bootstrap_placements/plan_$a$S"
     [ "$DEVICE" = 1 ] || die "run $a: under DIAG_SOURCE=values a diagonal linear does not run on the device path (344,064 resident plaintexts per tick, about 2.3 TiB; the driver refuses it): DIAG_SOURCE=generated runs it on the device diagonal encoder, or run_gpu.sh prepare $a runs its CPU part (RUNSHEET_GPU.md §3)"
     [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
     PYTHONPATH="$W/python" "$PY" -c "import importlib.util,sys; sys.exit(0 if importlib.util.find_spec('$DRIVER') else 1)" 2>/dev/null \
@@ -402,7 +437,7 @@ run)
     tail -15 "$r/run.log"
     [ $rc = 0 ] || die "run $a failed ($r/run.log)" ;;
 keyspec)
-    a=${1:?arm}; arm "$a"; p="$OUT/bootstrap_placements/plan_$a$S"
+    a=${1:?arm}; arm "$a"; lane_check "$a"; p="$OUT/bootstrap_placements/plan_$a$S"
     [ -f "$p/PLAN_CMD.txt" ] || die "no plan $p: run_gpu.sh plan $a"
     resolve_data
     capture_flag "$a"

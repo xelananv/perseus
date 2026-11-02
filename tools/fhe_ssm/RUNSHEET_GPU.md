@@ -213,7 +213,16 @@ isolates, and its control. `run_gpu.sh arms` prints it with each arm's capture n
 | `cfg-pcmm24` | `--linear pcmm --pcmm-wbits 24 --pass-kernels on` | `LANDING=high` (shipped: the merged capture's) | `--scenario $SCENARIO` | the pass kernels: one op stream for every lane configuration, the masks restaged per pass | `pcmm24` |
 | `cfg-pcmm24-tick` | as `cfg-pcmm24` | `LANDING=high` (shipped: the tick configuration's capture alone) | `--scenario $SCENARIO` | the merged magnitudes' share of the overhead (its plan's correction factors are the tick's) | `cfg-pcmm24` |
 | `cfg-ref` | `--pass-kernels on` | `LANDING=stock` (shipped: the merged capture's) | `--scenario $SCENARIO` | the pass kernels on the diagonal arm (a device arm under `DIAG_SOURCE=generated`) | `ref` under `generated` |
+| `cfg-best` | `best`'s capture flags + `--pass-kernels on` | `LANDING=high PAIR=1` (whole model shipped: an eleven-configuration `max_each` merge, the six above plus five passes of the owner scenario; `_b1` cut by `plan`) | `--schedule siblings` + `--scenario $SCENARIO` or `--lane-config $LANE_CONFIG` | the stack under the pass kernels | `pcmm24` |
+| `cfg-best-k3` | as `cfg-best` | as `cfg-best`, `PLAN_MAG_SAFETY=3` (shipped) | as `cfg-best` | an under-sized refresh's fallback (κ = 3) | `cfg-best` |
+| `cfg-best-em` | as `cfg-best` | as `cfg-best`, `RUNTIME_EXTRA=PC_EM_FUSE_RESCALE=1` (shipped) | as `cfg-best` | the EvalMod relinearization-rescale fusion | `cfg-best` |
+| `cfg-served` | `cfg-best` without `--newton-sites per-site` | `LANDING=high PAIR=1` (shipped) | as `cfg-best` | the served norms (0.1/12) under the stack | `cfg-best` |
+| `cfg-pcmm24-own` | as `cfg-pcmm24` | `LANDING=high` (shipped: the six plus the owner captures, `<capname>__own`) | `--scenario $SCENARIO` or `--lane-config $LANE_CONFIG` | the owner scenario's magnitudes in `cfg-pcmm24`'s plan | `cfg-pcmm24` |
 | `lockstep2`, `lockstep4` | `--streams K` (**does not exist**) | `LANDING=high` | `--schedule lockstep` | K sets of 64 conversations through one stream | `high` |
+
+`LANE_CONFIG=FILE` (run, prepare, keyspec) gives a `cfg-*` arm its pass list from a file (the driver's `--lane-config`) in
+place of `SCENARIO`; an arm without the pass kernels refuses it. `BENCH_EXTRA` appends `pc-bench bts` flags to `bench`
+(e.g. `--grid CFS:AMPS --seeds N`, the precision grid, which replaces the timing table).
 
 Planned counts [S6, S10, S11, S16] (`summary.total_bootstraps` per tick): `ref` stock **637** (446 placed, 143 fired
 hints, 48 deliberate); `high` **609**; `pcmm24` **802** = 538 refresh sites + 264 PCMM output finishes; `cfg-pcmm24`
