@@ -472,9 +472,14 @@ fn const_slots(ps: &PlanSpec) -> usize {
 /// The mode-2 last-stage keys (`stc_first` `CacheKey`: raise variant, the stage's CF, the input scale) the programs'
 /// StC-first refreshes can ask for, counted by what sets the input scale: a planned refresh's by its input level and
 /// degree (at the reference CF), a PCMM finish's also by the linear's output shift (at its own CF). Inputs past the
-/// entry level run the shipped order. A count, not the keys: equal scales reached two ways count twice.
-fn stc_first_keys(progs: &[Program], n: usize, entry_level: u32, cf_default: u32, cf_ref: u32) -> usize {
-    let mut keys: BTreeSet<(u32, u32, u32, u8, u32)> = BTreeSet::new();
+/// entry level run the shipped order. A count, not the keys: equal scales reached two ways count twice. The cache
+/// keys on the input scale (`stc_first::nf_key`) and the stage's CF, so the count does too: the shadow's scale, times
+/// a PCMM linear's stamp (w_scale 2^shift) and at the linear's own CF (`PcmmPlan::cf_of`). A lean chain's
+/// pre-division (`prediv`) moves the device's scale off the shadow's; the count then errs high, never low, as long as
+/// the shadow's scale is the device's (not verified on the device).
+fn stc_first_keys(progs: &[Program], n: usize, entry_level: u32, cf_default: u32, cf_ref: u32, pcmm: Option<&crate::pcmm::PcmmPlan>) -> usize {
+    use pc_gpu::bts::stc_first::nf_key;
+    let mut keys: BTreeSet<(u32, u32, u32, u8, u32, i64)> = BTreeSet::new();
     for p in progs {
         for m in p.ops.iter().flat_map(|o| o.members()) {
             match &m.kind {
@@ -482,16 +487,19 @@ fn stc_first_keys(progs: &[Program], n: usize, entry_level: u32, cf_default: u32
                     let r = &p.bts_sites[*s as usize].route;
                     let x = p.vars[m.ins[0] as usize].meta;
                     if RouteKind::of(r, n) == RouteKind::StcFirst && x.level <= entry_level {
-                        keys.insert((r.raise_drop, r.cf.unwrap_or(cf_default).max(cf_ref), x.level, x.deg, 0));
+                        keys.insert((r.raise_drop, r.cf.unwrap_or(cf_default).max(cf_ref), x.level, x.deg, 0, nf_key(x.nf)));
                     }
                 }
                 Kind::Finish { desc: Some(d), .. } => {
-                    // a PCMM finish refreshes every output under its own drop, from its inputs' scale
+                    // a PCMM finish refreshes every output under its own drop, from its inputs' scale times the stamp
                     if let Some(d) = crate::pcmm::Desc::parse(d) {
+                        let lin = pcmm.and_then(|pp| pp.lins.iter().find(|l| l.name == d.linear));
+                        let cf = pcmm.map_or(0, |pp| pp.cf_of(&d.linear));
+                        let stamp = lin.map_or(1.0, |l| l.w_scale * (l.shift as f64).exp2());
                         for drop in d.drops() {
                             for &v in &m.ins {
                                 let x = p.vars[v as usize].meta;
-                                keys.insert((drop, 0, x.level, x.deg, d.shift + 1));
+                                keys.insert((drop, cf, x.level, x.deg, d.shift + 1, nf_key(x.nf * stamp)));
                             }
                         }
                     }
@@ -721,7 +729,7 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
                 return Err(PyValueError::new_err(format!("refresh pairs up to CF {pair_max} on an StC-first route of reference CF {}", sp.sf.cf_ref)));
             }
             // a captured graph reads the entries its refreshes used: the cache holds every key the programs ask for
-            let keys = stc_first_keys(&ps.programs, n, (chain.q.len() - 1 - sp.entry_top) as u32, sp.sf.cf_default.unwrap_or(13), sp.sf.cf_ref);
+            let keys = stc_first_keys(&ps.programs, n, (chain.q.len() - 1 - sp.entry_top) as u32, sp.sf.cf_default.unwrap_or(13), sp.sf.cf_ref, pcmm.as_ref());
             sp.sf.cache_slots = sp.sf.cache_slots.max(keys);
             let mut geoms: Vec<_> = sp.dense.variants.iter().flat_map(|v| v.cts.iter().chain(&v.stc)).chain(&sp.input).map(|h| h.geom).collect();
             geoms.extend(sp.sources.iter().flatten().map(|s| s.geom));
@@ -1408,7 +1416,7 @@ pub(crate) struct Args {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn args(config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, diag_tiles: Option<BTreeMap<String, (u32, u32, u32)>>) -> PyResult<Args> {
+fn args(config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, pcmm_cf_map: Option<BTreeMap<String, u32>>, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, diag_tiles: Option<BTreeMap<String, (u32, u32, u32)>>) -> PyResult<Args> {
     let s = size.unwrap_or_default();
     let g = |k: &str, d: usize| s.get(k).copied().unwrap_or(d);
     let geometry = Geometry {
@@ -1467,7 +1475,7 @@ fn args(config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usiz
             }
             // PF_PCMM_BATCH / _DROPS (the tip's defaults 4 / on): finish groups, sized to the programs' finishes
             let batch = knob(cfg.model.prefill.pcmm_batch, 4, "model.prefill.pcmm_batch")? as usize;
-            let mut pp = crate::pcmm::PcmmPlan::new(&specs, pcmm_cf, batch, cfg.model.prefill.pcmm_batch_drops.unwrap_or(true))?;
+            let mut pp = crate::pcmm::PcmmPlan::new(&specs, pcmm_cf, pcmm_cf_map, batch, cfg.model.prefill.pcmm_batch_drops.unwrap_or(true))?;
             if let Some(ps) = &plan {
                 pp.fit(&ps.programs)?;
             }
@@ -1523,10 +1531,10 @@ impl PySession {
     /// diagonal `CoeffSum`s read (`<linear>#<n>.<m>.<gg>.<jj>`, `B = N/2 / t`): setup carves them, the encoder's
     /// scratch (`host.diag_batch` jobs per chunk), its job table and row lists (`mem_report`: `diag.*`); `Program.bind`
     /// writes the jobs, `register_tile` uploads each matrix, and a run refuses a tile never uploaded.
-    #[pyo3(signature = (config, keys, size=None, pool=256, pt_slots=256, encode_threads=4, debug_refresh=false, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new(), diag_tiles=None))]
+    #[pyo3(signature = (config, keys, size=None, pool=256, pt_slots=256, encode_threads=4, debug_refresh=false, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, pcmm_cf_map=None, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new(), diag_tiles=None))]
     #[allow(clippy::too_many_arguments)]
-    fn new(py: Python<'_>, config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, debug_refresh: bool, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, diag_tiles: Option<BTreeMap<String, (u32, u32, u32)>>) -> PyResult<Self> {
-        let x = args(config, keys, size, pool, pt_slots, encode_threads, programs, regs, pt_rows, dyn_rot, stc_cache, pcmm, pcmm_cf, check_meta, ccmm, streams, stream_frames, kv, reg_levels, pt_levels, diag_tiles)?;
+    fn new(py: Python<'_>, config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, debug_refresh: bool, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, pcmm_cf_map: Option<BTreeMap<String, u32>>, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, diag_tiles: Option<BTreeMap<String, (u32, u32, u32)>>) -> PyResult<Self> {
+        let x = args(config, keys, size, pool, pt_slots, encode_threads, programs, regs, pt_rows, dyn_rot, stc_cache, pcmm, pcmm_cf, pcmm_cf_map, check_meta, ccmm, streams, stream_frames, kv, reg_levels, pt_levels, diag_tiles)?;
         let dev = nogil(py, || setup(&x.cfg, &x.ks, &Origin::Generate, x.sizes, x.geometry, debug_refresh, x.plan, x.pp, x.cp))?;
         Ok(PySession { dev: Rc::new(dev), fhe: None })
     }
@@ -1537,10 +1545,10 @@ impl PySession {
     /// decryption raises. The bundle must answer this session's `key_manifest` (same keys, chain, plan contract).
     /// `debug_secret` (tests only): the client's secret, making a debug session that can also decrypt.
     #[staticmethod]
-    #[pyo3(signature = (config, keys, bundle, size=None, pool=256, pt_slots=256, encode_threads=4, debug_refresh=false, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new(), debug_secret=None, diag_tiles=None))]
+    #[pyo3(signature = (config, keys, bundle, size=None, pool=256, pt_slots=256, encode_threads=4, debug_refresh=false, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, pcmm_cf_map=None, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new(), debug_secret=None, diag_tiles=None))]
     #[allow(clippy::too_many_arguments)]
-    fn from_bundle(py: Python<'_>, config: &PyConfig, keys: &PyKeySource, bundle: std::path::PathBuf, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, debug_refresh: bool, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, debug_secret: Option<Vec<u8>>, diag_tiles: Option<BTreeMap<String, (u32, u32, u32)>>) -> PyResult<Self> {
-        let x = args(config, keys, size, pool, pt_slots, encode_threads, programs, regs, pt_rows, dyn_rot, stc_cache, pcmm, pcmm_cf, check_meta, ccmm, streams, stream_frames, kv, reg_levels, pt_levels, diag_tiles)?;
+    fn from_bundle(py: Python<'_>, config: &PyConfig, keys: &PyKeySource, bundle: std::path::PathBuf, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, debug_refresh: bool, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, pcmm_cf_map: Option<BTreeMap<String, u32>>, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, debug_secret: Option<Vec<u8>>, diag_tiles: Option<BTreeMap<String, (u32, u32, u32)>>) -> PyResult<Self> {
+        let x = args(config, keys, size, pool, pt_slots, encode_threads, programs, regs, pt_rows, dyn_rot, stc_cache, pcmm, pcmm_cf, pcmm_cf_map, check_meta, ccmm, streams, stream_frames, kv, reg_levels, pt_levels, diag_tiles)?;
         let origin = match debug_secret {
             Some(sec) => Origin::DebugBundle(bundle, sec),
             None => Origin::Bundle(bundle),
@@ -1559,10 +1567,10 @@ impl PySession {
     /// switching key (role + rows), the SPRU material, the PCMM shapes, CCMM, a public key; the chain's params hash
     /// and the plan contract. No device. `diag_tiles` binds no key; it is validated as the constructor validates it.
     #[staticmethod]
-    #[pyo3(signature = (config, keys, size=None, pool=256, pt_slots=256, encode_threads=4, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new(), diag_tiles=None))]
+    #[pyo3(signature = (config, keys, size=None, pool=256, pt_slots=256, encode_threads=4, programs=None, regs=0, pt_rows=0, dyn_rot=Vec::new(), stc_cache=8, pcmm=None, pcmm_cf=6, pcmm_cf_map=None, check_meta=false, ccmm=false, streams=None, stream_frames=2, kv=None, reg_levels=Vec::new(), pt_levels=Vec::new(), diag_tiles=None))]
     #[allow(clippy::too_many_arguments)]
-    fn key_manifest(config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, diag_tiles: Option<BTreeMap<String, (u32, u32, u32)>>) -> PyResult<String> {
-        let x = args(config, keys, size, pool, pt_slots, encode_threads, programs, regs, pt_rows, dyn_rot, stc_cache, pcmm, pcmm_cf, check_meta, ccmm, streams, stream_frames, kv, reg_levels, pt_levels, diag_tiles)?;
+    fn key_manifest(config: &PyConfig, keys: &PyKeySource, size: Option<HashMap<String, usize>>, pool: usize, pt_slots: usize, encode_threads: usize, programs: Option<Vec<PyRef<'_, crate::program::PyProgram>>>, regs: usize, pt_rows: usize, dyn_rot: Vec<i64>, stc_cache: usize, pcmm: Option<Vec<crate::pcmm::LinSpec>>, pcmm_cf: u32, pcmm_cf_map: Option<BTreeMap<String, u32>>, check_meta: bool, ccmm: bool, streams: Option<BTreeMap<String, usize>>, stream_frames: usize, kv: Option<(usize, usize, usize)>, reg_levels: Vec<u32>, pt_levels: Vec<u32>, diag_tiles: Option<BTreeMap<String, (u32, u32, u32)>>) -> PyResult<String> {
+        let x = args(config, keys, size, pool, pt_slots, encode_threads, programs, regs, pt_rows, dyn_rot, stc_cache, pcmm, pcmm_cf, pcmm_cf_map, check_meta, ccmm, streams, stream_frames, kv, reg_levels, pt_levels, diag_tiles)?;
         let chain = crate::shadow::chain_of(&x.cfg)?;
         let nd = key_needs(&x.cfg, &x.ks, &chain, &x.plan, &x.pp, &x.cp)?;
         manifest(&x.cfg, &chain, &nd, &x.pp, x.cp.is_some())?.to_json().map_err(cerr)

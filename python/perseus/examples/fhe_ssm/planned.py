@@ -590,6 +590,7 @@ class PlannedSsmRun(PlannedRun):
         bundle=None,
         client=None,
         pcmm_cf=6,
+        pcmm_cf_map=None,
         diag_source="values",
         profile=False,
         profile_every=1,
@@ -655,6 +656,9 @@ class PlannedSsmRun(PlannedRun):
         self.n_conv = n_conv  # reply() unpacks n_conv rows; the parked lanes are dropped
         self.schedule, self.bundle, self.client = schedule, bundle, client
         self.pcmm_cf, self.check_bin = int(pcmm_cf), check_bin
+        #: {linear: CF} (pcmm_cf_table.load); None = every linear at pcmm_cf
+        self.pcmm_cf_map = None if pcmm_cf_map is None else {str(k): int(v) for k, v in pcmm_cf_map.items()}
+        self.cf_map_report: dict | None = None
         self.cpu_check = bool(cpu_check)
         self.diag_source = diag_source
         self.tiles_uploaded: list[str] = []
@@ -959,6 +963,24 @@ class PlannedSsmRun(PlannedRun):
             for lin in self.linears().values()
         ]
 
+    def applied_cf_map(self, declared) -> dict[str, int]:
+        """``Session(pcmm_cf_map=...)``: the table's entries for the ``declared`` linears (a whole-model table serves
+        a one-block run); the rest refresh at ``pcmm_cf``. What applies is kept in ``cf_map_report``."""
+        table, names = self.pcmm_cf_map or {}, set(declared)
+        applied = {k: v for k, v in table.items() if k in names}
+        fallback, ignored = sorted(names - set(table)), sorted(set(table) - names)
+        self.cf_map_report = {
+            "applied": applied,
+            "fallback": fallback,
+            "ignored": ignored,
+            "pcmm_cf": self.pcmm_cf,
+        }
+        self.log(
+            f"[planned] pcmm CF table: {len(applied)} linears from the table, {len(fallback)} at --pcmm-cf "
+            f"{self.pcmm_cf}, {len(ignored)} table entries not declared here"
+        )
+        return applied
+
     def finishes(self) -> dict[str, list[dict]]:
         """The PCMM finish descriptors of the reference stream by linear name (the capture's ``args.external``)."""
         out: dict[str, list[dict]] = {}
@@ -1015,6 +1037,8 @@ class PlannedSsmRun(PlannedRun):
         specs = self.pcmm_specs()
         kw["pcmm"] = specs or None
         kw["pcmm_cf"] = self.pcmm_cf
+        if self.pcmm_cf_map is not None:
+            kw["pcmm_cf_map"] = self.applied_cf_map([s[0] for s in specs])
         # the store holds the plaintexts read from it only, one slot per distinct (store alias, level) pair, which is
         # what stage_static stages: PlannedRun.session_kwargs (driver.py:725-731) counts every reference, generated
         # ones included (344,064 diagonals per tick at the model shape), and every pass-mask product is a reference of

@@ -73,6 +73,8 @@ pub(crate) struct PcmmPlan {
     pub max_in: usize,
     pub max_out: usize,
     pub opts: LinearOpts,
+    /// Per-linear CFs (`Session(pcmm_cf_map=...)`); a linear not in it refreshes at `opts.cf`.
+    pub cfs: BTreeMap<String, u32>,
     /// Finish group size (PF_PCMM_BATCH, 1..=4; 0/1 = one output at a time) and whether outputs of different raise
     /// drops batch per drop (PF_PCMM_BATCH_DROPS).
     pub batch: usize,
@@ -82,7 +84,7 @@ pub(crate) struct PcmmPlan {
 }
 
 impl PcmmPlan {
-    pub fn new(specs: &[LinSpec], cf: u32, batch: usize, batch_drops: bool) -> PyResult<PcmmPlan> {
+    pub fn new(specs: &[LinSpec], cf: u32, cf_map: Option<BTreeMap<String, u32>>, batch: usize, batch_drops: bool) -> PyResult<PcmmPlan> {
         if batch > pc_gpu::matmul::pcmm::MAX_BATCH {
             return Err(PyValueError::new_err(format!("pcmm batch (model.prefill.pcmm_batch / PF_PCMM_BATCH) {batch}: at most {}", pc_gpu::matmul::pcmm::MAX_BATCH)));
         }
@@ -102,10 +104,19 @@ impl PcmmPlan {
             }
             lins.push(PcmmLinear { name: name.clone(), shape, w_scale: *w_scale, shift: *shift });
         }
+        let cfs = cf_map.unwrap_or_default();
+        if let Some(name) = cfs.keys().find(|k| !lins.iter().any(|l| &l.name == *k)) {
+            return Err(PyValueError::new_err(format!("pcmm_cf_map: {name} is not a declared linear (pcmm=)")));
+        }
         let max_in = lins.iter().map(|l| l.shape.n_in).max().unwrap_or(0);
         let max_out = lins.iter().map(|l| l.shape.n_out).max().unwrap_or(0);
         let batch = batch.max(1);
-        Ok(PcmmPlan { cfg: PcmmCfg { shapes, ..PcmmCfg::default() }, lins, max_in, max_out, opts: LinearOpts { cf, ..LinearOpts::default() }, batch, batch_drops, max_groups: max_out })
+        Ok(PcmmPlan { cfg: PcmmCfg { shapes, ..PcmmCfg::default() }, lins, max_in, max_out, opts: LinearOpts { cf, ..LinearOpts::default() }, cfs, batch, batch_drops, max_groups: max_out })
+    }
+
+    /// The CF `name`'s finishes refresh at: its `pcmm_cf_map` entry, else the session's `pcmm_cf`.
+    pub fn cf_of(&self, name: &str) -> u32 {
+        self.cfs.get(name).copied().unwrap_or(self.opts.cf)
     }
 
     /// Size the service outputs for the finishes of `progs`: the most groups any of them splits into.
@@ -151,6 +162,8 @@ pub(crate) struct Served {
     pub lin: PcmmLinear,
     pub w: WeightBuf<'static>,
     pub uploaded: bool,
+    /// Its own CF (`pcmm_cf_map`); None = the service's `opts.cf`.
+    pub cf: Option<u32>,
 }
 
 /// The service: the engine, the linears, its own input / output ciphertexts, the call options. Field order = drop
@@ -190,7 +203,8 @@ impl PcmmRt {
         let mut lins = BTreeMap::new();
         for l in plan.lins {
             let w = WeightBuf::carve(arena, &l.shape).map_err(e)?;
-            lins.insert(l.name.clone(), Served { lin: l, w, uploaded: false });
+            let cf = plan.cfs.get(&l.name).copied();
+            lins.insert(l.name.clone(), Served { lin: l, w, uploaded: false, cf });
         }
         let ct = |k: usize| -> PyResult<Ct<'static, W>> { Ok(Ct::new(CtMeta::new(0, 1), CtBuf::new(arena, "pcmm.cts", ctx.lay, k).map_err(e)?)) };
         let ins = (0..plan.max_in).map(|_| ct(1)).collect::<PyResult<Vec<_>>>()?;
@@ -260,10 +274,12 @@ impl<'r> FinishExec<'static, W, M> for PcmmExec<'r> {
             outs[g].buf.k = ms.len();
         }
         let m0 = ins[0].meta;
+        // the linear's own CF (pcmm_cf_map), else the session's
+        let lo = LinearOpts { cf: sv.cf.unwrap_or(opts.cf), ..*opts };
         let r = if ins[..d.n_in].iter().all(|x| (x.meta.level, x.meta.deg, x.meta.nf) == (m0.level, m0.deg, m0.nf)) {
-            linear(cx, self.route, pcmm, lin, &sv.w.buf, &mut ins[..d.n_in], &mut outs[..groups.len()], &groups, &gd, *opts, None, None)
+            linear(cx, self.route, pcmm, lin, &sv.w.buf, &mut ins[..d.n_in], &mut outs[..groups.len()], &groups, &gd, lo, None, None)
         } else {
-            linear_per_input(cx, self.route, pcmm, lin, &sv.w.buf, &mut ins[..d.n_in], &mut outs[..groups.len()], &groups, &gd, *opts)
+            linear_per_input(cx, self.route, pcmm, lin, &sv.w.buf, &mut ins[..d.n_in], &mut outs[..groups.len()], &groups, &gd, lo)
         };
         let mut res: pc_program::Result<()> = r.map_err(Into::into);
         if res.is_ok() {

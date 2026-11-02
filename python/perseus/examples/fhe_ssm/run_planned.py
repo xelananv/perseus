@@ -40,7 +40,7 @@ from perseus import config
 from perseus._paths import resolve
 from perseus.plan import contract
 
-from . import diaggen, fakes, passmasks, run_fake
+from . import diaggen, fakes, passmasks, pcmm_cf_table, run_fake
 from . import scales as scales_mod
 from .block import PACK_STATS
 from .decode import FreeRun, Policy, prompt_lengths, streams_from_record
@@ -616,6 +616,13 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--pool", type=int, default=16, help="eager ciphertext slots (block 0's input, the reply)")
     s.add_argument("--pcmm-cf", type=int, default=6, help="the PCMM service's correction factor")
     s.add_argument(
+        "--pcmm-cf-table",
+        default=None,
+        metavar="FILE",
+        help="a CF per PCMM linear (pcmm_cf_table.py's JSON; a linear not in it at --pcmm-cf); unset = every "
+        "linear at --pcmm-cf",
+    )
+    s.add_argument(
         "--diag-batch",
         type=int,
         default=None,
@@ -976,10 +983,11 @@ def main(argv=None) -> int:
         client = _pc.Client(
             _pc.ClientSecret.from_bytes(list((bundle / "client_secret.bin").read_bytes())), complex=True
         )
+    cf_map = None if a.pcmm_cf_table is None else pcmm_cf_table.load(a.pcmm_cf_table)
     run = PlannedSsmRun(
         SsmRecorder(model, model.n_layers, lean=a.lean and mode != "run"), plan, cfg, labels, keys, model=model,
         conversations=None if pass_on else n, work_dir=work, schedule=a.schedule, bundle=None if bundle is None else bundle / "keys.pckb", client=client,
-        pcmm_cf=a.pcmm_cf, diag_source=a.diag_source, profile=a.profile, profile_every=a.profile_every, ref_token=a.ref_token, probe=a.probe,
+        pcmm_cf=a.pcmm_cf, pcmm_cf_map=cf_map, diag_source=a.diag_source, profile=a.profile, profile_every=a.profile_every, ref_token=a.ref_token, probe=a.probe,
         pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool, passes=pass_list, cpu_check=mode == "prepare", log=log,
     )  # fmt: skip
     needs = key_needs(model)
@@ -1019,6 +1027,13 @@ def main(argv=None) -> int:
     if a.scales.lower() != "none":
         path = scales_mod.SHIPPED if a.scales == "shipped" else a.scales
         header["scales_file"] = {"path": str(path), "sha256": sha256_file(path)}
+    if a.pcmm_cf_table is not None:
+        # what the session applied (cf_map_report) is filled in once the session is built
+        header["pcmm_cf_table"] = {
+            "path": str(a.pcmm_cf_table),
+            "sha256": sha256_file(a.pcmm_cf_table),
+            "cf": cf_map,
+        }
     if keys_mode == KEYS_INPROC:
         log(f"[planned] {INSECURE_BANNER}")
     try:
@@ -1106,6 +1121,8 @@ def main(argv=None) -> int:
     if a.diag_probe:
         header["setup"]["diag_probe"] = run.probe_diagonals(a.diag_probe, seed=a.seed)
         log(f"[planned] diag probe: {json.dumps(header['setup']['diag_probe']['levels'])}")
+    if "pcmm_cf_table" in header:
+        header["pcmm_cf_table"]["session"] = run.cf_map_report
     header["ticks"] = []
     write_json(out, header)
     if pass_list is not None:
