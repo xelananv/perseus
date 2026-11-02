@@ -750,11 +750,19 @@ def sum_census(run: PlannedSsmRun) -> dict:
     return out
 
 
+def check_errors(progs: dict) -> dict:
+    """The programs whose compile check found an error: ``{label: errors}``, empty when none did. A program's
+    ``check`` is ``(n, errors)`` with a different ``n`` per side: ``(len(errors), errors)`` on the CPU stand-in
+    (planned.py) and ``(pinned vars, errors)`` on the device (crates/pc-py/src/program.rs ``check``), so only the error
+    list decides; a device program with pinned variables and no error is not an error."""
+    return {lab: list(p["check"][1]) for lab, p in progs.items() if p.get("check") and p["check"][1]}
+
+
 def prepare_report(run: PlannedSsmRun) -> dict:
     """What the CPU part established: the compile's verdict per program, the registers, the carried names, the
     static-stream check, the plaintext budget, the fused sums, the diagonal tiles, the PCMM declarations."""
     progs = run.program_report()
-    errors = {lab: p["check"][1] for lab, p in progs.items() if p["check"] and p["check"][0]}
+    errors = check_errors(progs)
     rep = {
         "compiled_by": run.compiled_by,
         "schedule": run.schedule,

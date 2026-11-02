@@ -173,6 +173,22 @@ def test_prepare_only_binds_the_recorded_stream_to_the_plan(synthetic_plan, tmp_
     assert d["mode"] == "prepare"
 
 
+def test_check_errors_reads_the_error_list_not_the_first_field():
+    """A program's ``check`` is ``(len(errors), errors)`` on the CPU stand-in and ``(pinned vars, errors)`` on the
+    device; the 2026-11-02 GPU session's records held ``"check": [580, []]`` and so ``check_errors`` ``{"block_0": [],
+    ...}``, which failed pass-tests and the pod's records check. Only the error list decides."""
+    device_clean = {
+        "block_0": {"check": [580, []]},
+        "block_1": {"check": [173, []]},
+        "tail": {"check": [0, []]},
+    }
+    assert run_planned.check_errors(device_clean) == {}
+    cpu_clean = {"block_0": {"check": [0, []]}, "block_1": {"check": None}}
+    assert run_planned.check_errors(cpu_clean) == {}
+    dirty = {"block_0": {"check": [580, ["pinned var 7 freed early"]]}, "block_1": {"check": [1, ["e"]]}}
+    assert run_planned.check_errors(dirty) == {"block_0": ["pinned var 7 freed early"], "block_1": ["e"]}
+
+
 def test_prepare_only_with_the_siblings_schedule(synthetic_plan, tmp_path):
     out = tmp_path / "prep_sib.json"
     rc = run_planned.main(

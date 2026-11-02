@@ -34,7 +34,20 @@ this session's to measure.
   when it falls outside their spread (max − min over both controls' unfenced ticks).
 - `RUN_TAG` names every run: `run_<arm>[_bN][_<tag>]`; without it a second run of an arm overwrites the first.
 - Fidelity next to speed for every row: the reply's RMS relative error against the exact reference over the live
-  lane-slots, the worst live lane-slot, and top-1 agreement at every next-token lane-slot.
+  lane-slots, the worst live lane-slot, and top-1 agreement at every next-token lane-slot. The session script prints
+  one fidelity line per run into its log (relErrRms per timed pass, the worst conversation or lane-slot, top-1, the
+  driver's `pcmm_cf` / `stc_cache`).
+- The gates are fidelity gates: the first contact (step 2) and the staging contacts (step 2b) need relErrRms < 1e-3 on
+  every timed pass, beside their structural conditions; a failure withholds the `cfg-*` runs. `CONTACT_GATE=structure`
+  (the session script's; default `fidelity`) passes a contact on its structural conditions alone (served, captures,
+  invalidations, free memory) and its log line says fidelity was not gated: the timings are then the circuit's cost
+  (it executes the same operations whatever its precision) and **no configuration may be quoted as working**; every
+  row carries its failing fidelity beside its time, and `numbers.md` opens with the gates' verdicts.
+- One StC-first stage cache size on both sides of every bracket: `--stc-cache 160` on every whole-model run
+  (`RUN_EXTRA`, the session script's `STC_CACHE`). The session sizes the cache from a key count without the input
+  scale, below the cache's own key set, so the 24-block runs evicted at the default 8 and died in their first pass [S21];
+  160 ≥ 24 blocks × the 6 keys one block used [S21] (an upper bound that assumes every block uses as many as block 0).
+  The one-block runs keep the default (none evicted).
 
 ## 1. The box
 
@@ -91,14 +104,14 @@ and 7; `mixed`: 3; `churn`: 5), so a steady-state wall exists without a fence.
 |---|---|---|---|
 | 1 | setup and the build | the clone at the tip (upstream `speedrun` plus the branch's bundle; HEAD = the tip's full SHA; the weights' sha256 3ec3f1d8…293e784b), the data, the staged tree checked against its manifest; then `run_gpu.sh box`, `build`, `verify`, `bench` | stop on any failure; `verify`: `device classes missing: none`, the compile check built first, upstream's CPU tests and the port's light suite (`-m 'not gpu and not slow_shape and not staged_tree'`, `-rs`; the `staged_tree` test reads a tree at a machine-specific path, `FHE_SSM_STAGED_TREE`, and would skip here) pass with no skipped test, the change check `OK` |
 | 1a | the PCMM arm's CPU part under the pass kernels | `run_gpu.sh prepare cfg-pcmm24` (the 24-block PCMM prepare: more than 3 GB of host memory [S13]; `--prepare-only` compiles through the CPU compile check on this build too) | `prepare_cfg-pcmm24/record.json`: 25 programs, `compiled_by cpu-check`, `check_errors {}`, `static_stream true`, `capture.checked true`, the budget by references and by aliases, `staging_dry_run` |
-| 2 | first device contact | `BLOCKS=1 RUN_TAG=smoke run pcmm24` | exit 0, `served` all `r` on the timed ticks, relErrRms < 1e-3 |
+| 2 | first device contact | `BLOCKS=1 RUN_TAG=smoke run pcmm24` | exit 0 (else stop), `served` all `r` on the timed ticks, relErrRms < 1e-3 on every timed tick and on the worst conversation (gated: a failure withholds the `cfg-*` runs under `CONTACT_GATE=fidelity`; logged, not gated, under `structure`) |
 | 2a | the pass kernels' device tests | `run_gpu.sh pass-tests` (`tests/test_pass_gpu.py`: one block at d = 1,024, PCMM-24, LANDING=high, the `tick:4`, `mixed` and `doc:130:64` scenarios; `FHE_SSM_REQUIRE_DEVICE=1`, `CUDA_MODULE_LOADING=EAGER`) | `3 passed` |
-| 2b | the per-pass staging's contacts | `BLOCKS=1 SCENARIO=tick TICKS=4 RUN_TAG=smoke_tick run cfg-pcmm24`, then `BLOCKS=1 SCENARIO=mixed RUN_TAG=smoke_mixed run cfg-pcmm24` | every timed pass: `served` all `r`; on every restaging pass (`staged` > 0): `counters.captures == 0` and `counters.invalidations == 0` (the in-place re-encode keeps the graphs: `crates/pc-py/src/store.rs:2-5`, `crates/pc-program/src/replay.rs:879`); relErrRms < 1e-3 over the live lane-slots and on the worst one (a non-finite value is the worst); `mem_free_bytes` equal on every pass. A failed contact withholds the `cfg-*` runs of step 3 (the controls run) |
-| 3 | the PCMM bracket (whole model, one binary, `KEYS=inproc`, idle GPU and host, `PROFILE_EVERY=2`) | `TICKS=6 RUN_TAG=ctlA run pcmm24` → `TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-pcmm24` (the modularity overhead) → `SCENARIO=prefill:320 RUN_TAG=prefill run cfg-pcmm24` → `SCENARIO=doc:258:64 RUN_TAG=doc run cfg-pcmm24` → `SCENARIO=mixed RUN_TAG=mixed run cfg-pcmm24` → `TICKS=6 RUN_TAG=ctlB run pcmm24` → `TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-pcmm24-tick` (the pure-kernel control plan) | every record: `capture.checked true`, `prepare.check_errors {}`; the numbers table (§4) with every run's build identity (commit, dirty, `_pc` .so) and load beside it |
+| 2b | the per-pass staging's contacts | `BLOCKS=1 SCENARIO=tick TICKS=4 RUN_TAG=smoke_tick run cfg-pcmm24`, then `BLOCKS=1 SCENARIO=mixed RUN_TAG=smoke_mixed run cfg-pcmm24` | every timed pass: `served` all `r`; on every restaging pass (`staged` > 0): `counters.captures == 0` and `counters.invalidations == 0` (the in-place re-encode keeps the graphs: `crates/pc-py/src/store.rs:2-5`, `crates/pc-program/src/replay.rs:879`); relErrRms < 1e-3 over the live lane-slots and on the worst one (a non-finite value is the worst; under `CONTACT_GATE=structure` printed, not gated); `mem_free_bytes` equal on every pass. A failed contact withholds the `cfg-*` runs of steps 3 and 5 (the controls run) |
+| 3 | the PCMM bracket (whole model, one binary, `KEYS=inproc`, idle GPU and host, `PROFILE_EVERY=2`) | `TICKS=6 RUN_TAG=ctlA run pcmm24` → `TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-pcmm24` (the modularity overhead) → `SCENARIO=prefill:320 RUN_TAG=prefill run cfg-pcmm24` → `SCENARIO=doc:258:64 RUN_TAG=doc run cfg-pcmm24` → `SCENARIO=mixed RUN_TAG=mixed run cfg-pcmm24` → `TICKS=6 RUN_TAG=ctlB run pcmm24` → `TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-pcmm24-tick` (the pure-kernel control plan); every run with `RUN_EXTRA="--stc-cache 160"` (§0) | every record: `capture.checked true`, `prepare.check_errors {}`; the numbers table (§4) with every run's build identity (commit, dirty, `_pc` .so) and load beside it |
 | 4 | the device diagonal encoder's acceptance | `run_gpu.sh diag-tests` (checks 1-3) → `RUN_TAG=smoke_diag run_gpu.sh smoke-diag` → `DIAG_E=1 DIAG_F=1 run_gpu.sh diag-tests` (on the shipped `plan_ref`) | §3a |
 | 5 | the diagonal bracket under the encoder | `DIAG_SOURCE=generated TICKS=6 RUN_TAG=ctlA run ref` → `DIAG_SOURCE=generated TICKS=6 SCENARIO=tick RUN_TAG=tick run cfg-ref` → `DIAG_SOURCE=generated TICKS=6 RUN_TAG=ctlB run ref`; only once checks 1-3 left their `.passed` markers and `smoke-diag` passed | as step 3 |
-| 6 | the deployment split | `run_gpu.sh keyspec cfg-pcmm24` → `run_gpu.sh keygen cfg-pcmm24` → `KEYS=bundle FHE_SSM_KEYS=$OUT/keys_cfg-pcmm24 TICKS=6 SCENARIO=tick RUN_TAG=bundle run cfg-pcmm24` | `keys.mode bundle`, `setup.has_secret false`; no timing comparison with step 3 |
-| 7 | wrap up | the checks over every record, the numbers table, a tar of the records (without the staged tree and the `.work` directories); pull them home | — |
+| 6 | the deployment split | `run_gpu.sh keyspec cfg-pcmm24` → `run_gpu.sh keygen cfg-pcmm24` → `KEYS=bundle FHE_SSM_KEYS=$OUT/keys_cfg-pcmm24 TICKS=6 SCENARIO=tick RUN_TAG=bundle run cfg-pcmm24` | `keys.mode bundle`, `setup.has_secret false`; no timing comparison with step 3. Then the key directory (`client_secret.bin`, `keys.pckb`) is deleted, its request and logs kept in `keyrequest_cfg-pcmm24/`, and the log says so |
+| 7 | wrap up | the checks over every record, the numbers table, a tar of the records (without the staged tree, the `.work` directories and any key file); pull them home | — |
 
 Never run `capture` or `plan` for a shipped arm expecting a new product: both reuse what is in `$OUT`. A `cfg-*` arm's
 `capture` is four configuration captures merged under `max_each`: `CFG_CONFIGS=<dir>` names the directory of the four
@@ -124,13 +137,37 @@ steps `DIAG_ONLY` lists (default 1,2,3, plus e with `DIAG_E=1` and f with `DIAG_
 |---|---|---|---|
 | 1 | the kernels against host references, every built instance | `cargo run --release -p pc-kernels --bin pc-kernels-selftest -- --no-bench` | exit 0 and the final `[selftest] instances ...: total mismatches 0` line; per instance 3 `encode`, 4 `encode_many` and 2 `diag_gather` lines, each at `0 mismatches` (18 lines on the default w32 build) |
 | 2 | (a) generated slots and rows == the eager encode of the host vector; (b) `encode_many` == single encodes over B = 1, 32, 128; (c) a fused sum == `PtStore::mult_pt_sum` | `cargo test --release -p pc-program --features gpu --test diag_gen_gpu -- --ignored --test-threads=1 --nocapture --skip f_device_ms_per_plaintext` | `test result: ok. 3 passed`; every `[diag_gen]` line at 0 words differing |
-| 3 | (a, b) the session's probe at the model's width against the port's oracle; (d) one block under `generated` against the exact forward, 3 ticks; a perturbed tile (negative control); chunks of 1 and 128 | `pytest -q -rs -x -m gpu python/perseus/examples/fhe_ssm/tests/test_diag_gpu.py -k "not model_shape"` | `3 passed`: probe mismatches 0, 0, 0; `relErrRms_vs_exact` < 1e-3 per tick; the perturbed run NOT below 1e-3; `splits` 0; free memory equal on every timed tick |
+| 3 | (a, b) the session's probe at the model's width against the port's oracle; (d) one block under `generated` against the exact forward, 3 ticks; a perturbed tile (negative control); chunks of 1 and 128 | `pytest -q -rs -x -m gpu python/perseus/examples/fhe_ssm/tests/test_diag_gpu.py -k "not model_shape"` | `3 passed`: probe mismatches 0, 0, 0; `relErrRms_vs_exact` < 1e-3 per tick; the perturbed run (`b0.wv` uploaded ×4; expected of order 0.1) NOT below 1e-3; `splits` 0; free memory equal on every timed tick |
 | 4 | the first planned run | `smoke-diag` (`ref` at `BLOCKS=1` under `generated`; the shipped `cap_stock_b1`, `plan_ref_b1`) | exit 0; `setup.diag` tiles = uploaded = 5, `missing` empty |
 | 5 | (e) the model, 2 ticks on the shipped whole-model `plan_ref`, `--diag-probe 32` | `DIAG_E=1` (needs `DATA` and `$OUT/bootstrap_placements/plan_ref`, cut on a capture named `cap_stock`, 25 block plans) | `1 passed`: 120 tiles uploaded, 8,448 diagonal sums, probe mismatches 0, `splits` 0, free memory equal on both ticks, top-1 > 0.95 |
 | 6 | (f) device ms per plaintext, B = 1, 32, 128, 18 and 10 limbs | `DIAG_F=1` | `test result: ok. 1 passed` and the `[diag_gen] (f)` lines |
 
 A values run and a generated run never agree word for word (host vs device encoders, ±1 in rare coefficients), so (d)
 and (e) are tolerance scores against the exact forward; the word-for-word checks are 1-3, inside one encoder.
+
+### 3b. The re-run on the same box
+
+After a session whose gates failed, the fixes (Python and shell only) are re-run on the same box, its setup kept (the
+CUDA toolkit, rustup, uv, the checkout, the data, the staged tree). The session script's `rerun` mode fetches the new
+branch bundle, checks out the tip (HEAD = the tip's full SHA), runs `box`, `build` and `verify`, and stops when the
+`_pc` .so's digest is not the first session's (`ALLOW_NEW_SO=1` goes on: every time is then the new build's, §0). It
+writes into a fresh `OUT` (`/root/out_r1` by default, its `gpu/` laid out from the staged tree as the first session's
+was) and never into the first session's. Every step ends after `STEP_TIMEOUT` (default 3 h; the step's process group
+is terminated and the session goes on).
+
+- **Phase A, the discriminators** (`BLOCKS=1`, `KEYS=inproc`, nothing else running): `high` under
+  `DIAG_SOURCE=generated` (the high landing without PCMM; its 1-block capture and plan are made on the box with
+  `capture` and `plan`, CPU seconds, an exception to §2), `pcmm24` with `RUN_EXTRA="--pcmm-cf 4"` and `"--pcmm-cf 8"`
+  (the PCMM finish's correction factor; the driver's default is 6), and `pcmm24` at the default as the anchor (the first
+  contact repeated on this tip); then one fidelity line per run and `phase A done`.
+- **Phase B, the re-run**: step 2a, step 2b under `CONTACT_GATE`, step 3 with the cache size of §0 and any `RUN_EXTRA`
+  given (the one-block contacts take `RUN_EXTRA` too, not the cache size), step 4 (checks 1 and 2 carried from the first
+  session when the .so is the same, else run again; `DIAG_RERUN=1` reruns a check that passed in this `OUT`), step 5,
+  step 6 (the key directory deleted after the bundle run), step 7.
+
+`run_gpu.sh run` takes `RUN_EXTRA`: more driver flags appended to the run's command line (word-split; written into the
+run's log line and its `build_id.txt`; the record's `flags` hold the driver's parsed values). A run flag only: it never
+changes a capture or a plan.
 
 ## 4. The numbers table
 
@@ -146,7 +183,9 @@ and pass index:
 - the restage cost: a restaging pass's `seconds` minus the next steady pass's in the same configuration (`stage_s`
   is host issue time only: `PtStore.stage` encodes on the compute lane, asynchronously to the host, so the device part
   of a restage lands in the pass's `seconds`);
-- fidelity beside every time: `relErrRms_vs_exact`, its worst live lane-slot, `top1`.
+- fidelity beside every time: `relErrRms_vs_exact`, its worst live lane-slot, `top1`; the controls' relErrRms per tick
+  beside their mean; the driver's `stc_cache` and `pcmm_cf` per run beside its build identity; and, first, the gates'
+  verdicts (`gates.txt`: the first contact, both staging contacts, under which `CONTACT_GATE`).
 
 The per-stage split comes from the fenced passes (`stages[].wall_s`). There is **no per-step split on this path**:
 `PF_NVTX_STEPS` is a torch NVTX range around Python `rt.step` scopes (`crates/pc-config/src/fields.rs:502-504`,

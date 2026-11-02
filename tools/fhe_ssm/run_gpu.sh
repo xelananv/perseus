@@ -51,7 +51,8 @@
 # in FHE_SSM_KEYS, made by keyspec + keygen | that directory), PROFILE_EVERY (2: a stage fence on every 2nd tick, so one run
 # holds fenced and unfenced ticks; 1 = every tick), PREPARE_EXTRA (more `prepare` flags, e.g. --lean on a small host),
 # PY (<worktree>/.venv/bin/python), PERSEUS_CORE_ARCH (build: default from nvidia-smi's compute capability),
-# PC_NVCC_JOBS (build: default 8), DIAG_SOURCE (values | generated, default values: where the diagonal linears'
+# PC_NVCC_JOBS (build: default 8), RUN_EXTRA (run: more driver flags appended to the run's command line, word-split, e.g.
+# "--stc-cache 160 --pcmm-cf 4"; recorded in the run's log line; a run flag only, never a capture's or a plan's), DIAG_SOURCE (values | generated, default values: where the diagonal linears'
 # plaintexts come from on the device, the driver's --diag-source; generated = the device diagonal encoder, which makes
 # every non-blocked arm a device arm; a driver flag only, so the captures and plans are the same under both), DIAG_E /
 # DIAG_F (diag-tests: 1 = also run (e) the model shape and (f) the timings), REPLAN (1: plan re-cuts an existing plan),
@@ -385,14 +386,14 @@ run)
     resolve_data
     capture_flag "$a"
     r="$OUT/run_$a$S$T"; mkdir -p "$r"
-    echo "$(build_id)" > "$r/build_id.txt"
+    echo "$(build_id)${RUN_EXTRA:+ run_extra=$RUN_EXTRA}" > "$r/build_id.txt"
     nvidia-smi --query-gpu=timestamp,memory.used,utilization.gpu,power.draw --format=csv -lms 500 -i "$GPU" > "$r/nvsmi.csv" 2>/dev/null &
     smi=$!
     trap 'kill "$smi" 2>/dev/null; wait "$smi" 2>/dev/null' EXIT       # the sampler dies with the step, whatever ends it
-    log "run $a${RUN_TAG:+ (tag $RUN_TAG)}: $DRIVER --plan $p --ticks $TICKS --profile --profile-every $PROFILE_EVERY $CAP $RUNF $CAPF --keys $KEYS"
+    log "run $a${RUN_TAG:+ (tag $RUN_TAG)}: $DRIVER --plan $p --ticks $TICKS --profile --profile-every $PROFILE_EVERY $CAP $RUNF $CAPF --keys $KEYS${RUN_EXTRA:+ $RUN_EXTRA}"
     t0=$(date +%s)
     ( cd "$W" && env CUDA_VISIBLE_DEVICES=$GPU PYTHONPATH="$W/python" $CAPENV "$PY" -m "$DRIVER" $MODEL_ARGS --plan "$p" --ticks "$TICKS" \
-        --profile --profile-every "$PROFILE_EVERY" --keys "$KEYS" $CAP $RUNF $CAPF --out "$r/record.json" ) > "$r/run.log" 2>&1
+        --profile --profile-every "$PROFILE_EVERY" --keys "$KEYS" $CAP $RUNF $CAPF ${RUN_EXTRA:-} --out "$r/record.json" ) > "$r/run.log" 2>&1
     rc=$?
     kill "$smi" 2>/dev/null; wait "$smi" 2>/dev/null; trap - EXIT
     peak=$(awk -F', ' 'NR>1 {gsub(/ MiB/,"",$2); if ($2+0>m) m=$2+0} END {print m+0}' "$r/nvsmi.csv")

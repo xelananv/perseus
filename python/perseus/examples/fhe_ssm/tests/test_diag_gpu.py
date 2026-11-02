@@ -127,12 +127,15 @@ def test_a_b_probe_and_d_one_block_against_the_exact_forward(one_block_diag, tmp
 
 
 def test_d_a_perturbed_tile_leaves_the_tolerance(one_block_diag, tmp_path):
-    """The negative control: ``b0.wr`` uploaded x2 (``--diag-perturb``) while the exact forward keeps the true matrix.
+    """The negative control: ``b0.wv`` uploaded x4 (``--diag-perturb``) while the exact forward keeps the true matrix.
     A device that read no tile, or the wrong one, could not leave the bound this way; a NaN reply also fails the
-    bound (``not < bound``)."""
+    bound (``not < bound``). W_v is on the first-order path (the channel mix's output, added to the residual), so x4
+    adds three times its share of the residual, about 5 % on this checkpoint: of order 0.1, two orders over the bound.
+    The earlier ``b0.wr:2`` reached only 7.93e-4 on the device (the 2026-11-02 session): W_r enters through the
+    gate's 1.5 % swing times that 5 % share."""
     d = run(one_block_diag["base"], one_block_diag["plan"], tmp_path / "perturbed.json", "--ticks", "1",
-            "--diag-perturb", "b0.wr:2")  # fmt: skip
-    assert d["diag_perturb"]["tile"] == "b0.wr"
+            "--diag-perturb", "b0.wv:4")  # fmt: skip
+    assert d["diag_perturb"]["tile"] == "b0.wv"
     for t in d["ticks"]:
         assert not t["relErrRms_vs_exact"] < REL_ERR_RMS, t
 
