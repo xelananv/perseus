@@ -534,6 +534,13 @@ def parser() -> argparse.ArgumentParser:
         action="store_true",
         help="after each prompt of --tokens, feed back the record's decode policy's pick",
     )
+    g.add_argument(
+        "--pass-policy",
+        default=None,
+        help="with --pass-kernels on: a serve record whose decodePolicy picks every generated token (in place of the "
+        "argmax), with its conversation's fed tokens as the history; the exact model picks the same way and each pass "
+        "row records the picks and the lane-slots whose picks differ (passmasks.resolve_with_policy)",
+    )
     g.add_argument("--seed", type=int, default=7, help="the random tokens' seed")
     g.add_argument("--schedule", default="program", choices=SCHEDULES, help="Program.compile's schedule")
     g.add_argument(
@@ -819,6 +826,16 @@ def run_passes(
     )
     meta = cast("dict", header["pass_list"])
     ids = meta["config_ids"]
+    #: --pass-policy: the record's decode policy picks the generated tokens; the exact reply of the last pass, and each
+    #: named stream's fed tokens, are what it picks with (passmasks.resolve_with_policy)
+    policy = None
+    if a.pass_policy:
+        with open(a.pass_policy, encoding="utf-8") as f:
+            policy = Policy.from_record(json.load(f))
+    if policy is not None:
+        meta["decode_policy"] = policy.as_dict()
+    last_want: list = [None]
+    history: dict[str, list[int]] = {}
 
     def one(p: int, cfg, rows_q, exact, timed: bool):
         c0 = run.counters()
@@ -839,6 +856,7 @@ def run_passes(
             "diag": {k: c1["diag_stats"][k] - c0["diag_stats"][k] for k in DIAG_COUNTERS} if "diag_stats" in c1 else None,
         }  # fmt: skip
         want = exact.pass_(cfg, rows_q)
+        last_want[0] = want
         if got is None:
             replies.mkdir(parents=True, exist_ok=True)
             f = replies / f"pass_{p}{'' if timed else '_warmup'}.ct"
@@ -869,9 +887,16 @@ def run_passes(
                 f"pass {p} ({cfg0.name}): a generated token needs the previous pass's decrypted reply; this session "
                 "exports frames only (a bundle without client_secret.bin)"
             )
-        cfg = passmasks.resolve_generated(cfg0, prev, emb)
+        picks = None
+        if policy is None:
+            cfg = passmasks.resolve_generated(cfg0, prev, emb)
+        else:
+            cfg, picks = passmasks.resolve_with_policy(cfg0, prev, last_want[0], emb, policy, history)
+            passmasks.feed_history(cfg, history)
         resolved.append(cfg)
         row, prev = one(p, cfg, passmasks.pass_rows(cfg, params.emb_row), exact, True)
+        if picks is not None:
+            row["policy_picks"] = picks
         header["ticks"].append(row)
         meta["resolved"] = passmasks.dump_list(resolved)
         write_json(out, header)
@@ -909,8 +934,8 @@ def main(argv=None) -> int:
             )
         if a.lane_config and a.scenario:
             raise SystemExit("--lane-config and --scenario name the passes twice: give one")
-    elif a.lane_config or a.scenario:
-        raise SystemExit("--lane-config / --scenario need --pass-kernels on")
+    elif a.lane_config or a.scenario or a.pass_policy:
+        raise SystemExit("--lane-config / --scenario / --pass-policy need --pass-kernels on")
     mode = run_mode(a)
     if mode == "keygen":
         return keygen(a)

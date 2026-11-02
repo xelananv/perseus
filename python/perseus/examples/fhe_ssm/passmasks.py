@@ -486,9 +486,10 @@ def pass_rows(cfg: PassConfig, emb_row: Callable[[int], np.ndarray]) -> np.ndarr
     return np.stack([np.asarray(emb_row(int(k)), dtype=np.float64) for k in cfg.tokens])
 
 
-def resolve_generated(cfg: PassConfig, prev_reply_q, head) -> PassConfig:
+def resolve_generated(cfg: PassConfig, prev_reply_q, head, pick=None) -> PassConfig:
     """``cfg`` with every ``GENERATED`` token replaced by ``argmax(prev_reply_q[q] @ head.T)`` at its own lane-slot
-    (copies follow their source): what a client does with the previous pass's decrypted reply."""
+    (copies follow their source): what a client does with the previous pass's decrypted reply. ``pick(q, logits)``,
+    when given, chooses in place of the argmax (a decode policy: ``resolve_with_policy``)."""
     toks = list(cfg.tokens)
     if GENERATED not in toks:
         return cfg
@@ -498,7 +499,8 @@ def resolve_generated(cfg: PassConfig, prev_reply_q, head) -> PassConfig:
     roles = cfg.roles()
     for q, k in enumerate(toks):
         if k == GENERATED and roles[q][0] == "conv":
-            toks[q] = int(np.argmax(np.asarray(prev_reply_q[q], dtype=np.float64) @ head.T))
+            logits = np.asarray(prev_reply_q[q], dtype=np.float64) @ head.T
+            toks[q] = int(np.argmax(logits)) if pick is None else int(pick(q, logits))
     for seg in cfg.segments:
         if seg.entry == "parked" and toks[seg.q0] == GENERATED:
             toks[seg.q0] = toks[int(seg.parked_from)]  # type: ignore[arg-type]
@@ -507,6 +509,45 @@ def resolve_generated(cfg: PassConfig, prev_reply_q, head) -> PassConfig:
             f"pass {cfg.name!r}: a generated token on a lane-slot that is not a live conversation"
         )
     return dataclasses.replace(cfg, tokens=tuple(toks))
+
+
+def feed_history(cfg: PassConfig, history: dict[str, list[int]]) -> None:
+    """Append what ``cfg`` (resolved) feeds each named stream to ``history``: a sequence segment its positions'
+    tokens in order, a live conversation its one token (``decode_pub``'s reading of a resolved pass)."""
+    for seg in cfg.segments:
+        if seg.stream is None:
+            continue
+        if seg.kind == "seq":
+            history.setdefault(seg.stream, []).extend(int(t) for t in cfg.tokens[seg.q0 : seg.h1])
+        elif seg.live:
+            history.setdefault(seg.stream, []).append(int(cfg.tokens[seg.q0]))
+
+
+def resolve_with_policy(
+    cfg: PassConfig, prev_reply_q, want_reply_q, head, policy, history: dict[str, list[int]]
+) -> tuple[PassConfig, dict]:
+    """``resolve_generated`` under a decode policy (``decode.Policy``: ``pick(logits, history)``), the way a client
+    picks from the decrypted reply: each generated token is the policy's pick on the previous pass's decrypted logits
+    with its conversation's own fed tokens as the history (``history``, kept by ``feed_history``: what ``FreeRun``
+    gives the policy in tick mode). The exact model's pick (``want_reply_q``, the same history) is recorded beside
+    it; returns the resolved pass and ``{"picks": n, "flips": [lane-slots whose two picks differ]}``."""
+    stream = {seg.q0: seg.stream for seg in cfg.segments if seg.kind != "seq"}
+    head = np.asarray(head, dtype=np.float64)
+    flips: list[int] = []
+    n = 0
+
+    def pick(q: int, logits) -> int:
+        nonlocal n
+        hist = history.get(stream.get(q) or "", [])
+        got = int(policy.pick(logits, hist))
+        if want_reply_q is not None:
+            want = int(policy.pick(np.asarray(want_reply_q[q], dtype=np.float64) @ head.T, hist))
+            n += 1
+            if want != got:
+                flips.append(q)
+        return got
+
+    return resolve_generated(cfg, prev_reply_q, head, pick), {"picks": n, "flips": flips}
 
 
 # ── the masks ──────────────────────────────────────────────────────────────────────────────────
