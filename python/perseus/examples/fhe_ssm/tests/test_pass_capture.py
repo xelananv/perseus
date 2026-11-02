@@ -551,3 +551,21 @@ def test_capture_configurations_are_the_four():
         assert [c.describe() for c in cs] == [c.describe() for c in want[lab][0]]
         assert all(t == passmasks.GENERATED or 0 <= t < vocab for c in cs for t in c.tokens)
     assert got["tick"][1].tokens != got["seqfresh"][1].tokens
+
+
+def test_merge_compares_blocks_with_anonymous_names_renumbered():
+    """A capture at a later tick has run more anonymous values (anon_<n> ahead); the merge compares the blocks with
+    those names renumbered in order of first appearance, and still refuses a real structural difference."""
+    from perseus.examples.fhe_ssm import passmerge
+    from perseus.impl.fakecap import _canon
+
+    def block(a, b, op="mult"):
+        return [
+            {"op_type": "add", "inputs": [f"anon_{a}"], "output": "v_1"},
+            {"op_type": op, "inputs": [f"anon_{a}", "v_1", f"anon_{b}"], "output": "v_2"},
+        ]
+
+    early, late = block(12592, 12600), block(199252, 199260)
+    assert passmerge._block_diff(early, late, 3)[0] > 0  # verbatim names differ
+    assert passmerge._block_diff(_canon(early), _canon(late), 3)[0] == 0
+    assert passmerge._block_diff(_canon(early), _canon(block(199252, 199260, "rotate")), 3)[0] > 0

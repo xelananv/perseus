@@ -13,7 +13,9 @@ two configurations hold the same ``block_<b>/graph.json`` in every field (``op_t
 ``output``, ``step``, the levels and degrees, ``tag``, ``pack_*``, ``pack_field``, ``shadow``, ``args`` with
 ``args.pt`` = kind, level, degree, name) but the five magnitude statistics the recorder measures on the values
 (``STATS``: ``impl/magtape.node_stats``). ``structure_diff`` compares two captures that way, names verbatim (no
-renumbering: the captures run the same stream before the capture tick, so even the ``anon_<n>`` names agree).
+renumbering: captures at the same tick run the same stream before it, so even the ``anon_<n>`` names agree). ``merge``
+compares each block with its ``anon_<n>`` names renumbered in order of first appearance (``fakecap._canon``): a capture
+at a later tick has run more anonymous values, so its counter is ahead; the merged block keeps the base's names.
 
 **The merge** (``merge``): the base capture's stamps copied (``capture_config.json``, ``capture_env.json`` and every
 block's; not its ``capture_pass.json``, which names one configuration: the sources' stamps go into ``passmerge.json``),
@@ -55,6 +57,8 @@ import shutil
 import sys
 from collections.abc import Sequence
 from typing import Any
+
+from perseus.impl.fakecap import _canon
 
 from . import passmasks
 
@@ -223,7 +227,7 @@ def _merge_one(
     """Block ``blk`` of every capture: checked against the base's structure, merged, written under ``out``."""
     got = [load_block(c, blk) or [] for c in caps]
     for c, g in zip(caps[1:], got[1:], strict=True):
-        n, first = _block_diff(got[0], g, 3)
+        n, first = _block_diff(_canon(got[0]), _canon(g), 3)
         if n:
             raise ValueError(f"{c} differs from {caps[0]} outside the magnitudes ({blk}: {first})")
     nodes, brec = _merge_block(got, labels, rule)
