@@ -210,7 +210,8 @@ build)
     cuda_env
     log "build: PERSEUS_CORE_ARCH=$PERSEUS_CORE_ARCH PC_NVCC_JOBS=$PC_NVCC_JOBS CUDA_HOME=$CUDA_HOME"
     t0=$(date +%s)
-    ( cd "$W" && uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -e ".[hf,examples,dev]" \
+    # a second build on the same box (pod rerun) keeps its .venv: uv venv refuses an existing one
+    ( cd "$W" && { [ -x .venv/bin/python ] || uv venv --python 3.12 .venv; } && uv pip install --python .venv/bin/python -e ".[hf,examples,dev]" \
         && .venv/bin/maturin develop --release ) > "$OUT/build.log" 2>&1 || { tail -30 "$OUT/build.log"; die "build failed ($OUT/build.log)"; }
     log "build: done in $(( $(date +%s) - t0 )) s; $(build_id)" ;;
 verify)
