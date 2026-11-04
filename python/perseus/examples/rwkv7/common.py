@@ -40,6 +40,15 @@ def add_args(ap, n_tokens=12):
     ap.add_argument("--prefill-chunk", type=int, default=0,
                     help="T > 0: the prompt is read in passes of T tokens on token lanes (prefill.py; T <= 32), the "
                     "remainder and any generation by decode steps; the capture then holds a T-token pass")
+    ap.add_argument("--batch", type=int, default=0,
+                    help="K > 1: K conversations per pass, conversation c on lane c (batched.py; K <= 32); the capture "
+                    "then holds a K-conversation pass, the device run reads --prompts")
+    ap.add_argument("--batch-carry", default="lane", choices=("lane", "decode"),
+                    help="the token-shift carries of a batched pass: one lane-form ciphertext (lane: the lever, no op) "
+                    "or one natural-form ciphertext per conversation (decode: decode's layout)")
+    ap.add_argument("--batch-hoist", type=int, default=0,
+                    help="B > 0: the lane-to-lane-0 rotations of a batched pass hoisted, B per call (keys 1..K-1); "
+                    "0: a running rotation by +1")
     ap.add_argument("--prefix", type=int, default=1, help="leading tokens run in plaintext as a public prefix "
                     "(default 1: the text's leading \\n\\n); 0 = every token encrypted from zero state")
 

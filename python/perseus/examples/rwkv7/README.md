@@ -147,6 +147,26 @@ cost (§2 there).
   collapses to a global CF of 2–3; A/B it on the smoke first;
 - does not transfer: pack-stats (no two norm statistics are ever ready together).
 
+## Batched decode: K conversations per pass (`batched.py`, `BATCHED_DESIGN.md`)
+
+Conversation c's current token sits on lane c, so every token-side op serves K ≤ 32 conversations for the price of
+one. Each conversation keeps **its own** state ciphertexts per block (decode's layout). Each pass updates them one
+conversation at a time with prefill's machinery: lane c → natural form, decode's `state_step`, the readout back to
+lane c. The K updates are independent.
+
+The token-shift carries are lane-form by default (`--batch-carry lane`): one ciphertext per carry, conversation c's on
+lane c. That ciphertext is the LN output itself, so the token shift costs nothing. `--batch-carry decode` keeps one
+natural-form carry per conversation (2(K − 1) more refreshes per block).
+
+Positions are per lane:
+- each conversation reads its own prompt (`--prompts FILE`, one per line, `\n` escapes, the public `"\n\n"`
+  prefix prepended if missing), then free-runs `--generate` steps;
+- the client decrypts all K picks and feeds c's back to lane c.
+
+Planner, K = 32, block 0: **222 refreshes per pass**, against 32 × 31 = 992 for 32 decode steps. Estimate at K = 32:
+**47–60 s per pass**. That is 5.1–6.5× decode's aggregate throughput, at 4.9–6.3× its per-token latency
+(`BATCHED_DESIGN.md` §4; nothing has run on a GPU).
+
 ## What is verified on the CPU (`tests/`, `python -m pytest python/perseus/examples/rwkv7/tests`)
 
 | test | what | result |
@@ -163,10 +183,18 @@ cost (§2 there).
 | `test_prefill` (capture, `--rwkv7-plan`) | `run_capture --prefill-chunk T` + plan | T = 32: 62 refreshes (block 0), 100 (block 1, 2-block plan); T = 8: 38 |
 | `test_prefill_session` | the one-session register merge on stand-in programs; a landing mismatch stops it | merged by name; prefill outputs after the decode registers |
 | `test_prefill` (`session_prepare`, box only) | both plans compiled by `Program.compile`, registers merged, landings compared | skipped here (CPU build has no `Program`); `run_box.sh pfcheck` |
+| `test_batched` (mirror) | K conversations batched vs K separate decode mirrors; prompts of 2–6 tokens + 2 greedy steps each; K = 2, 5, 32, both carry layouts, hoisted rotations | hidden states, end states and token streams bit-identical; a swapped lane assignment differs |
+| `test_batched` (fake, recorder) | K = 3 vs 3 separate fake decodes, against each conversation's poly model | identical; **top-1 15/15** |
+| `test_batched` (`k1_is_decode`) | `batch=1` vs decode on the fake | same call log (8,154 calls), keys and values |
+| `test_batched` (capture, `--rwkv7-plan --rwkv7-b-k K`) | `run_capture --batch K` + plan | block 0: 55 / 79 / 127 / 222 refreshes at K = 4 / 8 / 16 / 32; block 1 (K = 32): 167; decode-layout carries (K = 32): 284 |
+| `test_batched` (`session_prepare`, box only) | a K = 4 batched plan compiled, every conversation's state found as inputs | skipped here; `run_box.sh bcheck` |
 | `test_levers` | the CF table from this capture; `--schedule` reaches `Program.compile`; a PAIR=1 + fused-EvalMod plan (`--rwkv7-plan`) | covers all 11 linears (CF 2–3); siblings passed; `PC_BTS_PAIR=1 PC_EM_FUSE_RESCALE=1` on `runtime=` |
 
 The planner tests run with `--rwkv7-plan` (`--rwkv7-pf-t T`, `--rwkv7-pf-blocks N`, `--rwkv7-pf-dir DIR` keep the
-products): e.g. `pytest tests/test_prefill.py -k plan -s --rwkv7-plan --rwkv7-pf-t 32 --rwkv7-pf-blocks 2`.
+products): e.g. `pytest tests/test_prefill.py -k plan -s --rwkv7-plan --rwkv7-pf-t 32 --rwkv7-pf-blocks 2`. The
+batched one: `pytest tests/test_batched.py -k capture_and_plan -s --rwkv7-plan --rwkv7-b-k 32 --rwkv7-b-blocks 2
+--rwkv7-b-dir DIR` (also `--rwkv7-b-carry decode`, `--rwkv7-b-hoist B`, `--rwkv7-b-planenv PAIR=1`). It prints where
+the refreshes sit (`plan_census`).
 
 The 12-block numbers come from the fake. That is float64 arithmetic with the runtime's level accounting: no CKKS
 noise, no bootstrap error.
@@ -192,7 +220,22 @@ BLOCKS=1 bash tools/rwkv7/run_box.sh pf                      # smoke: capture, p
 bash tools/rwkv7/run_box.sh pf                               # 12 blocks: 70 prompt tokens = 2 passes + 6 decoded + 4 generated
 LEVERS=best bash tools/rwkv7/run_box.sh pf                   # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
 BLOCKS=1 CFTABLE=1 bash tools/rwkv7/run_box.sh run           # A/B the PCMM CF table against PCMM_CF=6 (decode smoke)
+
+# batched decode (B_K = 32 conversations, lane carries, tools/rwkv7/batch_prompts.txt, 16 generated each;
+# reuses the decode capture's shifts)
+bash tools/rwkv7/run_box.sh bcheck                           # once: the batched runner's CPU half, K = 4, 1 block
+BLOCKS=1 B_K=4 B_GENERATE=2 bash tools/rwkv7/run_box.sh b    # smoke: capture, plan, capture_b, plan_b, batch
+bash tools/rwkv7/run_box.sh b                                # 12 blocks, K = 32: --pool 192 --stc-cache 160
+LEVERS=best bash tools/rwkv7/run_box.sh b                    # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
+B_K=16 STC_CACHE_B=80 bash tools/rwkv7/run_box.sh b          # if K = 32 runs out of memory
 ```
+
+`batch` writes `$OUT/batch32[_b1][_best].jsonl`:
+- `"kind": "pass"` lines (seconds per pass, conversations still active);
+- one `"kind": "token"` line per conversation and position (`conv`, `phase` prompt / generate, top-1 against that
+  conversation's poly model, `hidden_relErrRms_vs_mirror` against the batched mirror);
+- a summary: `seconds_per_pass_median` (each conversation's latency per token), `aggregate_tokens_per_s`,
+  `top1_agree_per_conv` and `generated_ids`.
 
 `run_pf` writes `$OUT/run_pf32[_b1][_best].jsonl`:
 - `"kind": "prefill"` lines (seconds per pass and per token);

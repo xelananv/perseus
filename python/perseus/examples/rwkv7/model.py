@@ -288,7 +288,8 @@ class Rwkv7Fhe(ImplModel):
     ``z`` masked to the live channels; the client decrypts it and applies ``ln_out`` and the head)."""
 
     def __init__(self, inf, P: Params, coeffs: dict, *, core=None, n_layers=None, unit=None, wbits=24,
-                 fuse_l1=False, shifts=None, carry=True, chunk=0, prefill_keys=0):
+                 fuse_l1=False, shifts=None, carry=True, chunk=0, prefill_keys=0, batch=0, batch_carry="decode",
+                 batch_hoist=0):
         super().__init__(inf, core=core, unit=unit)
         self.P = P
         self.n_layers = int(P.n_layer if n_layers is None else n_layers)
@@ -303,7 +304,21 @@ class Rwkv7Fhe(ImplModel):
         # prefill (prefill.py): chunk T > 0 runs every step as a T-token pass on token lanes; prefill_keys T also
         # loads a T-token pass's rotation keys while decoding (a session that serves both)
         self.prefill_keys = int(prefill_keys)
+        self.batch, self.batch_carry, self.batch_hoist = 0, str(batch_carry), int(batch_hoist)
         self.set_chunk(chunk)
+        if batch:
+            self.set_batch(batch)
+
+    def set_batch(self, K: int):
+        """K conversations per pass, conversation c on lane c (batched.py). K = 1 is the decode step itself (its
+        circuit, its state, its op stream); ``step`` then takes and returns one row in a list."""
+        from .batched import BatchedCircuit
+        if self.chunk:
+            raise ValueError("a batched pass and a prefill chunk do not combine")
+        self.batch = int(K)
+        self.circ = (self.decode_circ if self.batch <= 1 else
+                     BatchedCircuit(self.rt.ops, self.L, self.coeffs, self._pcmm, self.batch, self.batch_carry,
+                                    self.batch_hoist, step=self.rt.step))
 
     def set_chunk(self, T: int):
         """0: decode steps (one token on every lane); T: T-token prefill passes. The carried state is the same."""
@@ -326,6 +341,9 @@ class Rwkv7Fhe(ImplModel):
         from perseus.impl import pcmm
         from .prefill import rotation_steps as prefill_steps
         s = self.L.rotation_steps() | {s % self.L.n for s in pcmm.rot_steps()}
+        if self.batch > 1:
+            from .batched import rotation_steps as batch_steps
+            s |= batch_steps(self.L, self.batch, self.batch_hoist)
         return s | prefill_steps(self.L, self.prefill_keys) if self.prefill_keys else s
 
     def zero_ct(self):
@@ -334,13 +352,27 @@ class Rwkv7Fhe(ImplModel):
 
     def state_rows(self, state) -> list[list[np.ndarray]]:
         """A plaintext state (``ref.State``: the public prefix's) as ``pack_tokens`` rows per block, in
-        ``State.cts()`` order (S_0 .. S_{M-1}, xa, xf)."""
+        ``State.cts()`` order (S_0 .. S_{M-1}, xa, xf); batched: every conversation starts from it, in
+        ``BatchState.cts()`` order."""
         L = self.L
         out = []
         for b in range(self.n_layers):
             rows = [np.real(v).reshape(D, L.t).T.copy() for v in L.state_slots(state.S[b])]
-            out.append(rows + [L.encode_row(state.xa[b]), L.encode_row(state.xf[b])])
+            xa, xf = L.encode_row(state.xa[b]), L.encode_row(state.xf[b])
+            if self.batch > 1:
+                K = self.batch
+                carries = [xa, xf] if self.batch_carry == "lane" else [xa] * K + [xf] * K
+                out.append(rows * K + carries)
+            else:
+                out.append(rows + [xa, xf])
         return out
+
+    def state_names(self) -> list[str]:
+        """One block's carried ciphertexts' names, in ``cts()`` order."""
+        if self.batch > 1:
+            from .batched import state_names
+            return state_names(self.batch, self.L.M, self.batch_carry == "lane")
+        return [*STATE[: self.L.M], "xa", "xf"]
 
     def start(self, state=None):
         """Zero state (or ``state``, a public ``ref.State``), each ciphertext landed by a bootstrap (as every carried
@@ -349,20 +381,33 @@ class Rwkv7Fhe(ImplModel):
         state = self.init_state if state is None else state
         rows = None if state is None else self.state_rows(state)
         self.state = []
+        n = len(self.state_names())
         for b in range(self.n_layers):
             if rows is None:
-                cts = [self.zero_ct() for _ in range(self.L.M + 2)]
+                cts = [self.zero_ct() for _ in range(n)]
             else:
                 cts = [ops.pack_tokens(r, ops.bts_out()) for r in rows[b]]
             for c in cts:
                 ops.bootstrap(c)
-            self.state.append(State(cts[: self.L.M], cts[self.L.M], cts[self.L.M + 1]))
+            if self.batch > 1:
+                from .batched import BatchState
+                K, M = self.batch, self.L.M
+                S = [cts[c * M:(c + 1) * M] for c in range(K)]
+                rest = cts[K * M:]
+                lane = self.batch_carry == "lane"
+                self.state.append(BatchState(S, rest[0] if lane else rest[:K], rest[1] if lane else rest[K:], lane))
+            else:
+                self.state.append(State(cts[: self.L.M], cts[self.L.M], cts[self.L.M + 1]))
 
     def encode_input(self, row):
         """Block 0's input: the embedding row (ln0 applied, client side) on every lane, at the landing level; in a
         prefill pass the chunk's rows (T, C), row l on lane l."""
         ops = self.rt.ops
-        rows = self.L.encode_rows(row) if self.chunk else self.L.encode_row(row)
+        if self.batch:
+            # batched: row c (conversation c's token) on lane c; K = 1: decode's input, row 0 on every lane
+            rows = self.L.encode_rows(row) if self.batch > 1 else self.L.encode_row(np.asarray(row)[0])
+        else:
+            rows = self.L.encode_rows(row) if self.chunk else self.L.encode_row(row)
         return ops.pack_tokens(rows, ops.bts_out())
 
     def name_state(self, st: State):
@@ -416,6 +461,8 @@ class Rwkv7Fhe(ImplModel):
         out = self.run_stages(x, pos, self.token_stages(x, pos))
         self.token_tail(pos)
         vals = self.rt.ops.decrypt_slots(out)
+        if self.batch:
+            return (self.L.decode_lanes(vals, len(row)) if self.batch > 1 else self.L.decode(vals)[None]), out
         return (self.L.decode_lanes(vals, len(row)) if self.chunk else self.L.decode(vals)), out
 
 

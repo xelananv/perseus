@@ -18,6 +18,16 @@ from . import common
 from .session import make_model
 
 
+def batch_probe(P, ids, K: int, n_passes: int):
+    """Public batched passes: pass i, lane c reads ``ids[s c + i]`` (each conversation its own window of the public
+    text, stride s <= 7). Returns (the passes' row matrices (K, C), the token ids [[pass 0's K ids], ...])."""
+    s = min(7, (len(ids) - n_passes) // max(1, K - 1))
+    if s < 1:
+        raise SystemExit(f"the batch probe text has {len(ids)} tokens, {K - 1 + n_passes} needed")
+    toks = [[int(ids[s * c + i]) for c in range(K)] for i in range(n_passes)]
+    return [[P.emb[t] for t in row] for row in toks], toks
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     common.add_args(ap)
@@ -63,10 +73,15 @@ def main(argv=None) -> int:
     print(f"[capture] shifts ({a.pcmm_shift}) for {len(shifts)} linears in {time.time() - t0:.1f} s", flush=True)
     os.environ["FHE_GRAPH_CAPTURE_TOKEN"] = str(a.capture_tick)
     T = int(a.prefill_chunk)
-    fhe, _inf, model = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts, chunk=T)
+    K = int(a.batch)
+    fhe, _inf, model = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts, chunk=T,
+                                  batch=K, batch_carry=a.batch_carry, batch_hoist=a.batch_hoist)
     model.set_capture(a.out)
     model.start(st if a.prefix else None)
-    if T:
+    if K > 1:
+        # a K-conversation pass per tick: conversation c reads its own window of the long public text
+        steps, ids = batch_probe(P, common.token_ids(a, common.CALIB_TEXT_LONG)[a.prefix:], K, a.capture_tick + 1)
+    elif T:
         # a T-token pass per tick, on the long public text (tick 1 reads the state tick 0 carried)
         long_ids = common.token_ids(a, common.CALIB_TEXT_LONG)[a.prefix:]
         if len(long_ids) < T * (a.capture_tick + 1):
@@ -82,6 +97,7 @@ def main(argv=None) -> int:
         print(f"[capture] {'pass' if T else 'token'} {pos} out level {model.rt.ops.level(out)} in "
               f"{time.time() - t1:.1f} s", flush=True)
     meta = {"blocks": model.n_layers, "capture_tick": a.capture_tick, "tokens": ids, "prefill_chunk": T,
+            "batch": K, "batch_carry": a.batch_carry if K > 1 else None, "batch_hoist": a.batch_hoist if K > 1 else None,
             "prefix": a.prefix,
             "pth_sha256": common.sha256(a.pth), "coeffs_sha256": common.sha256(a.coeffs), "wbits": a.wbits,
             "fuse_l1": a.fuse_l1, "pcmm_shift": a.pcmm_shift, "environment": common.environment()}

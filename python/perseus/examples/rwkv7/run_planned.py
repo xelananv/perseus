@@ -32,7 +32,7 @@ from perseus.impl.driver import PlannedRun, plan_rot_scope, register_levels
 
 from . import common
 from .layout import D
-from .model import STATE, Mirror
+from .model import Mirror
 from .session import make_model
 
 
@@ -97,7 +97,8 @@ class Rwkv7PlannedRun(PlannedRun):
             o = self.records[0][b]
             if set(o.pts) != set(r.pts) or any(not np.array_equal(o.pts[k], r.pts[k]) for k in r.pts):
                 raise RuntimeError(f"block {b}: a plaintext differs between the probe tokens (not static)")
-        bad = [b for b in range(self.rec.n_layers) if len(self.kv.get(b, ())) != self.model.L.M + 2]
+        n_state = len(self.model.state_names())
+        bad = [b for b in range(self.rec.n_layers) if len(self.kv.get(b, ())) != n_state]
         if bad:
             raise RuntimeError(f"blocks {bad}: the carried state was not recognised as block inputs")
         self.static = True
@@ -181,7 +182,7 @@ class Rwkv7PlannedRun(PlannedRun):
         bootstrap (``Model.start``); on a planned session an eager bootstrap is refused without ``debug_refresh``
         (``Fhe.bootstrap``) and would land at the landing's meta, not the input's, so the device encrypts in place of
         it: same values, less noise. Untimed setup: the state is public."""
-        names = [*STATE[: self.model.L.M], "xa", "xf"]
+        names = self.model.state_names()
         rows = self.model.state_rows(state)
         out, notes = {}, []
         for b in range(self.rec.n_layers):
@@ -218,6 +219,169 @@ class Rwkv7PlannedRun(PlannedRun):
         ct = self.ct(reg)
         vals = np.asarray(self.ops.decrypt_slots_complex(ct))
         return self.model.L.decode(np.real(vals)), int(ct.level)
+
+
+class Rwkv7BatchedRun(Rwkv7PlannedRun):
+    """K conversations per pass (batched.py) under a plan cut from ``run_capture --batch K``: the input is K rows,
+    row c on lane c; the reply is decrypted per lane; every conversation's carried state is its own registers
+    (``Rwkv7Fhe.state_names``: ``s0c<c>``, ``s1c<c>`` and the carries)."""
+
+    def input_ct(self, t, rows, p):
+        return self.encrypt_input(self.model.L.encode_rows(np.asarray(rows[t])), p, 0, "batched input")[0]
+
+    def reply(self, reg):
+        ct = self.ct(reg)
+        vals = np.asarray(self.ops.decrypt_slots_complex(ct))
+        return self.model.L.decode_lanes(np.real(vals), self.model.batch), int(ct.level)
+
+
+def read_prompts(path, prefix_text="\n\n") -> list[str]:
+    """One prompt per line; ``\\n`` escapes a newline (``\\\\`` a backslash). A prompt that does not start with the
+    public prefix gets it prepended."""
+    out = []
+    for line in open(path, encoding="utf-8"):
+        line = line.rstrip("\n")
+        if not line.strip():
+            continue
+        s = line.replace("\\\\", "\0").replace("\\n", "\n").replace("\0", "\\")
+        out.append(s if s.startswith(prefix_text) else prefix_text + s)
+    return out
+
+
+def main_batch(a) -> int:
+    """``--batch K --prompts FILE``: K conversations per pass, conversation c on lane c. Each reads its own prompt
+    token by token after the public prefix, then free-runs ``--generate`` steps (the client decrypts all K picks and
+    feeds conversation c's back to lane c). Every lane runs every pass to the longest schedule; a conversation's
+    records stop at its own prompt length + generate."""
+    from perseus import _pc
+    from perseus.examples.fhe_ssm.run_planned import session_config
+
+    from .batched import BatchedMirror
+    from .run_capture import batch_probe
+    K = int(a.batch)
+    if not (a.prompts and a.prefix):
+        raise SystemExit("--batch needs --prompts and a public prefix (--prefix >= 1)")
+    t_all = time.time()
+    P, co, shifts = common.load(a)
+    tok = common.tokenizer(a.harness, a.vocab)
+    if tok is None:
+        raise SystemExit("--batch needs --harness (the tokenizer)")
+    texts = read_prompts(a.prompts)
+    if len(texts) < K:
+        raise SystemExit(f"{a.prompts}: {len(texts)} prompts for K = {K}")
+    texts = texts[:K]
+    all_ids = [tok.encode(s) for s in texts]
+    pre = all_ids[0][: a.prefix]
+    if any(ids[: a.prefix] != pre for ids in all_ids):
+        raise SystemExit(f"the prompts do not share the public prefix ids {pre}")
+    prompts = [ids[a.prefix:] for ids in all_ids]
+    if any(not p for p in prompts):
+        raise SystemExit("an empty prompt (nothing after the prefix)")
+    polys, st = [], None
+    for ids in all_ids:
+        poly, st = common.prefix_state(P, a.coeffs, ids, a.prefix)
+        polys.append(poly)
+    fhe, _inf, model = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts, batch=K,
+                                  batch_carry=a.batch_carry, batch_hoist=a.batch_hoist)
+    model.init_state = st
+    cfg = session_config(a.plan)
+    keys = _pc.KeySource.generate([], conj=True, layout="packed")
+    labels = [f"block_{b}" for b in range(model.n_layers + 1)]
+    work = a.work_dir or a.out + ".work"
+    out = open(a.out, "w")
+
+    def emit(rec):
+        out.write(json.dumps(rec) + "\n")
+        out.flush()
+        print(json.dumps(rec), flush=True)
+
+    cf_map = None
+    if a.pcmm_cf_table:
+        from perseus.examples.fhe_ssm import pcmm_cf_table
+        cf_map = pcmm_cf_table.load(a.pcmm_cf_table)
+    run = Rwkv7BatchedRun(Recorder(model, model.n_layers), a.plan, cfg, labels, keys, model=model, work_dir=work,
+                          pcmm_cf=a.pcmm_cf, pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool,
+                          schedule=a.schedule, pcmm_cf_map=cf_map)
+    long_ids = common.token_ids(a, common.CALIB_TEXT_LONG)[a.prefix:]
+    public, _pt = batch_probe(P, long_ids, K, 2)            # the probes: two public passes
+    t0 = time.time()
+    run.setup(public)
+    setup_s = time.time() - t0
+    kv = run.state_cts(st)
+    emit({"kind": "header", "driver": "perseus.examples.rwkv7.run_planned --batch", "keys": "insecure-inproc",
+          "blocks": model.n_layers, "batch": K, "batch_carry": a.batch_carry, "batch_hoist": a.batch_hoist,
+          "prefix": pre, "prompts": prompts, "generate": a.generate, "plan": a.plan, "pcmm_cf": a.pcmm_cf,
+          "wbits": a.wbits, "schedule": a.schedule, "pcmm_cf_table": a.pcmm_cf_table, "pool": a.pool,
+          "stc_cache": a.stc_cache, "fuse_l1": a.fuse_l1, "shifts": a.shifts, "setup_s": round(setup_s, 1),
+          "programs": {lab: {k: v for k in ("n_ops", "n_bootstraps", "n_launches", "n_finishes")
+                             if isinstance(v := getattr(p, k, None), (int, float))}
+                       for lab, p in run.progs.items()},
+          "mem_report_text": str(run.sess.mem_report),
+          "pth_sha256": common.sha256(a.pth), "coeffs_sha256": common.sha256(a.coeffs),
+          "environment": common.environment()})
+    if not a.no_warmup:
+        t0 = time.time()
+        reg, _ = run.token(0, public)
+        run.reply(reg)
+        emit({"kind": "warmup", "seconds": round(time.time() - t0, 3)})
+    mirror = BatchedMirror(P, co, model.L.n, K, carry=a.batch_carry, wbits=a.wbits, fuse_l1=a.fuse_l1,
+                           hoist=a.batch_hoist)
+    mirror.reset(st)
+    scorers = [common.Scorer(P, a, poly=polys[c]) for c in range(K)]
+    toks = [list(p) for p in prompts]
+    ends = [len(p) + a.generate for p in prompts]
+    n_pass = max(ends)
+    rows_seen, recs, passes = [None], [], []
+    last = [None] * K
+    for i in range(n_pass):
+        for c in range(K):
+            if i >= len(toks[c]):
+                toks[c].append(int(last[c]))       # free running: conversation c's own pick, back on lane c
+        rows = np.stack([P.emb[toks[c][i]] for c in range(K)])
+        rows_seen.append(rows)
+        t0 = time.time()
+        # t = i + 1 keeps PlannedRun's "t == 0: empty state" rule off; pass 0 reads the prefix state Cts
+        reg, info = run.token(i + 1, rows_seen, kv_cts=kv if i == 0 else None)
+        hidden, level = run.reply(reg)
+        sec = time.time() - t0
+        hm, _z = mirror.step(rows)
+        active = sum(i < e for e in ends)
+        prec = {"kind": "pass", "pass": i, "seconds": round(sec, 4), "issue_s": info["issue_s"],
+                "reply_level": level, "active": active}
+        passes.append(prec)
+        emit(prec)
+        for c in range(K):
+            if i >= ends[c]:
+                last[c] = int(np.argmax(scorers[c].poly.head(np.asarray(hidden[c], dtype=np.float64))))
+                continue
+            rec = {"kind": "token", "mode": "batch", "conv": c, "pass": i,
+                   "phase": "prompt" if i < len(prompts[c]) else "generate",
+                   **scorers[c].score(a.prefix + i, toks[c][i], hidden[c]),
+                   "hidden_relErrRms_vs_mirror": common.rel_rms(hidden[c], hm[c])}
+            last[c] = rec["top1_fhe"]
+            recs.append(rec)
+            emit(rec)
+    secs = [p["seconds"] for p in passes]
+    useful = sum(p["active"] for p in passes)
+    med = float(np.median(secs))
+    emit({"kind": "summary", "batch": K, "passes": len(passes), "tokens": len(recs),
+          "top1_agree": sum(r["top1_agree"] for r in recs),
+          "top1_agree_per_conv": [sum(r["top1_agree"] for r in recs if r["conv"] == c) for c in range(K)],
+          "tokens_per_conv": [sum(r["conv"] == c for r in recs) for c in range(K)],
+          "prompt_ids": prompts, "generated_ids": [toks[c][len(prompts[c]):ends[c]] for c in range(K)],
+          "logits_relErrRms_max": max(r["logits_relErrRms"] for r in recs),
+          "logits_relErrRms_median": float(np.median([r["logits_relErrRms"] for r in recs])),
+          "hidden_relErrRms_vs_mirror_max": max(r["hidden_relErrRms_vs_mirror"] for r in recs),
+          "seconds_per_pass_median": med,
+          "seconds_per_pass_after_first": float(np.mean(secs[1:])) if len(secs) > 1 else None,
+          "seconds_per_token_per_conversation": med,
+          "aggregate_tokens_per_s": round(useful / sum(secs), 4),
+          "aggregate_tokens_per_s_full": round(K / med, 4),
+          "seconds_per_conversation_token_full": round(med / K, 4),
+          "setup_s": round(setup_s, 1), "wall_s": round(time.time() - t_all, 1),
+          "planned_stats": str(run.sess.planned_stats())})
+    run.close()
+    return 0
 
 
 def _state_key(run, b, i):
@@ -388,7 +552,13 @@ def main(argv=None) -> int:
                     "a linear not in it at --pcmm-cf")
     ap.add_argument("--pf-plan", default=None,
                     help="with --prefill-chunk T: the plan cut from run_capture --prefill-chunk T (same shifts file)")
+    ap.add_argument("--prompts", default=None,
+                    help="with --batch K: one prompt per line (\\n escapes a newline), the first K are the batch")
     a = ap.parse_args(argv)
+    if a.batch > 1:
+        if a.prefill_chunk:
+            raise SystemExit("--batch and --prefill-chunk do not combine")
+        return main_batch(a)
     T = int(a.prefill_chunk)
     if T and not (a.pf_plan and a.prefix):
         raise SystemExit("--prefill-chunk needs --pf-plan and a public prefix (--prefix >= 1)")

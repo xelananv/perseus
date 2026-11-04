@@ -29,6 +29,17 @@
 #               -> $OUT/run_pf$PF_T$S.jsonl ("kind": "prefill" lines: seconds per pass and per token)
 #   pf          capture, plan, capture_pf, plan_pf, run_pf
 #
+# Batched decode (python/perseus/examples/rwkv7/BATCHED_DESIGN.md): B_K conversations per pass, conversation c on
+# lane c, each with its own carried state; the decode capture's shifts file is reused:
+#   capture_b   CPU only: run_capture --batch $B_K --batch-carry $B_CARRY -> $BCAP
+#   plan_b      make_plan.sh $BCAP -> $BPLAN (same LANDING / PAIR / runtime switches as the decode plan)
+#   bcheck      the batched runner's CPU half on the device build (Program.compile of a K = 4, 1-block batched plan;
+#               every conversation's state must be recognised as block inputs): run it once
+#   batch       run_planned --batch $B_K --prompts $B_PROMPTS --generate $B_GENERATE: every pass decodes one token
+#               of every conversation; one "pass" line per pass (seconds) and one "token" line per conversation and
+#               position (top-1 vs that conversation's poly model) -> $OUT/batch$B_K$S.jsonl, summary line last
+#   b           capture, plan, capture_b, plan_b, batch
+#
 # Levers from the fhe_ssm stack (PREFILL_DESIGN.md §6), opt-in, on their own capture-free plan dirs:
 #   LEVERS=best   PAIR=1 (pairs of sibling real refreshes in one complex refresh) + PC_EM_FUSE_RESCALE=1 (the fused
 #                 EvalMod) on the plans' runtime= line, and --schedule siblings on the run
@@ -37,7 +48,8 @@
 # Environment: OUT (default /root/out_rwkv7), PTH, COEFFS, HARNESS (defaults: the brief's paths), TOKENS (12),
 # BLOCKS (unset = all 12), GPU (0), TEXT (the prompt; must start with "\n\n", the public prefix), PCMM_SHIFT
 # (calib | zero), PCMM_CF (6), TORCH_PY (crosscheck), RUN_EXTRA (more run_planned flags), STC_CACHE (160), POOL (96;
-# run_pf 192), PF_T (32), PF_TEXT, PF_TOKENS (70), PF_GENERATE (4), LEVERS, CFTABLE.
+# run_pf 192), PF_T (32), PF_TEXT, PF_TOKENS (70), PF_GENERATE (4), LEVERS, CFTABLE, B_K (32), B_CARRY (lane |
+# decode), B_PROMPTS (tools/rwkv7/batch_prompts.txt), B_GENERATE (16), POOL_B (192), STC_CACHE_B ($STC_CACHE).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=$(git -C "$HERE" rev-parse --show-toplevel)
@@ -64,6 +76,9 @@ PF_TEXT=${PF_TEXT:-$'\n\nThe Eiffel Tower is a wrought-iron lattice tower on the
 PFCAP=$OUT/cap_rwkv7_pf$PF_T$S
 PFPLAN=$OUT/bootstrap_placements/plan_rwkv7_pf$PF_T$S$LV
 CFT=$OUT/pcmm_cf_table$S.json
+B_K=${B_K:-32}; B_CARRY=${B_CARRY:-lane}; B_PROMPTS=${B_PROMPTS:-$HERE/batch_prompts.txt}; B_GENERATE=${B_GENERATE:-16}
+BCAP=$OUT/cap_rwkv7_b$B_K${B_CARRY/lane/}$S
+BPLAN=$OUT/bootstrap_placements/plan_rwkv7_b$B_K${B_CARRY/lane/}$S$LV
 # the LANDING=high runtime switches (tools/fhe_ssm/run_gpu.sh CAPENV): PCMM needs the StC-first dense route
 CAPENV="FIDESLIB_BTS_STC_FIRST=2 FIDESLIB_BTS_STC_FIRST_ROUTES=dense FIDESLIB_BTS_STC_FIRST_CF=13 FIDESLIB_BTS_RAISE_DROP=512:1 AUTO_BTS_LEVEL=44"
 COMMON="--pth $PTH --coeffs $COEFFS --harness $HARNESS ${BLOCKS:+--blocks $BLOCKS}"
@@ -163,6 +178,44 @@ step_run_pf() {
     [ $rc = 0 ] || { tail -30 "$R.log"; die "run_pf failed ($R.log)"; }
 }
 
+step_capture_b() {
+    [ -f "$BCAP/capture_config.json" ] && { log "capture_b: reusing $BCAP"; return 0; }
+    [ -f "$CAP/pcmm_shifts.json" ] || die "no $CAP/pcmm_shifts.json (run the capture step first: one shifts file serves both)"
+    log "capture_b K=$B_K carry=$B_CARRY -> $BCAP"
+    pyrun env CUDA_VISIBLE_DEVICES="" $CAPENV "$PY" -m perseus.examples.rwkv7.run_capture $COMMON \
+        --batch "$B_K" --batch-carry "$B_CARRY" --shifts "$CAP/pcmm_shifts.json" --out "$BCAP" \
+        > "$OUT/capture_b$B_K$S.log" 2>&1 || { tail -20 "$OUT/capture_b$B_K$S.log"; die "capture_b failed"; }
+    tail -3 "$OUT/capture_b$B_K$S.log" | tee -a "$OUT/session.log"
+}
+
+step_plan_b() { plan_one "$BCAP" "$BPLAN" "$OUT/plan_b$B_K$S$LV.log"; }
+
+step_bcheck() {
+    pyrun env RWKV7_PTH="$PTH" RWKV7_COEFFS="$COEFFS" RWKV7_HARNESS="$HARNESS" $CAPENV \
+        "$PY" -m pytest -q -s -p no:warnings "$W/python/perseus/examples/rwkv7/tests/test_batched.py" \
+        -k session_prepare --rwkv7-plan --rwkv7-b-dir "$OUT/bcheck" > "$OUT/bcheck.log" 2>&1 \
+        || { tail -30 "$OUT/bcheck.log"; die "bcheck failed ($OUT/bcheck.log)"; }
+    grep -E "batched kv|passed|skipped" "$OUT/bcheck.log" | tee -a "$OUT/session.log"
+    grep -q "1 passed" "$OUT/bcheck.log" || die "bcheck did not run (skipped?) — see $OUT/bcheck.log"
+}
+
+step_batch() {
+    [ -f "$BPLAN/PLAN_CMD.txt" ] || die "no batched plan $BPLAN (run capture_b and plan_b)"
+    [ -f "$B_PROMPTS" ] || die "no prompts file $B_PROMPTS"
+    local busy; busy=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i "$GPU" 2>/dev/null)
+    [ -z "$busy" ] || log "WARNING: GPU $GPU has other processes ($busy): timings are not clean"
+    local R=$OUT/batch$B_K${B_CARRY/lane/}$S$LV${CFTABLE:+_cft}
+    log "batch: K=$B_K carry=$B_CARRY, prompts $B_PROMPTS, $B_GENERATE generated each, pool ${POOL_B:-192}"
+    pyrun env CUDA_VISIBLE_DEVICES=$GPU $CAPENV "$PY" -m perseus.examples.rwkv7.run_planned $COMMON \
+        --batch "$B_K" --batch-carry "$B_CARRY" --prompts "$B_PROMPTS" --generate "$B_GENERATE" \
+        --plan "$BPLAN" --shifts "$CAP/pcmm_shifts.json" --pcmm-cf "$PCMM_CF" --schedule "$SCHED" $(cf_flags) \
+        --stc-cache "${STC_CACHE_B:-$STC_CACHE}" --pool "${POOL_B:-192}" --out "$R.jsonl" ${RUN_EXTRA:-} > "$R.log" 2>&1
+    local rc=$?
+    grep -E '"kind": "(pass|warmup)"' "$R.jsonl" 2>/dev/null | tee -a "$OUT/session.log"
+    grep '"kind": "summary"' "$R.jsonl" 2>/dev/null | cut -c1-1200 | tee -a "$OUT/session.log"
+    [ $rc = 0 ] || { tail -30 "$R.log"; die "batch failed ($R.log)"; }
+}
+
 step_run() {
     [ -f "$PLAN/PLAN_CMD.txt" ] || die "no plan $PLAN (run the plan step)"
     local busy; busy=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i "$GPU" 2>/dev/null)
@@ -182,9 +235,10 @@ step_run() {
 
 cmd=${1:-all}
 case "$cmd" in
-    build|check|crosscheck|capture|plan|run|capture_pf|plan_pf|pfcheck|run_pf) "step_$cmd" ;;
+    build|check|crosscheck|capture|plan|run|capture_pf|plan_pf|pfcheck|run_pf|capture_b|plan_b|bcheck|batch) "step_$cmd" ;;
     all) step_build; step_check; step_crosscheck; step_capture; step_plan; step_run ;;
     pf) step_capture; step_plan; step_capture_pf; step_plan_pf; step_run_pf ;;
+    b) step_capture; step_plan; step_capture_b; step_plan_b; step_batch ;;
     *) die "unknown step $cmd" ;;
 esac
 log "$cmd: done"
