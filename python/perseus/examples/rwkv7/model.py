@@ -163,6 +163,18 @@ class Circuit:
         """y with y scale^-1/2 = 1/sqrt(xscale x + eps) (fit.py's Newton form, on the raw statistic x)."""
         ops, s = self.ops, self.coeffs[name]
         a, b0 = float(xscale) / s["scale"], s["eps"] / s["scale"]
+        if s.get("method") == "newton_const":
+            # P6: constant seed 1 (ROBUST_NORMS.md). The guard judges the accuracy range [lo, hi] (x units of the
+            # harness statistic, i.e. xscale x); the iteration itself converges on the wider (conv_lo, conv_hi).
+            if self.guard is not None:
+                self.guard(name, x, float(s["lo"]) / xscale, float(s["hi"]) / xscale)
+            # step 1 closed form: y1 = 1.5 - 0.5 u (one scalar product); then inv_sqrt_newton_d2 on u = a x + b0
+            y = ops.add(ops.mult(x, -0.5 * a), 1.5 - 0.5 * b0)
+            n = int(s["steps"]) - 1
+            if n <= 0:
+                return y
+            from perseus.impl.poly import inv_sqrt_newton_d2
+            return inv_sqrt_newton_d2(ops, ops.add(x, b0 / a), y, n, x_scale=a)
         lo, hi = (s["seed_lo"] - b0) / a, (1.0 - b0) / a
         if self.guard is not None:
             self.guard(name, x, lo, hi)

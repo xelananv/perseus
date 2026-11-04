@@ -69,6 +69,16 @@ def newton_rsqrt(x, p, steps=None):
     return y * p["scale"] ** -0.5
 
 
+def newton_const_rsqrt(x, p, steps=None):
+    """The harness's newton_const (rsqrt_const.py, P6): Newton from the constant seed 1 on u = (x + eps)/scale;
+    converges for every u in (0, 3), accurate to the site's tol on [lo, hi]."""
+    u = (x + p["eps"]) / p["scale"]
+    y = np.ones_like(u)
+    for _ in range(p["steps"] if steps is None else steps):
+        y = y * (1.5 - 0.5 * u * y * y)
+    return y * p["scale"] ** -0.5
+
+
 class Sites:
     """``mode``: 'exact' or 'poly' (with ``coeffs``, the fit.py JSON); ``clamp``: clamp to [lo, hi] before a
     polynomial (poly mode's ``--clamp``); ``out_counts`` counts values outside each site's interval."""
@@ -99,6 +109,8 @@ class Sites:
             xx = np.clip(x, lo, hi) if self.clamp else x
             if s.get("method") == "newton":
                 return newton_rsqrt(xx, s)
+            if s.get("method") == "newton_const":
+                return newton_const_rsqrt(xx, s)
             return cheb_eval(xx, s["coeffs"], lo, hi)
         return SITE_FUNCS[site_kind(name)](x)
 

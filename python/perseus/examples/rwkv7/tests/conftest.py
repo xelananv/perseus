@@ -21,9 +21,14 @@ def pytest_addoption(parser):
     parser.addoption("--rwkv7-b-dir", default=None, help="keep the batched capture and plan under this dir")
     parser.addoption("--rwkv7-b-planenv", default=None, help="extra plan env, e.g. 'PAIR=1'")
     parser.addoption("--rwkv7-b-blocks", default=None, help="blocks in the batched capture test (default 1)")
+    parser.addoption("--rwkv7-coeffs", default=None, help="the coefficients JSON (as RWKV7_COEFFS; P6: the _nc file)")
 
 
 def pytest_configure(config):
+    global COEFFS
+    c = config.getoption("rwkv7_coeffs", default=None)
+    if c:
+        os.environ["RWKV7_COEFFS"] = COEFFS = str(c)
     for opt, env in (("rwkv7_plan", "RWKV7_PLAN"), ("rwkv7_pf_t", "RWKV7_PF_T"), ("rwkv7_pf_dir", "RWKV7_PF_DIR"),
                      ("rwkv7_pf_blocks", "RWKV7_PF_BLOCKS"), ("rwkv7_b_k", "RWKV7_B_K"),
                      ("rwkv7_b_carry", "RWKV7_B_CARRY"), ("rwkv7_b_hoist", "RWKV7_B_HOIST"),
