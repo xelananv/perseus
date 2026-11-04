@@ -678,6 +678,10 @@ def main(argv=None) -> int:
     emit({"kind": "summary", "tokens": len(recs), "prompt_ids": ids[:n_prompt], "generated_ids": ids[n_prompt:],
           "top1_agree": sum(r["top1_agree"] for r in recs),
           "top1_agree_prefill": sum(r["top1_agree"] for r in recs if r["mode"] == "prefill"),
+          # tokens whose plaintext poly reference left a site's interval (a ciphertext cannot clamp: from there on
+          # the encrypted values diverge), as (mode, position, {site: count})
+          "poly_sites_out_of_range_tokens": [(r["mode"], r["pos"], r["poly_sites_out_of_range"]) for r in recs
+                                             if r["poly_sites_out_of_range"]],
           "prefilled_tokens": n_pf, "prefill_chunk": T, "prefill_passes": len(passes),
           "prefill_seconds_per_token": round(pf_s / n_pf, 4) if n_pf else None,
           "logits_relErrRms_max": max(r["logits_relErrRms"] for r in recs),

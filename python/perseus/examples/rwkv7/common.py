@@ -15,8 +15,19 @@ from .model import load_coeffs
 DEFAULT_TEXT = "\n\nThe Eiffel tower is in the city of Paris, which is the capital of"
 #: the calibration / capture text (public; the PCMM band shifts and the capture's magnitudes come from it)
 CALIB_TEXT = "\n\nIn the beginning God created the heaven and the earth. And the earth was without form"
-#: the prefill capture's text (public, Genesis 1:1-8 KJV): two chunks of up to 32 tokens after the "\n\n"
+#: the prefill capture's text (public, Genesis 1:3-8 KJV; 86 tokens after the "\n\n"): two chunks of up to 32 tokens.
+#: Every polynomial / Newton site stays inside its calibrated interval on its first 64 tokens (tests/test_scan.py);
+#: a ciphertext cannot clamp, and the capture's magnitudes must come from in-interval values.
 CALIB_TEXT_LONG = (
+    "\n\nAnd God said, Let there be light: and there was light. And God saw the light, that it was good: and God "
+    "divided the light from the darkness. And God called the light Day, and the darkness he called Night. And the "
+    "evening and the morning were the first day. And God said, Let there be a firmament in the midst of the waters, "
+    "and let it divide the waters from the waters.")
+#: the previous capture text (Genesis 1:1-8), retired 2026-11-05: its token 17 after the "\n\n" (the "," of "without
+#: form, and void") drives block 7's GroupNorm variance (att.gn_rsqrt) of 2 heads to 15.82, above the interval's
+#: 10.46; the Newton inverse square root diverges, block 7 goes NaN in pass 0 and the xf carry takes it into pass 1
+#: (results/rwkv7-fhe-20261104/new_pod/r01b_pf_fail). Kept for the guard's regression test.
+CALIB_TEXT_LONG_V1 = (
     "\n\nIn the beginning God created the heaven and the earth. And the earth was without form, and void; and "
     "darkness was upon the face of the deep. And the Spirit of God moved upon the face of the waters. And God said, "
     "Let there be light: and there was light. And God saw the light, that it was good: and God divided the light "

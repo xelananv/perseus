@@ -146,6 +146,12 @@ def test_prefill_capture_and_plan(tmp_path, monkeypatch):
     print(f"T={T} block_0: {len(g['nodes'])} nodes", dict(sorted(ops.items())))
     names = [x for n in g["nodes"] for x in n["inputs"]]
     assert all(any(f"cache.{s}" in x for x in names) for s in ("s0", "s1", "xa", "xf"))
+    import math
+    for b in range(nb + 1):                    # no NaN / inf magnitude anywhere (the planner refuses such sites)
+        gb = json.load(open(cap / f"block_{b}" / "graph.json"))
+        bad = [n.get("output_max_abs") for n in gb["nodes"]
+               if isinstance(n.get("output_max_abs"), float) and not math.isfinite(n["output_max_abs"])]
+        assert not bad, f"block_{b}: {len(bad)} non-finite magnitudes"
     if os.environ.get("RWKV7_PLAN") != "1":
         return
     root = cap.parent

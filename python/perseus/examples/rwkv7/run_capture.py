@@ -14,6 +14,8 @@ import json
 import os
 import time
 
+import numpy as np
+
 from . import common
 from .session import make_model
 
@@ -35,6 +37,10 @@ def main(argv=None) -> int:
     ap.add_argument("--capture-tick", type=int, default=1)
     ap.add_argument("--calib-tokens", type=int, default=6)
     ap.add_argument("--pcmm-shift", choices=("calib", "zero"), default="calib")
+    ap.add_argument("--no-site-guard", action="store_true",
+                    help="do not stop on a site input out of its interval / non-finite (model.SiteGuard)")
+    ap.add_argument("--site-guard-tol", type=float, default=0.0,
+                    help="the guard's slack, relative to each interval's width (default 0)")
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
     P, co, _ = common.load(a)
@@ -77,6 +83,12 @@ def main(argv=None) -> int:
     fhe, _inf, model = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts, chunk=T,
                                   batch=K, batch_carry=a.batch_carry, batch_hoist=a.batch_hoist)
     model.set_capture(a.out)
+    guard = None
+    if not a.no_site_guard:
+        # fail fast: a site input out of its interval (or NaN) stops here, not in the planner 25 minutes later
+        from .model import SiteGuard
+        guard = SiteGuard(model.rt.ops, model.L, chunk=T, tol=a.site_guard_tol)
+        model.circ.guard = model.decode_circ.guard = guard
     model.start(st if a.prefix else None)
     if K > 1:
         # a K-conversation pass per tick: conversation c reads its own window of the long public text
@@ -93,7 +105,11 @@ def main(argv=None) -> int:
         ids = ids[: a.capture_tick + 1]
     for pos, row in enumerate(steps):
         t1 = time.time()
+        if guard is not None:
+            guard.pos = pos
         h, out = model.step(row, pos)
+        if not np.all(np.isfinite(h)):
+            raise SystemExit(f"[capture] {'pass' if T else 'token'} {pos}: non-finite hidden state")
         print(f"[capture] {'pass' if T else 'token'} {pos} out level {model.rt.ops.level(out)} in "
               f"{time.time() - t1:.1f} s", flush=True)
     meta = {"blocks": model.n_layers, "capture_tick": a.capture_tick, "tokens": ids, "prefill_chunk": T,

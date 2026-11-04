@@ -148,10 +148,15 @@ class Circuit:
         import contextlib
         return self.step(label) if self.step is not None else contextlib.nullcontext()
 
+    #: a ``SiteGuard`` (the capture sets one): every site's input checked against its interval before it is evaluated
+    guard = None
+
     # ── sites ──
     def cheb(self, name, x, scale=1.0):
         s = self.coeffs[name]
         c = [float(v) * scale for v in s["coeffs"]]
+        if self.guard is not None:
+            self.guard(name, x, float(s["lo"]), float(s["hi"]))
         return eval_chebyshev_bsgs(self.ops, x, c, float(s["lo"]), float(s["hi"]), eps=0.0)
 
     def newton(self, name, x, xscale=1.0):
@@ -159,6 +164,8 @@ class Circuit:
         ops, s = self.ops, self.coeffs[name]
         a, b0 = float(xscale) / s["scale"], s["eps"] / s["scale"]
         lo, hi = (s["seed_lo"] - b0) / a, (1.0 - b0) / a
+        if self.guard is not None:
+            self.guard(name, x, lo, hi)
         y = eval_chebyshev_bsgs(ops, x, [float(c) for c in s["seed_coeffs"]], lo, hi, eps=0.0)
         un = ops.add(ops.mult(x, -0.5 * a), -0.5 * b0)          # -u/2
         for _ in range(int(s["steps"])):
@@ -247,6 +254,47 @@ class Circuit:
 
 
 # ── linears ──
+
+class SiteOutOfInterval(RuntimeError):
+    """A site's input left its calibrated interval (or went non-finite) on the fake / capture run."""
+
+
+class SiteGuard:
+    """The capture's fail-fast check (``Circuit.guard``): before each polynomial / Newton site, the input's slots
+    (decrypted on the fake / recorder ops; never on a session) must be finite and inside the site's interval
+    ``[lo, hi]`` (for a Newton site the seed's interval in raw-statistic units), else ``SiteOutOfInterval`` names the
+    site, block, pass, lane (the token of a prefill pass), channel and the value. A ciphertext cannot clamp: a value
+    outside makes the Chebyshev / Newton evaluation diverge, the capture carries NaN and the planner refuses the block
+    much later. ``tol`` is a slack relative to the interval width (default 0: the interval itself)."""
+
+    def __init__(self, ops, L, chunk=0, tol=0.0):
+        self.ops, self.L, self.chunk, self.tol = ops, L, int(chunk), float(tol)
+        self.pos = 0
+        self.checked = 0
+
+    def __call__(self, name, x, lo, hi):
+        v = np.asarray(self.ops.decrypt_slots(x))
+        re = v.real.astype(np.float64)
+        slack = self.tol * (hi - lo)
+        with np.errstate(invalid="ignore"):
+            bad = ~np.isfinite(v) | (re < lo - slack) | (re > hi + slack)
+        self.checked += 1
+        if not bad.any():
+            return
+        idx = np.flatnonzero(bad)
+        i = int(idx[0])
+        t = self.L.t
+        lanes = sorted({int(j) % t for j in idx})
+        where = (f"pass {self.pos}, lane {i % t} (token {self.pos * self.chunk + i % t} of the capture text)"
+                 if self.chunk else f"token {self.pos}, lane {i % t}")
+        with np.errstate(all="ignore"):
+            fin = re[np.isfinite(re)]
+            rng = f"[{fin.min():.4g}, {fin.max():.4g}]" if fin.size else "[none finite]"
+        raise SiteOutOfInterval(
+            f"site {name} (block {name.split('.')[1] if name.startswith('blocks.') else '?'}): {idx.size} slot(s) "
+            f"out of [{lo:.4g}, {hi:.4g}] at {where}, channel {i // t}: value {v[i]!r}; lanes hit {lanes[:8]}"
+            f"{'...' if len(lanes) > 8 else ''}; input range {rng}, {np.count_nonzero(~np.isfinite(v))} non-finite")
+
 
 def pcmm_encode(lin: Lin, t: int, wbits: int, shifts: dict | None = None):
     from perseus.impl.pcmm import PcmmLinear
