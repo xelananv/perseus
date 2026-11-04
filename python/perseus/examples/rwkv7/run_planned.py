@@ -211,6 +211,8 @@ def main(argv=None) -> int:
     ap.add_argument("--pt-rows", type=int, default=28)
     ap.add_argument("--stc-cache", type=int, default=8)
     ap.add_argument("--pool", type=int, default=16, help="ciphertext pool slots (k = 1): the carried state is 4 per block")
+    ap.add_argument("--generate", type=int, default=0,
+                    help="free-running steps after the prompt: the client's greedy pick (top1_fhe) is fed back")
     ap.add_argument("--no-warmup", action="store_true")
     a = ap.parse_args(argv)
     from perseus import _pc
@@ -265,7 +267,11 @@ def main(argv=None) -> int:
     sc = common.Scorer(P, a, mirror=mirror, poly=poly)
     rows = [P.emb[t] for t in ids]
     recs = []
-    for t in range(len(ids)):
+    n_prompt = len(ids)
+    for t in range(n_prompt + a.generate):
+        if t >= n_prompt:                        # free running: the client decrypts, picks greedily, feeds it back
+            ids.append(int(recs[-1]["top1_fhe"]))
+            rows.append(P.emb[ids[-1]])
         t0 = time.time()
         # the first token reads the prefix state (Cts); t + 1 keeps PlannedRun's "t == 0: empty state" rule off
         reg, info = run.token(t + 1 if a.prefix else t, [None] * (1 if a.prefix else 0) + rows,
@@ -277,7 +283,8 @@ def main(argv=None) -> int:
         recs.append(rec)
         emit(rec)
     secs = [r["seconds"] for r in recs]
-    emit({"kind": "summary", "tokens": len(recs), "top1_agree": sum(r["top1_agree"] for r in recs),
+    emit({"kind": "summary", "tokens": len(recs), "prompt_ids": ids[:n_prompt], "generated_ids": ids[n_prompt:],
+          "top1_agree": sum(r["top1_agree"] for r in recs),
           "logits_relErrRms_max": max(r["logits_relErrRms"] for r in recs),
           "logits_relErrRms_median": float(np.median([r["logits_relErrRms"] for r in recs])),
           "hidden_relErrRms_vs_mirror_max": max(r["hidden_relErrRms_vs_mirror"] for r in recs),
