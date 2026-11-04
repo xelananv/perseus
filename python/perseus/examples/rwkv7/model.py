@@ -174,6 +174,27 @@ class Circuit:
         g, b = consts
         return ops.add_pt(ops.mult_pt(ops.mult(xc, y), g), b)
 
+    # ── the two steps a prefill pass replaces (prefill.py) ──
+    def token_shift(self, x, carry):
+        """(the token-shift partner of ``x``, the carry the next step reads): one token, the carried LN output."""
+        return carry, x
+
+    def state_step(self, S, w, kkn, bb, kt, r, V):
+        """One token's update of the M state ciphertexts and its readout terms ``S_m r`` (natural-form inputs;
+        ``V = transpose(v)``)."""
+        ops, L = self.ops, self.L
+        newS, Ps = [], []
+        for m, Sm in enumerate(S):
+            Sa = L.block_allreduce(ops, ops.mult(Sm, kkn), -1.0)     # S a with a = -kk, broadcast over j
+            Sn = ops.add(ops.add(ops.mult(Sm, w), ops.mult(Sa, bb)), ops.mult(V[m], kt))
+            newS.append(Sn)
+            Ps.append(ops.mult(Sn, r))
+        return newS, Ps
+
+    def wkv(self, st: State, w, kkn, bb, kt, r, v):
+        st.S, Ps = self.state_step(st.S, w, kkn, bb, kt, r, self.L.transpose(self.ops, v))
+        return self.L.untranspose(self.ops, Ps)
+
     # ── the block ──
     def block(self, b, z, st: State, W: LayerW):
         ops, L = self.ops, self.L
@@ -181,10 +202,10 @@ class Circuit:
         with self._scope("tm.norm"):
             x = self.layer_norm(ops.add(z, ops.conjugate(z)), pre + "ln1.rsqrt", W.ln["ln1"])
         with self._scope("tm.in"):
+            xp, st.xa = self.token_shift(x, st.xa)
             outs = []
             for lin in W.l1:
-                outs += self.linear([x, st.xa], lin)
-            st.xa = x
+                outs += self.linear([x, xp], lin)
             o = dict(zip(W.l1_kinds, outs))
         with self._scope("tm.lora"):
             zdec = ops.add_pt(self.linear([self.cheb(pre + "att.w_tanh", o["w1"])], W.w2)[0], W.w0)
@@ -203,15 +224,7 @@ class Circuit:
             kt = ops.mult(k, ops.add_pt(ops.mult_pt(a, W.k_a), W.one_m_ka))
             bb = ops.mult(kkn, a)
         with self._scope("tm.state"):
-            V = L.transpose(ops, v)
-            newS, Ps = [], []
-            for m, Sm in enumerate(st.S):
-                Sa = L.block_allreduce(ops, ops.mult(Sm, kkn), -1.0)     # S a with a = -kk, broadcast over j
-                Sn = ops.add(ops.add(ops.mult(Sm, w), ops.mult(Sa, bb)), ops.mult(V[m], kt))
-                newS.append(Sn)
-                Ps.append(ops.mult(Sn, r))
-            st.S = newS
-            y = L.untranspose(ops, Ps)
+            y = self.wkv(st, w, kkn, bb, kt, r, v)
         with self._scope("tm.gn"):
             yc = ops.sub(y, L.block_allreduce(ops, y, 1.0 / HEAD))
             var = ops.add_pt(L.block_allreduce(ops, ops.square(yc), 1.0 / HEAD), W.gn_pad)
@@ -226,8 +239,8 @@ class Circuit:
         with self._scope("cm.norm"):
             x2 = self.layer_norm(ops.add(z, ops.conjugate(z)), pre + "ln2.rsqrt", W.ln["ln2"])
         with self._scope("cm.ffn"):
-            kf = self.linear([x2, st.xf], W.fk)
-            st.xf = x2
+            xp2, st.xf = self.token_shift(x2, st.xf)
+            kf = self.linear([x2, xp2], W.fk)
             rf = [self.cheb(pre + "ffn.relu2", kj) for kj in kf]
             z = ops.add(z, self.linear(rf, W.fv)[0])
         return z
@@ -275,7 +288,7 @@ class Rwkv7Fhe(ImplModel):
     ``z`` masked to the live channels; the client decrypts it and applies ``ln_out`` and the head)."""
 
     def __init__(self, inf, P: Params, coeffs: dict, *, core=None, n_layers=None, unit=None, wbits=24,
-                 fuse_l1=False, shifts=None, carry=True):
+                 fuse_l1=False, shifts=None, carry=True, chunk=0, prefill_keys=0):
         super().__init__(inf, core=core, unit=unit)
         self.P = P
         self.n_layers = int(P.n_layer if n_layers is None else n_layers)
@@ -283,10 +296,22 @@ class Rwkv7Fhe(ImplModel):
         self.L = Layout(self.rt.dims.N, P.C, P.d_ffn)
         self.wbits, self.fuse_l1, self.shifts, self.carry_on = int(wbits), bool(fuse_l1), shifts, bool(carry)
         self.W = [LayerW(P, b, self.L, coeffs, fuse_l1=fuse_l1) for b in range(self.n_layers)]
-        self.circ = Circuit(self.rt.ops, self.L, coeffs, self._pcmm, step=self.rt.step)
+        self.decode_circ = Circuit(self.rt.ops, self.L, coeffs, self._pcmm, step=self.rt.step)
         self.state: list[State] = []
         self.init_state = None          # a public ref.State that start() lands instead of zeros (the prefix's)
         self.pcmm_outputs = 0
+        # prefill (prefill.py): chunk T > 0 runs every step as a T-token pass on token lanes; prefill_keys T also
+        # loads a T-token pass's rotation keys while decoding (a session that serves both)
+        self.prefill_keys = int(prefill_keys)
+        self.set_chunk(chunk)
+
+    def set_chunk(self, T: int):
+        """0: decode steps (one token on every lane); T: T-token prefill passes. The carried state is the same."""
+        from .prefill import PrefillCircuit
+        self.chunk = int(T)
+        self.circ = (self.decode_circ if not self.chunk else
+                     PrefillCircuit(self.rt.ops, self.L, self.coeffs, self._pcmm, self.chunk, step=self.rt.step))
+        self.prefill_keys = max(self.prefill_keys, self.chunk)
 
     def _pcmm(self, xs, lin: Lin):
         from perseus.impl import pcmm
@@ -299,7 +324,9 @@ class Rwkv7Fhe(ImplModel):
 
     def rotation_steps(self) -> set[int]:
         from perseus.impl import pcmm
-        return self.L.rotation_steps() | {s % self.L.n for s in pcmm.rot_steps()}
+        from .prefill import rotation_steps as prefill_steps
+        s = self.L.rotation_steps() | {s % self.L.n for s in pcmm.rot_steps()}
+        return s | prefill_steps(self.L, self.prefill_keys) if self.prefill_keys else s
 
     def zero_ct(self):
         ops = self.rt.ops
@@ -332,9 +359,11 @@ class Rwkv7Fhe(ImplModel):
             self.state.append(State(cts[: self.L.M], cts[self.L.M], cts[self.L.M + 1]))
 
     def encode_input(self, row):
-        """Block 0's input: the embedding row (ln0 applied, client side) on every lane, at the landing level."""
+        """Block 0's input: the embedding row (ln0 applied, client side) on every lane, at the landing level; in a
+        prefill pass the chunk's rows (T, C), row l on lane l."""
         ops = self.rt.ops
-        return ops.pack_tokens(self.L.encode_row(row), ops.bts_out())
+        rows = self.L.encode_rows(row) if self.chunk else self.L.encode_row(row)
+        return ops.pack_tokens(rows, ops.bts_out())
 
     def name_state(self, st: State):
         for name, ct in zip(st.names(), st.cts()):
@@ -380,12 +409,14 @@ class Rwkv7Fhe(ImplModel):
         return stages
 
     def step(self, row, pos):
-        """One token on the fake / recorder: returns (hidden (C,), the reply ciphertext)."""
+        """One token on the fake / recorder: returns (hidden (C,), the reply ciphertext); in a prefill pass ``row``
+        is the chunk (T, C) and the hidden states are (T, C)."""
         self.token_begin(pos)
         x = self.encode_input(row)
         out = self.run_stages(x, pos, self.token_stages(x, pos))
         self.token_tail(pos)
-        return self.L.decode(self.rt.ops.decrypt_slots(out)), out
+        vals = self.rt.ops.decrypt_slots(out)
+        return (self.L.decode_lanes(vals, len(row)) if self.chunk else self.L.decode(vals)), out
 
 
 class Mirror:
@@ -419,3 +450,14 @@ class Mirror:
             z = self.circ.block(b, z, self.state[b], self.W[b])
         z = z * self.L.live
         return self.L.decode(np.real(z)), z
+
+    def prefill(self, rows):
+        """A chunk of T rows in one pass on token lanes (prefill.py): (hidden (T, C), the slot vector)."""
+        from .prefill import PrefillCircuit
+        T = len(rows)
+        circ = PrefillCircuit(self.circ.ops, self.L, self.circ.coeffs, self.circ.linear, T)
+        z = self.L.chunk(rows).astype(np.complex128)
+        for b in range(self.n_layers):
+            z = circ.block(b, z, self.state[b], self.W[b])
+        z = z * self.L.live
+        return self.L.decode_lanes(np.real(z), T), z

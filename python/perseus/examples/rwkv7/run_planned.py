@@ -28,7 +28,7 @@ import numpy as np
 
 from perseus.examples.fhe_ssm.planned import N32_Q_PRIMES, SsmRecorder, digest
 
-from perseus.impl.driver import PlannedRun
+from perseus.impl.driver import PlannedRun, plan_rot_scope, register_levels
 
 from . import common
 from .layout import D
@@ -50,12 +50,33 @@ class Recorder(SsmRecorder):
 
 class Rwkv7PlannedRun(PlannedRun):
     def __init__(self, recorder, plan_dir, config, labels, keys, *, model, work_dir, pcmm_cf=6, pt_rows=28,
-                 stc_cache=8, pool=16, log=print):
+                 stc_cache=8, pool=16, log=print, schedule="program", pcmm_cf_map=None):
         super().__init__(recorder, plan_dir, config, labels, keys, ref_token=1, probe=2, work_dir=work_dir,
                          pt_rows=pt_rows, dyn_rot=[], stc_cache=stc_cache, pool=pool, log=log)
         self.model, self.pcmm_cf = model, int(pcmm_cf)
+        self.schedule = str(schedule)
+        self.pcmm_cf_map = None if pcmm_cf_map is None else {str(k): int(v) for k, v in pcmm_cf_map.items()}
         self.ops = None
         self.static = False
+
+    def _compile_with_schedule(self, fn):
+        """``PlannedRun.prepare`` calls ``_pc.Program.compile`` without a schedule: run ``fn`` with the module's
+        ``Program`` standing in for one whose ``compile`` passes ``schedule`` (siblings: sibling ops, refresh pairs
+        under PAIR=1 included, batched into one launch; fhe_ssm's ``--schedule``)."""
+        from perseus import _pc
+        if self.schedule == "program":
+            return fn()
+        real, sched = _pc.Program, self.schedule
+
+        class _Scheduled:
+            @staticmethod
+            def compile(*a, **k):
+                return real.compile(*a, schedule=sched, **k)
+        _pc.Program = _Scheduled
+        try:
+            return fn()
+        finally:
+            _pc.Program = real
 
     # the store: one slot per distinct (value digest, level)
     def pt_aliases(self):
@@ -69,7 +90,7 @@ class Rwkv7PlannedRun(PlannedRun):
         return out
 
     def prepare(self, rows, argmax=False):
-        super().prepare(rows, argmax)
+        self._compile_with_schedule(lambda: PlannedRun.prepare(self, rows, argmax))
         if any(self.dyn.values()):
             raise RuntimeError(f"dynamic steps in the stream: {self.dyn}")
         for b, r in self.ref.items():
@@ -91,6 +112,11 @@ class Rwkv7PlannedRun(PlannedRun):
         kw["pcmm"] = [(n, int(l.t), int(l.n_in), int(l.n_out), int(l.Wd.shape[0]), float(l.w_scale), int(l.shift))
                       for n, l in lins.items()] or None
         kw["pcmm_cf"] = self.pcmm_cf
+        if self.pcmm_cf_map is not None:
+            # per-linear CFs (fhe_ssm/pcmm_cf_table.py from the capture); a linear not in the table at pcmm_cf
+            kw["pcmm_cf_map"] = {n: c for n, c in self.pcmm_cf_map.items() if n in lins}
+            self.log(f"[planned] PCMM CF table: {len(kw['pcmm_cf_map'])} of {len(lins)} linears, "
+                     f"CFs {sorted(set(kw['pcmm_cf_map'].values()))}, the rest at {self.pcmm_cf}")
         pairs = {(self.al[(lab, nm)], int(lv)) for lab, p in self.progs.items()
                  for nm, lv, _d, f in p.pt_refs if f not in ("stream", "diag")}
         kw["pt_levels"] = [lv for _a, lv in sorted(pairs)]
@@ -106,7 +132,13 @@ class Rwkv7PlannedRun(PlannedRun):
         self.ops = FheOps(self.sess.fhe, _pc, self.model.rt.ops.unit)
         for name, lin in self.model.linears().items():
             self.sess.pcmm_upload(name, np.ascontiguousarray(lin.Wd, dtype=np.int8).tobytes())
-        items, n = {}, 0
+        n = int(self.store.stage([(nm, lv, v) for (nm, lv), v in self.pt_items().items()]))
+        self.log(f"[planned] {len(self.model.linears())} PCMM linears uploaded, {n} plaintext slots staged")
+        return self
+
+    def pt_items(self) -> dict:
+        """Every plaintext under its shared store name ``{(alias, level): values}``; aliases the programs to it."""
+        items = {}
         for b in sorted(self.ref):
             lab, r = self.labels[b], self.ref[b]
             amap = {}
@@ -122,9 +154,7 @@ class Rwkv7PlannedRun(PlannedRun):
                 items.setdefault((a, int(lv)), np.ascontiguousarray(v, dtype=np.float64))
             self.progs[lab].alias_pts(amap)
             self._alias.update(amap)
-        n = int(self.store.stage([(nm, lv, v) for (nm, lv), v in items.items()]))
-        self.log(f"[planned] {len(self.model.linears())} PCMM linears uploaded, {n} plaintext slots staged")
-        return self
+        return items
 
     def encrypt_input(self, rows, p, i, what):
         """``pack_tokens`` rows ``(t, D)`` (row ``tok`` at slots ``ch * t + tok``) encrypted at program input ``i``'s
@@ -190,6 +220,143 @@ class Rwkv7PlannedRun(PlannedRun):
         return self.model.L.decode(np.real(vals)), int(ct.level)
 
 
+def _state_key(run, b, i):
+    return re.search(r"cache\.([a-z0-9]+)-lvl", run.ref[b].inputs()[i]).group(1)
+
+
+class Rwkv7PrefillRun:
+    """The decode programs AND the T-token prefill programs (prefill.py) in ONE planned session, sharing the carried
+    state's registers: a prefill pass writes each block's ``S_0, S_1, xa, xf`` where the decode step reads them, so
+    decoding continues from the prefilled state without leaving the device.
+
+    ``dec`` and ``pf`` are two ``Rwkv7PlannedRun`` (each its own twin, graphs and plan: the decode plan and the
+    prefill capture's plan); ``prepare`` compiles both, relabels the prefill programs ``pf_block_<b>``, maps the
+    prefill state registers onto the decode ones and numbers the prefill stage outputs after the decode registers;
+    ``setup`` opens one session for every program (the keys cover both programs' rotations: the session derives them
+    from the programs), uploads the PCMM planes once (the same linears, the same shifts: both captures read one
+    ``pcmm_shifts.json``) and stages both programs' plaintexts in one store (shared names: equal values share a slot).
+    """
+
+    def __init__(self, dec: Rwkv7PlannedRun, pf: Rwkv7PlannedRun, T: int, log=print):
+        self.dec, self.pf, self.T, self.log = dec, pf, int(T), log
+
+    def prepare(self, dec_rows, pf_chunks):
+        dec, pf = self.dec, self.pf
+        dec.prepare(dec_rows)
+        pf.prepare(pf_chunks)
+        for lab, p in pf.progs.items():
+            p.relabel(f"pf_{lab}")
+        n_layers = dec.rec.n_layers
+        bad = []
+        for b in range(n_layers):
+            dmap = {_state_key(dec, b, i): (i, j, r) for i, j, r in dec.reg[b]["kv"]}
+            pmap = {_state_key(pf, b, i): (i, j) for i, j, _r in pf.reg[b]["kv"]}
+            if set(dmap) != set(pmap):
+                raise RuntimeError(f"block {b}: decode state {sorted(dmap)} vs prefill state {sorted(pmap)}")
+            pd, pp = dec.progs[dec.labels[b]], pf.progs[pf.labels[b]]
+            for key, (i, j) in pmap.items():
+                di, dj, _r = dmap[key]
+                # the register a prefill pass writes is read by the next decode step (and the next pass): its
+                # (level, deg) must be the decode input's compiled one, else Program.run refuses it (program.rs)
+                w, rd = tuple(pp.outputs[j][1:3]), tuple(pd.inputs[di][1:3])
+                w2, rd2 = tuple(pd.outputs[dj][1:3]), tuple(pp.inputs[i][1:3])
+                if w[:2] != rd[:2] or w2[:2] != rd2[:2]:
+                    bad.append(f"block {b} {key}: prefill writes {w}, decode reads {rd}; decode writes {w2}, "
+                               f"prefill reads {rd2}")
+            pf.reg[b]["kv"] = [(i, j, dmap[key][2]) for key, (i, j) in pmap.items()]
+        if bad:
+            raise RuntimeError("the two plans land the carried state differently: " + "; ".join(bad[:6]))
+        n = dec.n_regs
+        for b in sorted(pf.reg):
+            outs = []
+            for j, _r in pf.reg[b]["out"]:
+                outs.append((j, n))
+                n += 1
+            pf.reg[b]["out"] = outs
+        self.n_regs = n
+        pf.n_regs = n                   # its registers are numbered in the shared space (register_levels sizes by it)
+        return self
+
+    def session_kwargs(self):
+        dec, pf = self.dec, self.pf
+        kd, kp = dec.session_kwargs(), pf.session_kwargs()
+        if {s[0] for s in kd["pcmm"] or []} != {s[0] for s in kp["pcmm"] or []} or sorted(kd["pcmm"] or []) != sorted(kp["pcmm"] or []):
+            raise RuntimeError("the decode and prefill twins encode the PCMM linears differently (shifts?)")
+        kw = dict(kd)
+        kw["programs"] = kd["programs"] + kp["programs"]
+        kw["regs"] = self.n_regs
+        writes = []
+        for run in (dec, pf):
+            for b in sorted(run.ref):
+                p = run.progs[run.labels[b]]
+                writes += [(p, j, r) for _i, j, r in run.reg[b]["kv"]] + [(p, j, r) for j, r in run.reg[b]["out"]]
+        kw["reg_levels"] = register_levels(self.n_regs, writes)
+        pairs = {(run.al[(lab, nm)], int(lv)) for run in (dec, pf) for lab, p in run.progs.items()
+                 for nm, lv, _d, f in p.pt_refs if f not in ("stream", "diag")}
+        kw["pt_levels"] = [lv for _a, lv in sorted(pairs)]
+        kw["pt_slots"] = len(kw["pt_levels"]) + 8
+        kw["pt_rows"] = max(kd.get("pt_rows") or 0, kp.get("pt_rows") or 0)
+        return kw
+
+    def setup(self, dec_rows, pf_chunks):
+        from perseus import _pc
+        from perseus.impl.ops import FheOps
+        t0 = time.time()
+        self.prepare(dec_rows, pf_chunks)
+        dec, pf = self.dec, self.pf
+        kw = self.session_kwargs()
+        for run in (dec, pf):
+            run.rot_keys = plan_rot_scope(run.plan_dir, [run.progs[run.labels[b]] for b in sorted(run.ref)],
+                                          run.dyn_rot)
+        sess = dec.open_session(kw)
+        for run in (dec, pf):
+            run.sess, run.store = sess, sess.pt_store
+            for b in sorted(run.ref):
+                run.progs[run.labels[b]].bind(sess, run.store)
+        sess.complete_setup()
+        for run in (dec, pf):
+            run.fhe, run._pt_vals = sess.fhe, {}
+            run.ops = FheOps(sess.fhe, _pc, run.model.rt.ops.unit)
+            run.static = True
+        for name, lin in dec.model.linears().items():
+            sess.pcmm_upload(name, np.ascontiguousarray(lin.Wd, dtype=np.int8).tobytes())
+        items = dec.pt_items()
+        for k, v in pf.pt_items().items():
+            items.setdefault(k, v)
+        n = int(dec.store.stage([(nm, lv, v) for (nm, lv), v in items.items()]))
+        self.setup_s = time.time() - t0
+        self.log(f"[prefill] one session: {len(kw['programs'])} programs (decode + T = {self.T} prefill), "
+                 f"{self.n_regs} registers, {n} plaintext slots, rotation keys decode {dec.rot_keys} prefill "
+                 f"{pf.rot_keys}; setup {self.setup_s:.1f} s")
+        self.log("[prefill] " + sess.mem_report.replace("\n", " | "))
+        self.sess = sess
+        return self
+
+    def prefill(self, rows, kv_cts=None):
+        """One T-token pass (rows: T <= t embedding rows) on the device; the carried inputs from the shared registers,
+        or from ``kv_cts`` (``pf.state_cts``: the public prefix state) on the first pass. Returns the reply register."""
+        pf = self.pf
+        L = pf.model.L
+        n_blocks = pf.rec.n_layers + 1
+        for b in range(n_blocks):
+            p = pf.progs[pf.labels[b]]
+            ins = [None] * len(p.inputs)
+            ins[0] = (pf.encrypt_input(L.encode_rows(rows), p, 0, "prefill chunk")[0] if b == 0
+                      else pf.reg[b - 1]["out"][0][1])
+            for i, _j, r in pf.reg[b]["kv"]:
+                ins[i] = kv_cts[b][i] if kv_cts is not None and b in kv_cts else r
+            p.run(ins, [(j, r) for _i, j, r in pf.reg[b]["kv"]] + list(pf.reg[b]["out"]))
+        return pf.reg[n_blocks - 1]["out"][0][1]
+
+    def reply(self, reg, T):
+        ct = self.pf.ct(reg)
+        vals = np.asarray(self.pf.ops.decrypt_slots_complex(ct))
+        return self.pf.model.L.decode_lanes(np.real(vals), T), int(ct.level)
+
+    def close(self):
+        self.dec.close()
+
+
 def probe_rows(P, calib_ids, prefix_ids=()):
     """The probes' rows: public and in distribution. The twin records them with values on (PCMM's fake multiplies
     the slot vectors), so an untrained row (``emb[0]``, the World vocabulary's unused token 0) drives the Chebyshev
@@ -214,7 +381,17 @@ def main(argv=None) -> int:
     ap.add_argument("--generate", type=int, default=0,
                     help="free-running steps after the prompt: the client's greedy pick (top1_fhe) is fed back")
     ap.add_argument("--no-warmup", action="store_true")
+    ap.add_argument("--schedule", default="program", choices=("program", "siblings"),
+                    help="Program.compile's schedule (siblings: what a PAIR=1 plan needs to form its refresh pairs)")
+    ap.add_argument("--pcmm-cf-table", default=None,
+                    help="a CF per PCMM linear (python -m perseus.examples.fhe_ssm.pcmm_cf_table CAPTURE OUT.json); "
+                    "a linear not in it at --pcmm-cf")
+    ap.add_argument("--pf-plan", default=None,
+                    help="with --prefill-chunk T: the plan cut from run_capture --prefill-chunk T (same shifts file)")
     a = ap.parse_args(argv)
+    T = int(a.prefill_chunk)
+    if T and not (a.pf_plan and a.prefix):
+        raise SystemExit("--prefill-chunk needs --pf-plan and a public prefix (--prefix >= 1)")
     from perseus import _pc
     from perseus.examples.fhe_ssm.run_planned import session_config
 
@@ -237,23 +414,46 @@ def main(argv=None) -> int:
         out.flush()
         print(json.dumps(rec), flush=True)
 
+    cf_map = None
+    if a.pcmm_cf_table:
+        from perseus.examples.fhe_ssm import pcmm_cf_table
+        cf_map = pcmm_cf_table.load(a.pcmm_cf_table)
+    lever = dict(schedule=a.schedule, pcmm_cf_map=cf_map)
     run = Rwkv7PlannedRun(Recorder(model, model.n_layers), a.plan, cfg, labels, keys, model=model, work_dir=work,
-                          pcmm_cf=a.pcmm_cf, pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool)
+                          pcmm_cf=a.pcmm_cf, pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool, **lever)
     try:                                         # the probes' rows: public, in distribution (probe_rows)
         calib = common.token_ids(a, common.CALIB_TEXT)
     except SystemExit:                           # --ids without --harness: no tokenizer
         calib = []
     public = probe_rows(P, calib, all_ids[: a.prefix])
+    both = None
     t0 = time.time()
-    run.setup(public)
+    if T:
+        # the prefill twin: the same weights and shifts, T-token passes; its probes are two public chunks
+        _f2, _i2, pmodel = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts, chunk=T)
+        pmodel.init_state = st
+        prun = Rwkv7PlannedRun(Recorder(pmodel, pmodel.n_layers), a.pf_plan, cfg, labels, keys, model=pmodel,
+                               work_dir=work + ".pf", pcmm_cf=a.pcmm_cf, pt_rows=a.pt_rows, stc_cache=a.stc_cache,
+                               pool=a.pool, **lever)
+        long_ids = common.token_ids(a, common.CALIB_TEXT_LONG)[a.prefix:]
+        pf_public = [[P.emb[t] for t in long_ids[i * T:(i + 1) * T]] for i in range(2)]
+        both = Rwkv7PrefillRun(run, prun, T).setup(public, pf_public)
+    else:
+        run.setup(public)
     setup_s = time.time() - t0
-    kv0 = run.state_cts(st) if a.prefix else None
+    kv_dec = run.state_cts(st) if a.prefix else None
+    kv_pf = both.pf.state_cts(st) if both else None
+    progs = {lab: p for lab, p in run.progs.items()}
+    if both:
+        progs.update({f"pf_{lab}": p for lab, p in both.pf.progs.items()})
     emit({"kind": "header", "driver": "perseus.examples.rwkv7.run_planned", "keys": "insecure-inproc",
           "blocks": model.n_layers, "prefix": all_ids[: a.prefix], "tokens": ids, "plan": a.plan, "pcmm_cf": a.pcmm_cf, "wbits": a.wbits,
+          "prefill_chunk": T, "pf_plan": a.pf_plan, "schedule": a.schedule, "pcmm_cf_table": a.pcmm_cf_table,
+          "pcmm_cf_table_sha256": common.sha256(a.pcmm_cf_table) if a.pcmm_cf_table else None,
           "fuse_l1": a.fuse_l1, "shifts": a.shifts, "setup_s": round(setup_s, 1),
           "programs": {lab: {k: v for k in ("n_ops", "n_bootstraps", "n_launches", "n_finishes")
                              if isinstance(v := getattr(p, k, None), (int, float))}
-                       for lab, p in run.progs.items()},
+                       for lab, p in progs.items()},
           "mem_report_text": str(run.sess.mem_report),
           "pth_sha256": common.sha256(a.pth), "coeffs_sha256": common.sha256(a.coeffs),
           "environment": common.environment()})
@@ -262,33 +462,58 @@ def main(argv=None) -> int:
         reg, _ = run.token(0, public)
         run.reply(reg)
         emit({"kind": "warmup", "seconds": round(time.time() - t0, 3)})
+        if both:                                 # untimed: a public chunk from the public prefix state
+            t0 = time.time()
+            both.reply(both.prefill(pf_public[0], kv_cts=both.pf.state_cts(st)), T)
+            emit({"kind": "warmup", "prefill_chunk": T, "seconds": round(time.time() - t0, 3)})
     mirror = Mirror(P, co, model.L.n, wbits=a.wbits, fuse_l1=a.fuse_l1)
     mirror.reset(st if a.prefix else None)
     sc = common.Scorer(P, a, mirror=mirror, poly=poly)
     rows = [P.emb[t] for t in ids]
-    recs = []
+    recs, passes = [], []
     n_prompt = len(ids)
-    for t in range(n_prompt + a.generate):
+    n_pf = (n_prompt // T) * T if T else 0        # whole chunks prefilled; the remainder decoded token by token
+    for c in range(n_pf // T if T else 0):
+        chunk = ids[c * T:(c + 1) * T]
+        t0 = time.time()
+        reg = both.prefill([P.emb[t] for t in chunk], kv_cts=kv_pf if c == 0 else None)
+        hid, level = both.reply(reg, T)
+        sec = time.time() - t0
+        prec = {"kind": "prefill", "pass": c, "T": T, "seconds": round(sec, 4),
+                "seconds_per_token": round(sec / T, 4), "reply_level": level}
+        passes.append(prec)
+        emit(prec)
+        for l, tok in enumerate(chunk):           # each lane scored as its own position, token by token
+            rec = {"kind": "token", "mode": "prefill", "pass": c, "lane": l,
+                   **sc.score(a.prefix + c * T + l, tok, hid[l])}
+            recs.append(rec)
+            emit(rec)
+    for t in range(n_pf, n_prompt + a.generate):
         if t >= n_prompt:                        # free running: the client decrypts, picks greedily, feeds it back
             ids.append(int(recs[-1]["top1_fhe"]))
             rows.append(P.emb[ids[-1]])
         t0 = time.time()
-        # the first token reads the prefix state (Cts); t + 1 keeps PlannedRun's "t == 0: empty state" rule off
+        # the first token reads the prefix state (Cts) unless a prefill pass left it in the registers; t + 1 keeps
+        # PlannedRun's "t == 0: empty state" rule off
         reg, info = run.token(t + 1 if a.prefix else t, [None] * (1 if a.prefix else 0) + rows,
-                              kv_cts=kv0 if t == 0 else None)
+                              kv_cts=kv_dec if t == 0 else None)
         hidden, level = run.reply(reg)
         sec = time.time() - t0
-        rec = {"kind": "token", "seconds": round(sec, 4), "issue_s": info["issue_s"], "reply_level": level,
-               **sc.score(a.prefix + t, ids[t], hidden)}
+        rec = {"kind": "token", "mode": "decode", "seconds": round(sec, 4), "issue_s": info["issue_s"],
+               "reply_level": level, **sc.score(a.prefix + t, ids[t], hidden)}
         recs.append(rec)
         emit(rec)
-    secs = [r["seconds"] for r in recs]
+    secs = [r["seconds"] for r in recs if r["mode"] == "decode"]
+    pf_s = sum(p["seconds"] for p in passes)
     emit({"kind": "summary", "tokens": len(recs), "prompt_ids": ids[:n_prompt], "generated_ids": ids[n_prompt:],
           "top1_agree": sum(r["top1_agree"] for r in recs),
+          "top1_agree_prefill": sum(r["top1_agree"] for r in recs if r["mode"] == "prefill"),
+          "prefilled_tokens": n_pf, "prefill_chunk": T, "prefill_passes": len(passes),
+          "prefill_seconds_per_token": round(pf_s / n_pf, 4) if n_pf else None,
           "logits_relErrRms_max": max(r["logits_relErrRms"] for r in recs),
           "logits_relErrRms_median": float(np.median([r["logits_relErrRms"] for r in recs])),
           "hidden_relErrRms_vs_mirror_max": max(r["hidden_relErrRms_vs_mirror"] for r in recs),
-          "seconds_per_token_median": float(np.median(secs)), "seconds_per_token_after_first":
+          "seconds_per_token_median": float(np.median(secs)) if secs else None, "seconds_per_token_after_first":
           float(np.mean(secs[1:])) if len(secs) > 1 else None, "setup_s": round(setup_s, 1),
           "wall_s": round(time.time() - t_all, 1), "planned_stats": str(run.sess.planned_stats())})
     run.close()

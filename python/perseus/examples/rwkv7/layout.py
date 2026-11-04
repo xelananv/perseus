@@ -166,6 +166,11 @@ class Layout:
         return outs
 
     def untranspose(self, ops, Ps):
+        return ops.rotate_and_sum(self.untranspose_lane0(ops, Ps), -1, self.t)
+
+    def untranspose_lane0(self, ops, Ps):
+        """``untranspose`` before its lane copy: ``y[h, t m + l]`` at (channel ``h 64 + t m + l``, lane 0), zero on
+        every other lane (the prefill scan moves it to its token's lane instead of copying it)."""
         t, nb = self.t, self.nb
         acc = None
         for m, P in enumerate(Ps):
@@ -177,4 +182,30 @@ class Layout:
                 inner = ops.mult_pt_sum(babies, pts)
                 term = inner if G == 0 else ops.rotate(inner, -G)
                 acc = term if acc is None else ops.add(acc, term)
-        return ops.rotate_and_sum(acc, -1, t)
+        return acc
+
+    # ── token lanes (prefill: lane l holds token l of the chunk) ──
+    def lane_mask(self, lanes, value: float = 1.0) -> np.ndarray:
+        """``value`` on every channel of the given lanes, 0 elsewhere."""
+        return np.isin(self._lane, list(lanes)).astype(np.float64) * float(value)
+
+    def encode_rows(self, rows) -> np.ndarray:
+        """``pack_tokens`` rows for a chunk: row ``l`` (zero-padded to 1,024) on lane ``l``. Lanes past the chunk
+        repeat its last row, so they hold in-distribution values (a lane of zeros sends LayerNorm's Newton out of
+        range, and one runaway slot spoils a whole ciphertext's refresh)."""
+        rows = np.asarray(rows, dtype=np.float64)
+        if rows.ndim != 2 or not 1 <= rows.shape[0] <= self.t:
+            raise ValueError(f"a chunk of 1..{self.t} rows, got {rows.shape}")
+        out = np.zeros((self.t, D))
+        out[: rows.shape[0], : rows.shape[1]] = rows
+        out[rows.shape[0]:, : rows.shape[1]] = rows[-1]
+        return out
+
+    def decode_lanes(self, vec, T: int) -> np.ndarray:
+        """(T, C): lane l's first C channels of a decrypted slot vector."""
+        v = np.asarray(vec).reshape(D, self.t)
+        return v[: self.C, :T].T.copy()
+
+    def chunk(self, rows) -> np.ndarray:
+        """A chunk as a slot vector (the mirror's input)."""
+        return self.encode_rows(rows).T.reshape(-1)

@@ -33,13 +33,25 @@ def main(argv=None) -> int:
     ids = ids[a.prefix:]
     t0 = time.time()
     shifts = {}
-    if a.pcmm_shift == "calib":
+    T = int(a.prefill_chunk)
+    if a.shifts:
+        # given (a session serving decode AND prefill uploads each linear once, with one shift: both captures read
+        # the same file)
+        shifts = json.load(open(a.shifts))
+    elif a.pcmm_shift == "calib":
         calib = os.path.join(a.out, "pcmm_calib.json")
         os.environ["PF_PCMM_CALIB"] = calib
-        _fhe, _inf, model = make_model(P, co, capture=False, fuse_l1=a.fuse_l1, wbits=a.wbits)
+        _fhe, _inf, model = make_model(P, co, capture=False, fuse_l1=a.fuse_l1, wbits=a.wbits, prefill_keys=T)
         model.start(st if a.prefix else None)
         for pos, t in enumerate(ids[: a.calib_tokens]):
             model.step(P.emb[t], pos)
+        if T:
+            # prefill: the band must also hold every token of the long text, read as two T-token passes
+            long_ids = common.token_ids(a, common.CALIB_TEXT_LONG)[a.prefix:]
+            model.start(st if a.prefix else None)
+            model.set_chunk(T)
+            for i in range(min(2, len(long_ids) // T)):
+                model.step([P.emb[t] for t in long_ids[i * T:(i + 1) * T]], i)
         del os.environ["PF_PCMM_CALIB"]
         from .model import pcmm_shifts
         shifts = pcmm_shifts(json.load(open(calib)))
@@ -50,15 +62,26 @@ def main(argv=None) -> int:
         json.dump(shifts, f, indent=1, sort_keys=True)
     print(f"[capture] shifts ({a.pcmm_shift}) for {len(shifts)} linears in {time.time() - t0:.1f} s", flush=True)
     os.environ["FHE_GRAPH_CAPTURE_TOKEN"] = str(a.capture_tick)
-    fhe, _inf, model = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts)
+    T = int(a.prefill_chunk)
+    fhe, _inf, model = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts, chunk=T)
     model.set_capture(a.out)
     model.start(st if a.prefix else None)
-    for pos, t in enumerate(ids[: a.capture_tick + 1]):
+    if T:
+        # a T-token pass per tick, on the long public text (tick 1 reads the state tick 0 carried)
+        long_ids = common.token_ids(a, common.CALIB_TEXT_LONG)[a.prefix:]
+        if len(long_ids) < T * (a.capture_tick + 1):
+            raise SystemExit(f"the prefill capture text has {len(long_ids)} tokens, {T * (a.capture_tick + 1)} needed")
+        steps = [[P.emb[t] for t in long_ids[i * T:(i + 1) * T]] for i in range(a.capture_tick + 1)]
+        ids = long_ids[: T * (a.capture_tick + 1)]
+    else:
+        steps = [P.emb[t] for t in ids[: a.capture_tick + 1]]
+        ids = ids[: a.capture_tick + 1]
+    for pos, row in enumerate(steps):
         t1 = time.time()
-        h, out = model.step(P.emb[t], pos)
-        print(f"[capture] token {pos} ({t}) out level {model.rt.ops.level(out)} in {time.time() - t1:.1f} s",
-              flush=True)
-    meta = {"blocks": model.n_layers, "capture_tick": a.capture_tick, "tokens": ids[: a.capture_tick + 1],
+        h, out = model.step(row, pos)
+        print(f"[capture] {'pass' if T else 'token'} {pos} out level {model.rt.ops.level(out)} in "
+              f"{time.time() - t1:.1f} s", flush=True)
+    meta = {"blocks": model.n_layers, "capture_tick": a.capture_tick, "tokens": ids, "prefill_chunk": T,
             "prefix": a.prefix,
             "pth_sha256": common.sha256(a.pth), "coeffs_sha256": common.sha256(a.coeffs), "wbits": a.wbits,
             "fuse_l1": a.fuse_l1, "pcmm_shift": a.pcmm_shift, "environment": common.environment()}

@@ -4,8 +4,13 @@
 768, 12 heads of 64, d_ffn 3,072) one token per step, every block on ciphertexts. The client decrypts the last
 block's hidden state and applies `ln_out` and the head in the clear. Every non-polynomial operation is the polynomial
 of `coeffs_mixed.json` (the research harness's `poly` mode, `results/vector-d-20261104/harness/rwkv7_model.py`).
-Status: verified on the CPU (numpy fake with the runtime's level rules, capture recorder, planner). **Nothing has run
-on a GPU yet**; `tools/rwkv7/run_box.sh` is the box procedure.
+**Status:**
+- Decode is verified on the CPU (numpy fake with the runtime's level rules, capture recorder, planner) and ran on a
+  GPU on 2026-11-04: 12 blocks, top-1 12/12, 13.05 s per token on a 300 W card
+  (`results/rwkv7-fhe-20261104/README.md`).
+- Prefill (below) is verified on the CPU only.
+
+`tools/rwkv7/run_box.sh` is the box procedure.
 
 ## The circuit
 
@@ -101,6 +106,47 @@ a resident plaintext store far beyond the card.
   * Keys are in-process (`KeySource.generate`): the session holds the secret. This is a correctness and timing run,
     recorded as `keys: insecure-inproc`.
 
+## Prefill: T prompt tokens per pass (`prefill.py`, `PREFILL_DESIGN.md`)
+
+A decode step copies one token over the 32 lanes. A prefill pass puts **token l of a chunk on lane l** instead.
+
+**What runs unchanged.** The linears (PCMM: the same matrix on every lane), the polynomial sites, the Newton chains
+and the norms (their reductions stay inside a lane) are the decode step's code at the decode step's cost.
+
+**What changes:**
+- **Token shift:** lane l takes lane l − 1, by a rotation and a mask; lane 0 takes the carried LN output.
+- **WKV:** a sequential scan inside the pass, on the decode step's own state layout and `state_step`. Each token's
+  vectors are broadcast from its lane: three complex pairs, one broadcast each, split by a conjugation. Its readout
+  is placed back on its lane (Horner accumulation).
+
+A pass therefore ends with exactly the state a decode step carries, and decoding continues from it on the same
+registers. The chunk is the client's T rows. Lanes past a short chunk repeat its last row and are never read.
+
+**Planned cost** (CPU plans, LANDING=high):
+- block 0: 62 refreshes per 32-token pass against 31 per decode token;
+- block 1: 100 against about 40.
+
+Priced with the published per-op ratios and scaled to this port's measured 13.05 s per decode token, that is
+**≈ 42–46 s per 32-token pass, ≈ 1.3–1.4 s per prompt token (9–10× faster than decoding the prompt)**. This is an
+estimate; nothing has run on a GPU (`PREFILL_DESIGN.md` §4). The WY / chunked form was rejected on encrypted
+cost (§2 there).
+
+**Device path:**
+- `run_planned.py --prefill-chunk T --pf-plan PLAN_PF` opens **one session** for the decode programs and the prefill
+  programs (`Rwkv7PrefillRun`). Each set is compiled from its own capture and plan, and the prefill set is
+  relabelled `pf_block_<b>`.
+- The prefill state registers are the decode ones. Before the session opens, a check refuses plans that land the
+  carried state at different (level, deg).
+- The prompt runs as ⌊n/T⌋ passes. The remainder and any `--generate` steps are decode steps.
+- Every prefilled position is scored like a decoded one (top-1 and logits relErrRms against the poly model, hidden
+  relErrRms against the mirror). Each pass also gets its own line: seconds per pass and per token.
+
+**Levers from the fhe_ssm stack** (`PREFILL_DESIGN.md` §6):
+- transfer, opt-in (`LEVERS=best`): PAIR=1 with `--schedule siblings`, and the fused EvalMod;
+- built but doubtful (`CFTABLE=1`): the PCMM CF table. The band shifts already normalise every PCMM output, so it
+  collapses to a global CF of 2–3; A/B it on the smoke first;
+- does not transfer: pack-stats (no two norm statistics are ever ready together).
+
 ## What is verified on the CPU (`tests/`, `python -m pytest python/perseus/examples/rwkv7/tests`)
 
 | test | what | result |
@@ -112,6 +158,15 @@ a resident plaintext store far beyond the card.
 | `test_full_fake` (slow_shape) | **all 12 blocks on the fake**, 5 tokens after the prefix, vs the poly model (clamp on) | **top-1 5/5; logits relErrRms ≤ 3.4e-5**; 1,453 eager refreshes per token; 3.7 GB |
 | `test_planned_cpu` | the planned driver's CPU half: carried state found as program inputs, stream static | 4 carried inputs per block; no dynamic step |
 | `test_capture` / `test_full_plan` (slow_shape) | shifts + capture + plan (1 block / 12 blocks) | 12 blocks: 13 stages, **478 planned refreshes per token**, 43 rotation keys, 15 s |
+| `test_prefill` (mirror) | a T-token pass vs T decode steps, and 2 decode steps after the hand-over; T = 32, 7, 1 (t = 32 lanes), T = 16 (t = 16) | hidden states, carried state and post-hand-over decode bit-identical (every added op is exact in float64); a reversed chunk differs |
+| `test_prefill` (fake, recorder) | prefix → 6-token pass → 3 decode steps vs 9 decode steps, 2 blocks | identical; **top-1 9/9** both, against the poly model |
+| `test_prefill` (capture, `--rwkv7-plan`) | `run_capture --prefill-chunk T` + plan | T = 32: 62 refreshes (block 0), 100 (block 1, 2-block plan); T = 8: 38 |
+| `test_prefill_session` | the one-session register merge on stand-in programs; a landing mismatch stops it | merged by name; prefill outputs after the decode registers |
+| `test_prefill` (`session_prepare`, box only) | both plans compiled by `Program.compile`, registers merged, landings compared | skipped here (CPU build has no `Program`); `run_box.sh pfcheck` |
+| `test_levers` | the CF table from this capture; `--schedule` reaches `Program.compile`; a PAIR=1 + fused-EvalMod plan (`--rwkv7-plan`) | covers all 11 linears (CF 2–3); siblings passed; `PC_BTS_PAIR=1 PC_EM_FUSE_RESCALE=1` on `runtime=` |
+
+The planner tests run with `--rwkv7-plan` (`--rwkv7-pf-t T`, `--rwkv7-pf-blocks N`, `--rwkv7-pf-dir DIR` keep the
+products): e.g. `pytest tests/test_prefill.py -k plan -s --rwkv7-plan --rwkv7-pf-t 32 --rwkv7-pf-blocks 2`.
 
 The 12-block numbers come from the fake. That is float64 arithmetic with the runtime's level accounting: no CKKS
 noise, no bootstrap error.
@@ -130,7 +185,19 @@ cd /root/perseus-rwkv7
 BLOCKS=1 bash tools/rwkv7/run_box.sh all        # smoke: build, check, capture, plan, run on one block + tail
 bash tools/rwkv7/run_box.sh capture && bash tools/rwkv7/run_box.sh plan && bash tools/rwkv7/run_box.sh run   # 12 blocks
 TORCH_PY=/path/to/python-with-torch bash tools/rwkv7/run_box.sh crosscheck   # harness (torch) vs the numpy reference
+
+# prefill (T = 32 by default; reuses the decode capture's shifts and the decode plan)
+bash tools/rwkv7/run_box.sh pfcheck                          # once: the combined session's CPU half, 1 block, T = 4
+BLOCKS=1 bash tools/rwkv7/run_box.sh pf                      # smoke: capture, plan, capture_pf, plan_pf, run_pf
+bash tools/rwkv7/run_box.sh pf                               # 12 blocks: 70 prompt tokens = 2 passes + 6 decoded + 4 generated
+LEVERS=best bash tools/rwkv7/run_box.sh pf                   # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
+BLOCKS=1 CFTABLE=1 bash tools/rwkv7/run_box.sh run           # A/B the PCMM CF table against PCMM_CF=6 (decode smoke)
 ```
+
+`run_pf` writes `$OUT/run_pf32[_b1][_best].jsonl`:
+- `"kind": "prefill"` lines (seconds per pass and per token);
+- one `"kind": "token"` line per position (`"mode": "prefill"` or `"decode"`);
+- a summary with `prefill_seconds_per_token`, `top1_agree_prefill` and the decode median.
 
 Products land in `$OUT` (default `/root/out_rwkv7`): `run[_b1].jsonl` holds one line per token (`top1_agree`,
 `logits_relErrRms`, `hidden_relErrRms_vs_poly`, `hidden_relErrRms_vs_mirror`, `seconds`, `poly_sites_out_of_range`)

@@ -15,6 +15,14 @@ from .model import load_coeffs
 DEFAULT_TEXT = "\n\nThe Eiffel tower is in the city of Paris, which is the capital of"
 #: the calibration / capture text (public; the PCMM band shifts and the capture's magnitudes come from it)
 CALIB_TEXT = "\n\nIn the beginning God created the heaven and the earth. And the earth was without form"
+#: the prefill capture's text (public, Genesis 1:1-8 KJV): two chunks of up to 32 tokens after the "\n\n"
+CALIB_TEXT_LONG = (
+    "\n\nIn the beginning God created the heaven and the earth. And the earth was without form, and void; and "
+    "darkness was upon the face of the deep. And the Spirit of God moved upon the face of the waters. And God said, "
+    "Let there be light: and there was light. And God saw the light, that it was good: and God divided the light "
+    "from the darkness. And God called the light Day, and the darkness he called Night. And the evening and the "
+    "morning were the first day. And God said, Let there be a firmament in the midst of the waters, and let it "
+    "divide the waters from the waters.")
 
 
 def add_args(ap, n_tokens=12):
@@ -29,6 +37,9 @@ def add_args(ap, n_tokens=12):
     ap.add_argument("--wbits", type=int, default=24, choices=(16, 24))
     ap.add_argument("--fuse-l1", action="store_true", help="one 2->7 PCMM for the first linears (default: one each)")
     ap.add_argument("--shifts", default=None, help="PCMM band shifts JSON (run_capture writes it); default none")
+    ap.add_argument("--prefill-chunk", type=int, default=0,
+                    help="T > 0: the prompt is read in passes of T tokens on token lanes (prefill.py; T <= 32), the "
+                    "remainder and any generation by decode steps; the capture then holds a T-token pass")
     ap.add_argument("--prefix", type=int, default=1, help="leading tokens run in plaintext as a public prefix "
                     "(default 1: the text's leading \\n\\n); 0 = every token encrypted from zero state")
 
