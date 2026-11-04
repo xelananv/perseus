@@ -210,6 +210,7 @@ def main(argv=None) -> int:
     ap.add_argument("--pcmm-cf", type=int, default=6)
     ap.add_argument("--pt-rows", type=int, default=28)
     ap.add_argument("--stc-cache", type=int, default=8)
+    ap.add_argument("--pool", type=int, default=16, help="ciphertext pool slots (k = 1): the carried state is 4 per block")
     ap.add_argument("--no-warmup", action="store_true")
     a = ap.parse_args(argv)
     from perseus import _pc
@@ -235,7 +236,7 @@ def main(argv=None) -> int:
         print(json.dumps(rec), flush=True)
 
     run = Rwkv7PlannedRun(Recorder(model, model.n_layers), a.plan, cfg, labels, keys, model=model, work_dir=work,
-                          pcmm_cf=a.pcmm_cf, pt_rows=a.pt_rows, stc_cache=a.stc_cache)
+                          pcmm_cf=a.pcmm_cf, pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool)
     try:                                         # the probes' rows: public, in distribution (probe_rows)
         calib = common.token_ids(a, common.CALIB_TEXT)
     except SystemExit:                           # --ids without --harness: no tokenizer
