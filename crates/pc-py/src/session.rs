@@ -779,7 +779,9 @@ fn key_needs(cfg: &pc_config::Config, ks: &PyKeySource, chain: &Chain, plan: &Op
     steps.remove(&0);
     let rots: Vec<RotSpec> = steps.union(&full).map(|&step| RotSpec { step, q_top: if full.contains(&step) { None } else { ks.band } }).collect();
     let steps: BTreeSet<i64> = steps.union(&full).copied().collect();
-    let spec = KeySetSpec { relin: true, conj: ks.conj || plan.is_some(), rots, encaps: !sb_cfgs.is_empty() || dplan.is_some() || !cplans.is_empty() };
+    // every refresh route raises through the encapsulation keys, the StC-first dense route too (StcFirstPlan::build
+    // takes both); a plan whose refreshes are all StC-first (full slots, no SparseB route) needs them as well
+    let spec = KeySetSpec { relin: true, conj: ks.conj || plan.is_some(), rots, encaps: splan.is_some() || !sb_cfgs.is_empty() || dplan.is_some() || !cplans.is_empty() };
     let mut shapes: Vec<_> = spec.keys(chain).map_err(e)?.into_iter().map(|(_, s)| s).collect();
     if spru_cfg.is_some() {
         shapes.push(KskShape::bottom(chain).map_err(e)?);

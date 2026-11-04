@@ -126,14 +126,31 @@ class Rwkv7PlannedRun(PlannedRun):
         self.log(f"[planned] {len(self.model.linears())} PCMM linears uploaded, {n} plaintext slots staged")
         return self
 
+    def encrypt_input(self, rows, p, i, what):
+        """``pack_tokens`` rows ``(t, D)`` (row ``tok`` at slots ``ch * t + tok``) encrypted at program input ``i``'s
+        compiled level AND degree: ``Program.run`` refuses an input Ct whose (level, deg) differ from the compiled
+        ones (crates/pc-py/src/program.rs, run_block), and ``pack_tokens`` always encrypts at degree 1. A fresh
+        encryption's scale is ``sf(level)^deg``; a compiled scale that differs would scale the input silently, so it
+        is checked here (an unknown compiled scale, 0, is taken as the Ct's)."""
+        _nm, lvl, deg, nf = p.inputs[i]
+        lvl, deg, nf = int(lvl), int(deg), float(nf)
+        r = np.asarray(rows, dtype=np.float64)
+        v = np.ascontiguousarray(r.T.ravel())               # slot ch * t + tok, as pack_rows lays it out
+        ct = self.fhe.encrypt(v, lvl, deg)
+        got = (int(ct.level), int(ct.deg), float(ct.nf))
+        if got[:2] != (lvl, deg) or (nf > 0 and abs(np.log2(got[2] / nf)) > 1e-6):
+            raise RuntimeError(f"{what}: encrypted at (level, deg, nf) {got}, compiled ({lvl}, {deg}, {nf})")
+        return ct, (lvl, deg, nf, got[2])
+
     def input_ct(self, t, rows, p):
-        level = int(p.inputs[0][1])
-        return self.fhe.pack_tokens(np.asarray(self.model.L.encode_row(rows[t]), dtype=np.float64), level)
+        return self.encrypt_input(self.model.L.encode_row(rows[t]), p, 0, "block 0 input")[0]
 
     def state_cts(self, state) -> dict:
-        """The public prefix state as each block's carried inputs ``{block: {input position: Ct}}``: packed and
-        landed by an eager bootstrap (as the twin's ``start`` lands it), then dropped to the compiled input level if
-        it lands richer. Untimed setup: the state is public."""
+        """The public prefix state as each block's carried inputs ``{block: {input position: Ct}}``, each a fresh
+        encryption at the compiled input's level and degree (``encrypt_input``). The twin lands its state by a
+        bootstrap (``Model.start``); on a planned session an eager bootstrap is refused without ``debug_refresh``
+        (``Fhe.bootstrap``) and would land at the landing's meta, not the input's, so the device encrypts in place of
+        it: same values, less noise. Untimed setup: the state is public."""
         names = [*STATE[: self.model.L.M], "xa", "xf"]
         rows = self.model.state_rows(state)
         out, notes = {}, []
@@ -142,21 +159,11 @@ class Rwkv7PlannedRun(PlannedRun):
             cts = {}
             for i, _j, _r in self.reg[b]["kv"]:
                 key = re.search(r"cache\.([a-z0-9]+)-lvl", self.ref[b].inputs()[i]).group(1)
-                lvl, deg = int(p.inputs[i][1]), int(p.inputs[i][2])
-                r = np.asarray(rows[b][names.index(key)], dtype=np.float64)
-                try:
-                    ct = self.fhe.pack_tokens(r, int(self.ops.bts_out()))
-                    self.ops.bootstrap(ct)
-                    how = "bootstrap"
-                except Exception as e:          # an eager refresh refused on this session: pack at the input level
-                    ct = self.fhe.pack_tokens(r, lvl)
-                    how = f"packed ({type(e).__name__}: {e})"
-                if int(ct.level) < lvl:
-                    ct = self.ops.level_drop(ct, lvl)
-                notes.append((b, key, lvl, deg, int(ct.level), int(ct.noise_deg), how))
-                cts[i] = ct
+                cts[i], m = self.encrypt_input(rows[b][names.index(key)], p, i, f"block {b} state {key}")
+                notes.append((b, key, *m))
             out[b] = cts
-        self.log(f"[planned] prefix state: (block, name, compiled level, deg, ct level, deg, how) {notes[:6]} ...")
+        self.log(f"[planned] prefix state: (block, name, level, deg, compiled nf, ct nf) {notes[:6]} ... "
+                 f"({len(notes)} inputs)")
         return out
 
     def token(self, t, rows, argmax=False, entry=None, variant=None, kv_cts=None):
@@ -181,6 +188,17 @@ class Rwkv7PlannedRun(PlannedRun):
         ct = self.ct(reg)
         vals = np.asarray(self.ops.decrypt_slots_complex(ct))
         return self.model.L.decode(np.real(vals)), int(ct.level)
+
+
+def probe_rows(P, calib_ids, prefix_ids=()):
+    """The probes' rows: public and in distribution. The twin records them with values on (PCMM's fake multiplies
+    the slot vectors), so an untrained row (``emb[0]``, the World vocabulary's unused token 0) drives the Chebyshev
+    and Newton sites out of their intervals and the probe's values overflow to NaN (harmless to the stream, which is
+    structure only, but it blinds the recorder's field-tag value check and fills the log with overflow warnings).
+    The calibration text's tokens after its ``"\\n\\n"`` (``common.CALIB_TEXT``, the same public text the PCMM shifts
+    come from); without a tokenizer, the public prefix's token; else token 0."""
+    ids = list(calib_ids)[1:3] if len(calib_ids) >= 3 else [prefix_ids[0]] * 2 if len(prefix_ids) else [0, 0]
+    return [P.emb[int(t)] for t in ids]
 
 
 def main(argv=None) -> int:
@@ -218,7 +236,11 @@ def main(argv=None) -> int:
 
     run = Rwkv7PlannedRun(Recorder(model, model.n_layers), a.plan, cfg, labels, keys, model=model, work_dir=work,
                           pcmm_cf=a.pcmm_cf, pt_rows=a.pt_rows, stc_cache=a.stc_cache)
-    public = [P.emb[0]] * 2                      # the probes' rows: public (structure only)
+    try:                                         # the probes' rows: public, in distribution (probe_rows)
+        calib = common.token_ids(a, common.CALIB_TEXT)
+    except SystemExit:                           # --ids without --harness: no tokenizer
+        calib = []
+    public = probe_rows(P, calib, all_ids[: a.prefix])
     t0 = time.time()
     run.setup(public)
     setup_s = time.time() - t0
