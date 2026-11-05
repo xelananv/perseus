@@ -309,3 +309,70 @@ def test_k1_is_decode(params2):  # noqa: F811
     print(f"decode calls {len(c0)}, batch=1 calls {len(c1)}")
     assert c0 == c1 and r0 == r1 and len(c0) > 1000
     assert np.array_equal(h0, h1)
+
+
+def _planopt_env(name: str) -> list[str]:
+    """tools/rwkv7/planopt.sh's PLANOPT_ENV for ``name`` (the run_box.sh plan variants), read through bash."""
+    import subprocess
+
+    from perseus.examples.rwkv7.tests.conftest import ROOT
+    sh = ROOT / "tools" / "rwkv7" / "planopt.sh"
+    out = subprocess.run(["bash", "-c", f'. "{sh}" && planopt_env "$1" && printf "%s\\n" "${{PLANOPT_ENV[@]}}"',
+                          "planopt", name], capture_output=True, text=True, check=True).stdout
+    return [x for x in out.splitlines() if x]
+
+
+def test_planopt_b2_keeps_the_planners_default_forbidden_steps():
+    """PLANOPT=b2 sets FORBID_STEPS, which replaces the planner's default list: it must carry that list (PlanConfig's
+    .var/.mean/.qkv) plus the three per-conversation scopes batched.py labels, and nothing that a decode, prefill or
+    join capture labels (so those plans are unchanged); base and '' set nothing; an unknown name is refused."""
+    import subprocess
+
+    from perseus.plan.placer.planner import PlanConfig
+    assert _planopt_env("base") == [] and _planopt_env("") == []
+    (kv,) = _planopt_env("b2")
+    k, v = kv.split("=", 1)
+    steps = v.split(",")
+    assert k == "FORBID_STEPS"
+    assert steps[:len(PlanConfig.forbid_steps)] == list(PlanConfig.forbid_steps)
+    assert steps[len(PlanConfig.forbid_steps):] == ["tm.state.bcast", "tm.state.update", "tm.state.readout"]
+    # decode / prefill / join scopes (model.py, serve.py) are not matched by any b2 substring
+    for scope in ("blk0.tm.state", "blk3.tm.kk", "blk1.tm.gn", "blk0.carry", "blk0.join", "tail", "blk2.tm.state.src"):
+        assert not any(s in scope for s in steps[len(PlanConfig.forbid_steps):]), scope
+    with pytest.raises(subprocess.CalledProcessError):
+        _planopt_env("nope")
+
+
+@need
+def test_batched_plan_b2(tmp_path, monkeypatch):
+    """PLANOPT=b2 on a K = 4, 1-block batched capture (needs --rwkv7-plan): no planned refresh in any conversation's
+    bcast / update / readout, the same capture as the base plan, and no more refreshes than the base plan
+    (PLAN_B2.md; tools/rwkv7/b2_census.py)."""
+    import os
+    import subprocess
+    import sys
+
+    if os.environ.get("RWKV7_PLAN") != "1":
+        pytest.skip("plans: run with --rwkv7-plan")
+    pytest.importorskip("networkx", reason="the planner (perseus.plan) needs networkx")
+    from perseus.examples.rwkv7.tests.conftest import ROOT
+    from perseus.examples.rwkv7.tests.test_capture import HIGH
+    from perseus.examples.rwkv7.tests.test_prefill import _cap_and_plan
+    sys.path.insert(0, str(ROOT / "tools" / "rwkv7"))
+    import b2_census
+    root = tmp_path
+    cap, base = _cap_and_plan(root, "b4", ["--batch", "4"], HIGH)
+    (kv,) = _planopt_env("b2")
+    env = {**os.environ, **HIGH, kv.split("=", 1)[0]: kv.split("=", 1)[1], "LANDING": "high", "PLAN_ROOT": str(root),
+           "MEMGUARD_GB": "", "PY": sys.executable, "PYTHONPATH": str(ROOT / "python")}
+    p = subprocess.run(["bash", str(ROOT / "tools/fhe_ssm/make_plan.sh"), str(cap), "plan_b4_b2"], env=env,
+                       capture_output=True, text=True, timeout=5400, check=False)
+    assert p.returncode == 0, p.stdout[-2000:] + p.stderr[-2000:]
+    b2 = root / "bootstrap_placements" / "plan_b4_b2"
+    assert "FORBID_STEPS=.var,.mean,.qkv,tm.state.bcast" in (b2 / "PLAN_CMD.txt").read_text()
+    cb, c2 = b2_census.census(str(cap), str(base)), b2_census.census(str(cap), str(b2))
+    print("base", {b: (r["total"], r["placed_per_conv_scopes"]) for b, r in cb["blocks"].items()},
+          "b2", {b: (r["total"], r["placed_per_conv_scopes"]) for b, r in c2["blocks"].items()})
+    assert all(r["placed_per_conv_scopes"] == 0 for r in c2["blocks"].values())
+    assert sum(r["total"] for r in c2["blocks"].values()) <= sum(r["total"] for r in cb["blocks"].values())
+    assert c2["blocks"][0]["deliberate"] == cb["blocks"][0]["deliberate"]          # the same capture's own refreshes

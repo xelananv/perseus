@@ -60,6 +60,10 @@
 #   LEVERS=best   PAIR=1 (pairs of sibling real refreshes in one complex refresh) + PC_EM_FUSE_RESCALE=1 (the fused
 #                 EvalMod) on the plans' runtime= line, and --schedule siblings on the run
 #   CFTABLE=1     --pcmm-cf-table from the capture (fhe_ssm/pcmm_cf_table.py); A/B it against PCMM_CF first
+#   PLANOPT=b2    the batched plan (plan_b, and the batch / serve steps that read it) without planned refreshes inside
+#                 any one conversation's own state work (tools/rwkv7/planopt.sh; PLAN_B2.md): the cut covers it from
+#                 shared values instead. Own plan dir and run records (suffix _b2); decode, prefill and join plans
+#                 are not affected (they have none of those steps). Combines with LEVERS=best
 #
 # Keys (run_planned --keys; the 11-02 fhe_ssm publication path): KEYS=inproc (default: the session generates every key
 # and holds the secret; recorded insecure-inproc) | bundle (the client's bundle $OUT/keys_<mode>$S$LV, made below) | DIR.
@@ -78,7 +82,7 @@
 # BLOCKS (unset = all 12), GPU (0), TEXT (the prompt; must start with "\n\n", the public prefix), PCMM_SHIFT
 # (calib | zero), PCMM_CF (6), TORCH_PY (crosscheck), RUN_EXTRA (more run_planned flags), RUN_TAG (suffix of the run's
 # record names: run_<tag>.jsonl), STC_CACHE (160), POOL (96;
-# run_pf 192), PF_T (32), PF_TEXT, PF_TOKENS (70), PF_GENERATE (4), LEVERS, CFTABLE, B_K (32), B_CARRY (lane |
+# run_pf 192), PF_T (32), PF_TEXT, PF_TOKENS (70), PF_GENERATE (4), LEVERS, CFTABLE, PLANOPT (base | b2), B_K (32), B_CARRY (lane |
 # decode), B_PROMPTS (tools/rwkv7/batch_prompts.txt), B_GENERATE (16), POOL_B (192), STC_CACHE_B ($STC_CACHE),
 # S_FILE (tools/rwkv7/serve_arrivals.txt), S_GENERATE (8), POOL_S (256), STC_CACHE_S ($STC_CACHE).
 set -uo pipefail
@@ -100,6 +104,12 @@ case "$LEVERS" in
     *) echo "LEVERS=$LEVERS: unset | best" >&2; exit 2 ;;
 esac
 LV=${LEVERS:+_$LEVERS}
+PLANOPT=${PLANOPT:-}
+# shellcheck source=tools/rwkv7/planopt.sh
+. "$HERE/planopt.sh"
+planopt_env "$PLANOPT" || exit 2
+BPLANENV="${PLANOPT_ENV[*]:-}"
+PO=${PLANOPT:+_$PLANOPT}; PO=${PO/_base/}
 PLAN=$OUT/bootstrap_placements/plan_rwkv7$S$LV
 PF_T=${PF_T:-32}; PF_TOKENS=${PF_TOKENS:-70}; PF_GENERATE=${PF_GENERATE:-4}
 STC_CACHE=${STC_CACHE:-160}; POOL=${POOL:-96}
@@ -109,7 +119,7 @@ PFPLAN=$OUT/bootstrap_placements/plan_rwkv7_pf$PF_T$S$LV
 CFT=$OUT/pcmm_cf_table$S.json
 B_K=${B_K:-32}; B_CARRY=${B_CARRY:-lane}; B_PROMPTS=${B_PROMPTS:-$HERE/batch_prompts.txt}; B_GENERATE=${B_GENERATE:-16}
 BCAP=$OUT/cap_rwkv7_b$B_K${B_CARRY/lane/}$S
-BPLAN=$OUT/bootstrap_placements/plan_rwkv7_b$B_K${B_CARRY/lane/}$S$LV
+BPLAN=$OUT/bootstrap_placements/plan_rwkv7_b$B_K${B_CARRY/lane/}$S$LV$PO
 S_FILE=${S_FILE:-$HERE/serve_arrivals.txt}; S_GENERATE=${S_GENERATE:-8}
 JCAP=$OUT/cap_rwkv7_join$B_K$S
 JPLAN=$OUT/bootstrap_placements/plan_rwkv7_join$B_K$S$LV
@@ -156,11 +166,11 @@ step_capture() {
     tail -3 "$OUT/capture$S.log" | tee -a "$OUT/session.log"
 }
 
-plan_one() {   # plan_one CAPTURE PLAN_DIR LOG
-    local cap=$1 plan=$2 lg=$3
+plan_one() {   # plan_one CAPTURE PLAN_DIR LOG [EXTRA_ENV]
+    local cap=$1 plan=$2 lg=$3 extra=${4:-}
     [ -f "$plan/PLAN_CMD.txt" ] && { log "plan: reusing $plan"; return 0; }
-    log "plan $cap -> $plan ($PLANENV)"
-    env $PLANENV PLAN_ROOT="$OUT" PY="$PY" MEMGUARD_GB= bash "$W/tools/fhe_ssm/make_plan.sh" "$cap" "$(basename "$plan")" \
+    log "plan $cap -> $plan ($PLANENV${extra:+ $extra})"
+    env $PLANENV $extra PLAN_ROOT="$OUT" PY="$PY" MEMGUARD_GB= bash "$W/tools/fhe_ssm/make_plan.sh" "$cap" "$(basename "$plan")" \
         > "$lg" 2>&1 || { tail -30 "$lg"; die "plan failed ($lg)"; }
     tail -8 "$lg" | tee -a "$OUT/session.log"
 }
@@ -195,7 +205,9 @@ cf_flags() {
     echo "--pcmm-cf-table $CFT"
 }
 
-keydir() { echo "$OUT/keys_$1$S$LV"; }   # keydir decode|pf|b|s
+keydir() {   # keydir decode|pf|b|s (the b and s bundles are made from the PLANOPT batched plan: their own dir)
+    case "$1" in b|s) echo "$OUT/keys_$1$S$LV$PO" ;; *) echo "$OUT/keys_$1$S$LV" ;; esac
+}
 
 keys_flag() {   # keys_flag decode|pf|b (need_keys has checked it in the calling shell)
     case "$KEYS" in
@@ -271,7 +283,7 @@ step_capture_b() {
     tail -3 "$OUT/capture_b$B_K$S.log" | tee -a "$OUT/session.log"
 }
 
-step_plan_b() { plan_one "$BCAP" "$BPLAN" "$OUT/plan_b$B_K$S$LV.log"; }
+step_plan_b() { plan_one "$BCAP" "$BPLAN" "$OUT/plan_b$B_K$S$LV$PO.log" "$BPLANENV"; }
 
 step_bcheck() {
     pyrun env RWKV7_PTH="$PTH" RWKV7_COEFFS="$COEFFS" RWKV7_HARNESS="$HARNESS" $CAPENV \
@@ -288,7 +300,7 @@ step_batch() {
     [ -f "$B_PROMPTS" ] || die "no prompts file $B_PROMPTS"
     local busy; busy=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i "$GPU" 2>/dev/null)
     [ -z "$busy" ] || log "WARNING: GPU $GPU has other processes ($busy): timings are not clean"
-    local R=$OUT/batch$B_K${B_CARRY/lane/}$S$LV${CFTABLE:+_cft}${RUN_TAG:+_$RUN_TAG}
+    local R=$OUT/batch$B_K${B_CARRY/lane/}$S$LV$PO${CFTABLE:+_cft}${RUN_TAG:+_$RUN_TAG}
     log "batch: K=$B_K carry=$B_CARRY, prompts $B_PROMPTS, $B_GENERATE generated each, pool ${POOL_B:-192}"
     pyrun env CUDA_VISIBLE_DEVICES=$GPU $CAPENV "$PY" -m perseus.examples.rwkv7.run_planned $COMMON \
         --batch "$B_K" --batch-carry "$B_CARRY" --prompts "$B_PROMPTS" --generate "$B_GENERATE" \
@@ -329,7 +341,7 @@ step_serve() {
     [ -f "$S_FILE" ] || die "no arrivals file $S_FILE"
     local busy; busy=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i "$GPU" 2>/dev/null)
     [ -z "$busy" ] || log "WARNING: GPU $GPU has other processes ($busy): timings are not clean"
-    local R=$OUT/serve$B_K$S$LV${CFTABLE:+_cft}${RUN_TAG:+_$RUN_TAG}
+    local R=$OUT/serve$B_K$S$LV$PO${CFTABLE:+_cft}${RUN_TAG:+_$RUN_TAG}
     log "serve: K=$B_K T=$PF_T, arrivals $S_FILE, $S_GENERATE generated each, pool ${POOL_S:-256}"
     pyrun env CUDA_VISIBLE_DEVICES=$GPU $CAPENV "$PY" -m perseus.examples.rwkv7.run_planned $COMMON \
         $(mode_flags s) --generate "$S_GENERATE" --pcmm-cf "$PCMM_CF" --schedule "$SCHED" $(cf_flags) \

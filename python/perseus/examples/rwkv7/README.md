@@ -193,7 +193,9 @@ Positions are per lane:
 
 Planner, K = 32, block 0: **222 refreshes per pass**, against 32 × 31 = 992 for 32 decode steps. Estimate at K = 32:
 **47–60 s per pass**. That is 5.1–6.5× decode's aggregate throughput, at 4.9–6.3× its per-token latency
-(`BATCHED_DESIGN.md` §4; nothing has run on a GPU).
+(`BATCHED_DESIGN.md` §4; nothing has run on a GPU). `PLANOPT=b2` (`PLAN_B2.md`) removes the per-conversation update refreshes, a placer
+artefact: every conversation then pays its 2 carries per block; on P4's capture block 0 goes 209 → 80 refreshes in
+`Program.compile`'s count, estimated ≈ 28.4–30.0 s per pass against the 46.68 s measured on the base plan.
 
 ## Continuous batching: prefill, then join the batch (`serve.py`, `SERVE_DESIGN.md`)
 
@@ -286,6 +288,7 @@ bash tools/rwkv7/run_box.sh bcheck                           # once: the batched
 BLOCKS=1 B_K=4 B_GENERATE=2 bash tools/rwkv7/run_box.sh b    # smoke: capture, plan, capture_b, plan_b, batch
 bash tools/rwkv7/run_box.sh b                                # 12 blocks, K = 32: --pool 192 --stc-cache 160
 LEVERS=best bash tools/rwkv7/run_box.sh b                    # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
+PLANOPT=b2 bash tools/rwkv7/run_box.sh b                     # no refresh inside any conversation's state work (PLAN_B2.md)
 B_K=16 STC_CACHE_B=80 bash tools/rwkv7/run_box.sh b          # if K = 32 runs out of memory
 
 # continuous batching (SERVE_DESIGN.md; tools/rwkv7/serve_arrivals.txt: 8 conversations, 3 longer than one pass)

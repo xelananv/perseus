@@ -100,8 +100,9 @@ block 1 at K = 32 it is 167 = 39 + 4·32.
     state lands at.
   - The other 14 are on the token side.
 - The rest are deliberate refreshes: 66 for the carried state (64 S + 2 lane carries) and the PCMM / tail ones.
-- Block 1 has **2** update refreshes per conversation instead of 4. The plan does not say why; different magnitudes
-  are the likely cause.
+- Block 1 has **2** update refreshes per conversation instead of 4. `PLAN_B2.md` §1 explains it as a cut-path effect
+  (which shared source the cut refreshed), not magnitudes, and removes both: `PLANOPT=b2` leaves 2 (the carries) in
+  every block.
 - So each conversation pays its own **6 (block 0) / 4 (block 1) refreshes per block**: 2 carry + 4 / 2 update.
 
 **Rotations, K = 32, block 0.** Per conversation: `bcast` 41 (3 × 5 copy + 26 transpose), `readout` 34, `update` 24 (2 ×
@@ -196,7 +197,7 @@ at `--pool 128`, `keys 8437 MB`, total 68.5 GB of 97.9 GB):
 | **continuous batching** (a new conversation joins on a freed lane mid-run) | **built** (B4, `serve.py`, `run_planned --serve`; SERVE_DESIGN.md) | The state is a register hand-over (the single-conversation programs write lane c's S registers), the lane-form carries are joined by a small compiled program (`xa ⊙ (1 − m_c) + xa_new ⊙ m_c`, one refresh per carry: 24 per join for the 0.1B, masks re-staged per join), a leave resets the lane to the public prefix state. Bit-identical to each conversation decoded alone on the mirror, identical on the fake (top-1 36/36). Unmeasured on a device. **Deployment caveat:** all K lanes are under one secret key, so a batch serves conversations of one key holder, not K mutually distrusting users |
 | **unused slots** (0.1B: channels 768–1023 empty, 4 of 16 head blocks in every state ciphertext) | not built | A conversation's 12 heads fill 24 of 32 head blocks of its two state ciphertexts. Two conversations' states fit 3 ciphertexts instead of 4, which saves 25 % of the per-conversation state refreshes and products: ≈ 15 % of a K = 32 pass. It costs a per-conversation channel rotation of the broadcast vectors (heads 0–3 of every second conversation to blocks 12–15), a second mask set and its own transpose / readout bookkeeping, a new layout through `state_slots` and the planner. **Gone at 0.4B** (1,024 channels = 16 heads, no padding). The biggest unbuilt lever for 0.1B; not testable within this budget |
 | **two conversations per transpose / untranspose** (complex packing, PREFILL_DESIGN.md §5.1) | not built | `transpose(v_c + i·v_c')` once plus a conjugation; the same for the readout. ≈ 27 of the 102 rotations per conversation: ≈ 3 % of a pass. Small next to the refreshes |
-| **refreshing the shared sources once instead of S per conversation** | not built (a planner question) | The 4 / 2 update refreshes per conversation exist because the update's depth does not fit above the carried state's landing level. A plan that lands the carried state with more headroom (or forces a refresh of the three sources, which is shared over K) could remove them. The mincut placer chose per-conversation refreshes; whether a forced placement beats it is a planner experiment (PLAN_* switches), worth up to −2 / −4 refreshes per conversation per block |
+| **no refresh inside a conversation's own state work** (`PLANOPT=b2`) | **built (B2, `PLAN_B2.md`)**: a planner switch (`FORBID_STEPS` on `tm.state.bcast/update/readout`), opt-in on the box | The 4 / 2 update refreshes per conversation were a placer artefact, not a depth limit: S lands at 26, the shallowest operand of every product it enters, and the update fits below the 46 envelope once the GroupNorm's refreshes move to the readout's exit (a joint move the one-at-a-time prune cannot make). On P4's capture: block 0 209 → 80, block 1 153 → 88 in `Program.compile`'s count (which reproduces the device's 209 / 153); every conversation pays 2 refreshes per block. Estimated ≈ 28.4–30.0 s per pass at K = 32 vs the measured 46.68 s |
 
 ## 6. Device failure points, most likely first
 
