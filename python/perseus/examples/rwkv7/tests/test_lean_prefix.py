@@ -163,3 +163,44 @@ def test_batched_twin_rows_collapse(carry, layout):
     M = m.L.M
     assert n_inputs == (K * M + (2 if carry == "lane" else 2 * K)) * m.L.S
     assert n_shared == (M + 2) * m.L.S
+
+
+@need
+@pytest.mark.parametrize("layout", ["current", "filled"])
+def test_batched_twin_metas_collapse(layout):
+    """Review L2: sharing needs equal compiled metas as well as equal values. The carried inputs' compiled (level,
+    deg) are the twin record's (``fhe_ssm/planned.py``: ``metas = {label: {name: r.metas[name]}}`` -> ``Program.compile(
+    input_metas=...)``), so they are checked here on the real K = 4 batched twin (the 0.1B's first block, two public
+    passes, as ``main_batch`` records them): every conversation's input of one state name is recorded at one (level,
+    deg). The compiled nf is the plan's and is not visible on the CPU: ``state_cts`` keys on it anyway (a differing nf
+    only costs sharing, never correctness), and the batched header's ``prefix_encryptions`` (written under
+    ``RWKV7_LEAN_PREFIX`` or ``RWKV7_POOL_TRACE``) gives the device count on the first run (expected (M + 2) x blocks:
+    0.4B filled 72, current 96)."""
+    from perseus.examples.rwkv7 import common, ref
+    from perseus.examples.rwkv7.model import load_coeffs
+    from perseus.examples.rwkv7.run_capture import batch_probe
+    from perseus.examples.rwkv7.run_planned import Recorder
+    from perseus.examples.rwkv7.session import make_model
+    from perseus.examples.rwkv7.tests.conftest import CKPT
+    from perseus.examples.rwkv7.tests.test_ref import COEFFS, tokenizer
+    K = 4
+    P = ref.load_params(CKPT, 1)
+    tok = tokenizer()
+    ids = tok.encode("\n\nHello")
+    _rf, st = common.prefix_state(P, COEFFS, ids, 1)
+    _f, _i, model = make_model(P, load_coeffs(COEFFS), capture=True, batch=K, batch_carry="lane", layout=layout)
+    model.init_state = st
+    rec = Recorder(model, model.n_layers)
+    rows, _t = batch_probe(P, tok.encode(common.CALIB_TEXT_LONG)[1:], K, 2)
+    recs = {t: rec.token(t, rows[t]) for t in (0, 1)}
+    r, prev = recs[1][0], recs[0][0]
+    ins = r.inputs()
+    kv = [ins[i] for i in range(len(ins)) if ins[i] in r.objs and id(r.objs[ins[i]]) in prev.final]
+    names = [re.search(r"cache\.([a-z0-9]+)-lvl", n).group(1) for n in kv]
+    assert len(kv) == K * model.L.M + 2                       # the carried inputs: K x M states + 2 lane carries
+    groups = {}
+    for n, nm in zip(kv, names):
+        groups.setdefault(re.sub(r"c\d+$", "", nm), set()).add(tuple(r.metas[n]))
+    print(layout, {k: sorted(v) for k, v in groups.items()})
+    assert len(groups) == model.L.M + 2
+    assert all(len(v) == 1 for v in groups.values())          # one (level, deg) per state name
