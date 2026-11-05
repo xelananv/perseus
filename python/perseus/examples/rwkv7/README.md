@@ -154,6 +154,14 @@ a resident plaintext store far beyond the card.
     per block at decode and 9.5 GB per block at K = 32 or T = 32; with the flag they keep one slot of each vector
     only the record references and one copy per distinct plaintext. Same streams, plans and staged values
     (`tests/test_shed_twin.py`); the header's `shed_twin` records it (`results/rwkv7-fhe-20261104/new_pod/HOST_RAM_20261105.md`).
+  * `RWKV7_LEAN_PREFIX=1` (default off; device memory only): every fresh encryption of the public prefix state is an
+    eager `Ct` in a full 31.5 MiB pool slot, and the pool must be sized for all of them at once. With the flag one
+    encryption serves every carried input that reads the same value at the same compiled meta (a batched session's K
+    conversations start from one state: K M + 2 inputs per block become M + 2), and the decode / prefill driver
+    encrypts only the set a pass reads, after the warm-ups, dropping it after that pass. Same values, metas and
+    programs; still untimed. Lower `POOL_B` / `POOL_PF` to take the saving (`tests/test_lean_prefix.py`;
+    `results/rwkv7-fhe-20261104/new_pod/DEVICE_MEM_20261105.md`). `RWKV7_POOL_TRACE=1` records the lowest free pool
+    count (`pool_free_min`) so the pool can be sized from a measurement.
 
 ## Prefill: T prompt tokens per pass (`prefill.py`, `PREFILL_DESIGN.md`)
 

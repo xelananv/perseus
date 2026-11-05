@@ -71,6 +71,16 @@
 #                 references and one copy per distinct plaintext (run_planned.py Recorder; results/rwkv7-fhe-20261104/
 #                 new_pod/HOST_RAM_20261105.md). Default off. Read from the environment (pyrun passes it through); same plans,
 #                 same product names: the record header's shed_twin says which ran
+#   RWKV7_LEAN_PREFIX=1  device memory, not speed: one encryption of the public prefix state per (compiled meta,
+#                 value), shared by every carried input that reads it (batched: K x M + 2 per block -> M + 2), and the
+#                 decode / prefill sets encrypted only when a pass reads them, dropped after it (run_planned.py
+#                 state_cts; results/rwkv7-fhe-20261104/new_pod/DEVICE_MEM_20261105.md). Default off. It lowers what
+#                 the POOL must hold, not the pool itself: pair it with a smaller POOL_B / POOL_PF (that is the saving)
+#   RWKV7_POOL_TRACE=1   the pool instrument: the summary's pool_free_min = [lowest free slots, where] (peak use =
+#                 pool - that). Default off
+#   STC_CACHE*=1  the StC-first cache at exactly the key count the programs ask for (the runtime raises the
+#                 setting to that count: crates/pc-py/src/session.rs key_needs, cache_slots.max(keys)); a setting
+#                 BELOW the count does nothing. Check planned_stats stc_evictions == 0
 #
 # Keys (run_planned --keys; the 11-02 fhe_ssm publication path), REQUIRED for run / run_pf / batch / serve (no default,
 # as fhe_ssm's run_gpu.sh): KEYS=inproc (the session generates every key and holds the secret; recorded insecure-inproc)

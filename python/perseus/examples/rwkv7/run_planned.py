@@ -53,6 +53,40 @@ from .session import make_model
 #: streams, the plaintext values and the objects' identities are unchanged.
 SHED_TWIN = os.environ.get("RWKV7_SHED_TWIN", "0") == "1"
 
+#: ``RWKV7_LEAN_PREFIX=1`` (default off): the device-memory cut of results/rwkv7-fhe-20261104/new_pod/
+#: DEVICE_MEM_20261105.md §3.1-3.2. The public prefix state's fresh encryptions are eager ``Ct``s, each a FULL pool
+#: slot (31.5 MiB: crates/pc-gpu/src/mem.rs ``MemPlan::build``), held until the last reference drops. With the flag:
+#: (a) ``state_cts`` makes ONE encryption per (compiled level, deg, nf, slot vector) and hands it to every carried
+#: input that reads exactly that value at that meta (``Program.run`` copies an input ``Ct`` into its slab and only
+#: reads it: crates/pc-py/src/program.rs ``run_block``; ``DeviceServer`` already shares this way): a batched session's
+#: K conversations start from the same public state, so K x (state cts) per block become one per distinct value;
+#: (b) the decode/prefill driver encrypts the decode set only when a decode token reads it (no whole prefill chunk),
+#: the prefill set only after the warm-ups, and drops each set after the pass that reads it. Same values, same metas,
+#: same programs; the encryptions stay untimed setup. The header's ``lean_prefix`` records it.
+LEAN_PREFIX = os.environ.get("RWKV7_LEAN_PREFIX", "0") == "1"
+
+#: ``RWKV7_POOL_TRACE=1`` (default off): the instrument for the pool's size. ``Session.pool_free()`` is sampled after
+#: the prefix-state encryption, after every stage's issue and after every reply's register copies; the record carries
+#: the lowest value and where it was seen (``pool_free_min``), so ``pool - pool_free_min`` is the measured peak of
+#: live eager ciphertexts (the "temporaries" term the pool rule could not measure). One host call per sample.
+POOL_TRACE = os.environ.get("RWKV7_POOL_TRACE", "0") == "1"
+
+
+def pool_mark(run, where: str) -> None:
+    """``RWKV7_POOL_TRACE=1``: record ``sess.pool_free()`` on ``run`` when it is the lowest seen (no-op otherwise)."""
+    if not POOL_TRACE or getattr(run, "sess", None) is None:
+        return
+    free = int(run.sess.pool_free())
+    low = getattr(run, "pool_low", None)
+    if low is None or free < low[0]:
+        run.pool_low = (free, where)
+
+
+def pool_low_of(*runs):
+    """The lowest ``pool_free`` any of ``runs`` saw, as ``[free, where]`` (None without the trace)."""
+    lows = [r.pool_low for r in runs if r is not None and getattr(r, "pool_low", None) is not None]
+    return list(min(lows)) if lows else None
+
 
 def _refs_of(d: dict, k) -> int:
     return sys.getrefcount(d[k])
@@ -394,31 +428,53 @@ class Rwkv7PlannedRun(PlannedRun):
             ins[i] = x
         for i, _j, r in run.reg[b]["kv"]:
             ins[i] = kv_cts[b][i] if kv_cts is not None and b in kv_cts else (None if t == 0 else r)
-        return p.run(ins, [(j, r) for _i, j, r in run.reg[b]["kv"]] + list(run.reg[b]["out"]))
+        out = p.run(ins, [(j, r) for _i, j, r in run.reg[b]["kv"]] + list(run.reg[b]["out"]))
+        pool_mark(self, f"stage {b}")
+        return out
 
     def out_regs(self, b, run=None):
         run = run or self
         return [r for _j, r in run.reg[b]["out"]]
 
-    def state_cts(self, state) -> dict:
+    def state_cts(self, state, share=None) -> dict:
         """The public prefix state as each block's carried inputs ``{block: {input position: Ct}}``, each a fresh
         encryption at the compiled input's level and degree (``encrypt_input``). The twin lands its state by a
         bootstrap (``Model.start``); on a planned session an eager bootstrap is refused without ``debug_refresh``
         (``Fhe.bootstrap``) and would land at the landing's meta, not the input's, so the device encrypts in place of
-        it: same values, less noise. Untimed setup: the state is public."""
+        it: same values, less noise. Untimed setup: the state is public.
+
+        ``share`` (default ``LEAN_PREFIX``): one encryption per (compiled level, deg, nf, slot vector), handed to every
+        input reading exactly that value at that meta (a hit is confirmed by ``np.array_equal``, not by the digest
+        alone); ``self.prefix_encryptions`` counts the encryptions made."""
+        share = LEAN_PREFIX if share is None else bool(share)
         names = self.model.state_names()
         rows = self.model.state_rows(state)
-        out, notes = {}, []
+        out, notes, made = {}, [], {}
+        n_enc = 0
         for b in range(self.rec.n_layers):
             p = self.progs[self.labels[b]]
             cts = {}
             for i, _j, _r in self.reg[b]["kv"]:
                 key = re.search(r"cache\.([a-z0-9]+)-lvl", self.ref[b].inputs()[i]).group(1)
-                cts[i], m = self.encrypt_input(rows[b][names.index(key)], p, i, f"block {b} state {key}")
+                v = rows[b][names.index(key)]
+                if share:
+                    va = np.asarray(v)
+                    sk = (tuple(p.inputs[i][1:4]), digest(va))
+                    hit = made.get(sk)
+                    if hit is not None and np.array_equal(hit[2], va):
+                        cts[i], m = hit[0], hit[1]
+                        notes.append((b, key, *m))
+                        continue
+                cts[i], m = self.encrypt_input(v, p, i, f"block {b} state {key}")
+                n_enc += 1
+                if share:
+                    made[sk] = (cts[i], m, va)
                 notes.append((b, key, *m))
             out[b] = cts
+        self.prefix_encryptions = n_enc
         self.log(f"[planned] prefix state: (block, name, level, deg, compiled nf, ct nf) {notes[:6]} ... "
-                 f"({len(notes)} inputs)")
+                 f"({len(notes)} inputs, {n_enc} encryptions)")
+        pool_mark(self, "prefix state")
         return out
 
     def token(self, t, rows, argmax=False, entry=None, variant=None, kv_cts=None):
@@ -433,6 +489,7 @@ class Rwkv7PlannedRun(PlannedRun):
 
     def decrypt_regs(self, regs):
         cts = [self.ct(r) for r in regs]
+        pool_mark(self, "reply")
         return [np.real(self.decrypt(c)) for c in cts], int(cts[0].level)
 
     def reply(self, regs):
@@ -541,6 +598,7 @@ def main_batch(a) -> int:
                              if isinstance(v := getattr(p, k, None), (int, float))}
                        for lab, p in run.progs.items()},
           "mem_report_text": str(run.sess.mem_report),
+          **({"prefix_encryptions": run.prefix_encryptions} if LEAN_PREFIX or POOL_TRACE else {}),
           "pth_sha256": common.sha256(a.pth), "coeffs_sha256": common.sha256(a.coeffs),
           "environment": common.environment()})
     if not a.no_warmup:
@@ -567,6 +625,8 @@ def main_batch(a) -> int:
         t0 = time.time()
         # t = i + 1 keeps PlannedRun's "t == 0: empty state" rule off; pass 0 reads the prefix state Cts
         reg, info = run.token(i + 1, rows_seen, kv_cts=kv if i == 0 else None)
+        if LEAN_PREFIX and i == 0:
+            kv = None                            # pass 0 copied it into the slab; later passes read the registers
         hidden, level = run.reply(reg)
         sec = time.time() - t0
         hm, _z = mirror.step(rows)
@@ -604,6 +664,7 @@ def main_batch(a) -> int:
           "aggregate_tokens_per_s_full": round(K / med, 4),
           "seconds_per_conversation_token_full": round(med / K, 4),
           "setup_s": round(setup_s, 1), "wall_s": round(time.time() - t_all, 1),
+          **({"pool": a.pool, "pool_free_min": pool_low_of(run)} if POOL_TRACE else {}),
           "planned_stats": str(run.sess.planned_stats())})
     run.close()
     return 0
@@ -865,7 +926,10 @@ def keys_header(run, bundle_info=None) -> dict:
             "bundle_info": bundle_info,
             # RWKV7_SHED_TWIN=1 only (the default header is unchanged): what the twin shed (HOST_RAM_20261105.md)
             **({"shed_twin": dict(run.rec.shed_stats, pt_distinct=len(_PT_INTERN))}
-               if getattr(getattr(run, "rec", None), "shed", False) else {})}
+               if getattr(getattr(run, "rec", None), "shed", False) else {}),
+            # RWKV7_LEAN_PREFIX=1 / RWKV7_POOL_TRACE=1 only (the default header is unchanged): DEVICE_MEM_20261105.md
+            **({"lean_prefix": True} if LEAN_PREFIX else {}),
+            **({"pool_trace": True} if POOL_TRACE else {})}
 
 
 # ── continuous batching on the device (serve.py, SERVE_DESIGN.md) ──
@@ -1189,6 +1253,7 @@ class DeviceServer:
         self.new_prefix = {(b, k): self._enc(join, pj, b, k, ni, rows[(b, k)]) for b, k, _li, ni, _jo in sr.join_map()}
         self.levels = {}
         self.log(f"[serve] the public prefix state: {len(self.enc)} encryptions")
+        pool_mark(dec, "serve prefix state")
         self.reset()
 
     def _enc(self, run, p, b, base, i, rows):
@@ -1281,6 +1346,7 @@ class DeviceServer:
                 writes.append((j, r))
                 self.src[(b, k)] = r
             p.run(ins, writes + list(bat.reg[b]["out"]))
+            pool_mark(bat, f"batch stage {b}")
         vals, level = bat.decrypt_regs(bat.out_regs(nb - 1))
         self.levels[bat] = level
         return bat.model.L.decode_lanes_sh(vals, self.sr.K), None
@@ -1474,6 +1540,7 @@ def main_serve(a) -> int:
           "aggregate_generated_tokens_per_s": round(len(gen) / loop_s, 4) if loop_s else None,
           "aggregate_tokens_per_s": round(len(recs) / loop_s, 4) if loop_s else None,
           "setup_s": round(setup_s, 1), "wall_s": round(time.time() - t_all, 1),
+          **({"pool": a.pool, "pool_free_min": pool_low_of(*sr.runs)} if POOL_TRACE else {}),
           "planned_stats": str(sr.sess.planned_stats())})
     sr.close()
     return 0
@@ -1586,8 +1653,15 @@ def main(argv=None) -> int:
         binfo = check_bundle(bundle, cfg, model) if bundle is not None else None
         run.setup(public)
     setup_s = time.time() - t0
-    kv_dec = run.state_cts(st) if a.prefix else None
-    kv_pf = both.pf.state_cts(st) if both else None
+    n_prompt = len(ids)
+    n_pf = (n_prompt // T) * T if T else 0        # whole chunks prefilled; the remainder decoded token by token
+    if LEAN_PREFIX:
+        # encrypted after the warm-ups, only the set a pass reads: the decode set when no whole chunk is prefilled
+        # (a prefill pass leaves the state in the registers), the prefill set when one is; each dropped after use
+        kv_dec = kv_pf = None
+    else:
+        kv_dec = run.state_cts(st) if a.prefix else None
+        kv_pf = both.pf.state_cts(st) if both else None
     progs = {lab: p for lab, p in run.progs.items()}
     if both:
         progs.update({f"pf_{lab}": p for lab, p in both.pf.progs.items()})
@@ -1618,12 +1692,15 @@ def main(argv=None) -> int:
     sc = common.Scorer(P, a, mirror=mirror, poly=poly)
     rows = [P.emb[t] for t in ids]
     recs, passes = [], []
-    n_prompt = len(ids)
-    n_pf = (n_prompt // T) * T if T else 0        # whole chunks prefilled; the remainder decoded token by token
+    if LEAN_PREFIX:                              # untimed, as before: the state is public
+        kv_pf = both.pf.state_cts(st) if both and n_pf else None
+        kv_dec = run.state_cts(st) if a.prefix and not n_pf else None
     for c in range(n_pf // T if T else 0):
         chunk = ids[c * T:(c + 1) * T]
         t0 = time.time()
         reg = both.prefill([P.emb[t] for t in chunk], kv_cts=kv_pf if c == 0 else None)
+        if LEAN_PREFIX:
+            kv_pf = None
         hid, level = both.reply(reg, T)
         sec = time.time() - t0
         prec = {"kind": "prefill", "pass": c, "T": T, "seconds": round(sec, 4),
@@ -1644,6 +1721,8 @@ def main(argv=None) -> int:
         # PlannedRun's "t == 0: empty state" rule off
         reg, info = run.token(t + 1 if a.prefix else t, [None] * (1 if a.prefix else 0) + rows,
                               kv_cts=kv_dec if t == 0 else None)
+        if LEAN_PREFIX:
+            kv_dec = None
         hidden, level = run.reply(reg)
         sec = time.time() - t0
         rec = {"kind": "token", "mode": "decode", "seconds": round(sec, 4), "issue_s": info["issue_s"],
@@ -1666,7 +1745,9 @@ def main(argv=None) -> int:
           "hidden_relErrRms_vs_mirror_max": max(r["hidden_relErrRms_vs_mirror"] for r in recs),
           "seconds_per_token_median": float(np.median(secs)) if secs else None, "seconds_per_token_after_first":
           float(np.mean(secs[1:])) if len(secs) > 1 else None, "setup_s": round(setup_s, 1),
-          "wall_s": round(time.time() - t_all, 1), "planned_stats": str(run.sess.planned_stats())})
+          "wall_s": round(time.time() - t_all, 1),
+          **({"pool": a.pool, "pool_free_min": pool_low_of(run, both.pf if both else None)} if POOL_TRACE else {}),
+          "planned_stats": str(run.sess.planned_stats())})
     run.close()
     return 0
 
