@@ -69,9 +69,20 @@ class PrefillCircuit(Circuit):
                 Bc = ops.conjugate(B)
                 vec += [ops.add(B, Bc), ops.mult_i(ops.sub(Bc, B))]
             wt, kkt, bbt, ktt, rt, vt = vec
-            S, Ps = self.state_step(S, wt, kkt, bbt, ktt, rt, L.transpose(ops, vt))
-            acc = L.untranspose_lane0(ops, Ps)
-            Q = acc if Q is None else ops.add(ops.rotate(Q, 1), acc)
+            if not L.filled:
+                S, Ps = self.state_step(S, wt, kkt, bbt, ktt, rt, L.transpose(ops, vt))
+                acc = L.untranspose_lane0(ops, Ps)
+                Q = acc if Q is None else ops.add(ops.rotate(Q, 1), acc)
+                continue
+            # filled (FILLED_DESIGN.md §2): the same ops, the transforms and the readout labelled, so a plan option
+            # can keep refreshes on the state chain itself
+            with self._scope("xpose"):
+                V = L.transpose(ops, vt)
+            with self._scope("chain"):
+                S, Ps = self.state_step(S, wt, kkt, bbt, ktt, rt, V)
+            with self._scope("readout"):
+                acc = L.untranspose_lane0(ops, Ps)
+                Q = acc if Q is None else ops.add(ops.rotate(Q, 1), acc)
         st.S[j * M:(j + 1) * M] = S
         y = Q if self.T == 1 else ops.rotate(Q, -(self.T - 1))
         if self.m_past is not None:

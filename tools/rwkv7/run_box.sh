@@ -74,6 +74,10 @@
 #               batch: the session opens with Session.from_bundle (has_secret false in the header), the client object
 #               encrypts every input and decrypts every reply as wire frames
 #
+# State layout (FILLED_DESIGN.md): LAYOUT=current (default) | filled (two value groups of the WKV state per ciphertext,
+# one on each axis: half the state ciphertexts, carry refreshes, state products and rotations). Every capture, plan,
+# key bundle and record of a filled run carries the suffix _filled; combines with LEVERS, PLANOPT, B_K, PF_T.
+#
 # Any size (ANYSIZE_DESIGN.md): every shape is read from PTH. LANES (0 = one ciphertext per vector: t = 32 up to width
 # 1,024, 16 up to 2,048, 8 up to 4,096 | 32 = channel shards of 1,024 | 16 | 8), LORA (auto | fold | split), SHARD_LAND
 # (1 | 0: --no-shard-land) pass through to every step; B_K and PF_T must be <= the lanes.
@@ -96,6 +100,8 @@ HARNESS=${HARNESS:-/root/vd/harness}
 TOKENS=${TOKENS:-12}; BLOCKS=${BLOCKS:-}; GPU=${GPU:-0}; PCMM_SHIFT=${PCMM_SHIFT:-calib}; PCMM_CF=${PCMM_CF:-6}
 TEXT=${TEXT:-$'\n\nThe Eiffel tower is in the city of Paris, which is the capital of France and'}
 S=${BLOCKS:+_b$BLOCKS}${PCMM_SHIFT/calib/}; S=${S/zero/_zero}
+LAYOUT=${LAYOUT:-current}
+case "$LAYOUT" in current) ;; filled) S="${S}_filled" ;; *) echo "LAYOUT=$LAYOUT: current | filled" >&2; exit 2 ;; esac
 CAP=$OUT/cap_rwkv7$S
 LEVERS=${LEVERS:-}; CFTABLE=${CFTABLE:-}
 case "$LEVERS" in
@@ -126,7 +132,7 @@ JPLAN=$OUT/bootstrap_placements/plan_rwkv7_join$B_K$S$LV
 # the LANDING=high runtime switches (tools/fhe_ssm/run_gpu.sh CAPENV): PCMM needs the StC-first dense route
 CAPENV="FIDESLIB_BTS_STC_FIRST=2 FIDESLIB_BTS_STC_FIRST_ROUTES=dense FIDESLIB_BTS_STC_FIRST_CF=13 FIDESLIB_BTS_RAISE_DROP=512:1 AUTO_BTS_LEVEL=44"
 LORA=${LORA:-auto}; SHARD_LAND=${SHARD_LAND:-1}; KEYS=${KEYS:-inproc}; KEYMODE=${KEYMODE:-decode}; LANES=${LANES:-0}
-COMMON="--pth $PTH --coeffs $COEFFS --harness $HARNESS ${BLOCKS:+--blocks $BLOCKS} --lora $LORA --lanes $LANES"
+COMMON="--pth $PTH --coeffs $COEFFS --harness $HARNESS ${BLOCKS:+--blocks $BLOCKS} --lora $LORA --lanes $LANES --layout $LAYOUT"
 [ "$SHARD_LAND" = 1 ] || COMMON="$COMMON --no-shard-land"
 mkdir -p "$OUT"
 log() { echo "[rwkv7 $(date -u +%H:%M:%S)] $*" | tee -a "$OUT/session.log"; }
@@ -286,7 +292,7 @@ step_capture_b() {
 step_plan_b() { plan_one "$BCAP" "$BPLAN" "$OUT/plan_b$B_K$S$LV$PO.log" "$BPLANENV"; }
 
 step_bcheck() {
-    pyrun env RWKV7_PTH="$PTH" RWKV7_COEFFS="$COEFFS" RWKV7_HARNESS="$HARNESS" $CAPENV \
+    pyrun env RWKV7_PTH="$PTH" RWKV7_COEFFS="$COEFFS" RWKV7_HARNESS="$HARNESS" RWKV7_LAYOUT="$LAYOUT" $CAPENV \
         "$PY" -m pytest -q -s -p no:warnings "$W/python/perseus/examples/rwkv7/tests/test_batched.py" \
         -k session_prepare --rwkv7-plan --rwkv7-b-dir "$OUT/bcheck" > "$OUT/bcheck.log" 2>&1 \
         || { tail -30 "$OUT/bcheck.log"; die "bcheck failed ($OUT/bcheck.log)"; }

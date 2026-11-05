@@ -70,6 +70,10 @@ def add_args(ap, n_tokens=12):
                     "up to 2,048, 8 up to 4,096; layout.auto_lanes); 32 = 1,024 channels per ciphertext, wider models "
                     "as channel shards (K and T up to 32); 16 / 8 = 2,048 / 4,096 channels (batched K and prefill T "
                     "<= t). ANYSIZE_DESIGN.md §3 compares them by planned refreshes")
+    ap.add_argument("--layout", default="current", choices=("current", "filled"),
+                    help="the WKV state layout: current (value rows on the lanes of 64 / t real-payload ciphertexts per "
+                    "head block) or filled (two value groups per ciphertext, one on each axis: half the state "
+                    "ciphertexts, their refreshes, products and rotations; FILLED_DESIGN.md)")
     ap.add_argument("--no-shard-land", action="store_true",
                     help="width > 1,024: do not refresh the stage's output shards at block end (then the shards enter "
                     "the next block at the compiled exit, checked before the session opens)")

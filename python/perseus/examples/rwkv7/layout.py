@@ -58,19 +58,34 @@ def auto_lanes(C: int, n_slots: int = 1 << 15) -> int:
     return t
 
 
+#: the state layouts (``--layout``, FILLED_DESIGN.md): "current" = value rows t m + l on lane l of ciphertext m, real
+#: payloads (M = 64 / t ciphertexts per head block); "filled" = ciphertext q holds the rows of group q on the real axis
+#: and of group q + M on the imaginary axis (M = 64 / (2 t)), so every product with a key-indexed (real, natural)
+#: vector, every rotation, mask and refresh of the state serves both groups at once
+LAYOUTS = ("current", "filled")
+
+
 class Layout:
-    def __init__(self, n_slots: int, C: int = 768, d_ffn: int = 3072, D: int = D):
+    def __init__(self, n_slots: int, C: int = 768, d_ffn: int = 3072, D: int = D, layout: str = "current"):
         """``D`` channels per ciphertext (default 1,024: t = 32 lanes at 32,768 slots). ``D = 2,048`` / ``4,096`` is the
         fewer-lanes layout (t = 16 / 8): one ciphertext per vector up to that width, PCMM's own shape at that t
-        (``impl.pcmm.Shape(t).nch = 32,768 / t``)."""
+        (``impl.pcmm.Shape(t).nch = 32,768 / t``). ``layout`` = "filled" packs the state's value groups in pairs on
+        the two axes (FILLED_DESIGN.md); the token side is the same in both layouts."""
         if n_slots % D:
             raise ValueError(f"{n_slots} slots is not a multiple of {D} channels")
+        if layout not in LAYOUTS:
+            raise ValueError(f"layout {layout!r}: {LAYOUTS}")
+        self.layout = layout
+        self.filled = layout == "filled"
         self.D = D = int(D)
         self.n = int(n_slots)
         self.t = self.n // D
         if HEAD % self.t:
             raise ValueError(f"t = {self.t} lanes must divide the head size {HEAD}")
-        self.M = HEAD // self.t                  # state ciphertexts per block and shard
+        self.Mv = HEAD // self.t                 # value groups per head block (t rows each)
+        if self.filled and self.Mv % 2:
+            raise ValueError(f"the filled state needs an even number of value groups, t = {self.t} gives {self.Mv}")
+        self.M = self.Mv // 2 if self.filled else self.Mv   # state ciphertexts per block and shard
         self.nb = min(8, self.t)                  # baby steps over the lanes
         self.ng = self.t // self.nb
         self.C, self.d_ffn = int(C), int(d_ffn)
@@ -128,18 +143,24 @@ class Layout:
         return self.lane(v)
 
     def state_slots(self, S) -> list[np.ndarray]:
-        """``S`` (H, 64, 64) as the M slot vectors of the state form (the mirror's and the tests')."""
+        """``S`` (H, 64, 64) as the M slot vectors of the state form (the mirror's and the tests'); filled: complex,
+        group q on the real axis and group q + M on the imaginary axis."""
         H = S.shape[0]
         out = []
-        for m in range(self.M):
+        for m in range(self.Mv):
             v = np.zeros((self.D, self.t))
             for h in range(H):
                 # channel h*64 + j, lane l  <-  S[h, t m + l, j]
                 v[h * HEAD:(h + 1) * HEAD, :] = S[h, self.t * m:self.t * (m + 1), :].T
             out.append(v.reshape(-1))
+        if self.filled:
+            return [out[q] + 1j * out[q + self.M] for q in range(self.M)]
         return out
 
     def state_from_slots(self, Ss, H: int) -> np.ndarray:
+        Ss = [np.asarray(s) for s in Ss]
+        if self.filled:
+            Ss = [np.real(s) for s in Ss] + [np.imag(s) for s in Ss]
         S = np.zeros((H, HEAD, HEAD))
         for m, s in enumerate(Ss):
             v = np.real(np.asarray(s)).reshape(self.D, self.t)
@@ -216,6 +237,8 @@ class Layout:
     # ── rotations the layout issues ──
     def rotation_steps(self) -> set[int]:
         t, n = self.t, self.n
+        if self.filled:
+            return self._rotation_steps_filled()
         s = set()
         g = t
         while g < n:                                   # channel_sum
@@ -235,6 +258,28 @@ class Layout:
             g *= 2
         return {x % n for x in s} - {0}
 
+    def _rotation_steps_filled(self) -> set[int]:
+        """The filled state's steps: the group-0 transforms' babies and giants, the group shifts ``t^2 m``, and the
+        shared ones (``channel_sum``, block sums, lane copies). A subset of the current layout's steps."""
+        t, n = self.t, self.n
+        s = set()
+        g = t
+        while g < n:
+            s.add(g)
+            g *= 2
+        g = t
+        while g < HEAD * t:
+            s |= {g, -g}
+            g *= 2
+        s |= {t * b for b in range(1, self.nb)} | {t * self.nb * gg for gg in range(self.ng)}
+        s |= {-(t - 1) * b for b in range(1, self.nb)} | {-(t - 1) * self.nb * gg for gg in range(self.ng)}
+        s |= {t * t * m for m in range(1, self.Mv)} | {-t * t * m for m in range(1, self.Mv)}
+        g = 1
+        while g < t:
+            s.add(-g)
+            g *= 2
+        return {x % n for x in s} - {0}
+
     # ── kernels ──
     def channel_sum(self, ops, x):
         return ops.rotate_and_sum(x, self.t, self.n)
@@ -244,7 +289,31 @@ class Layout:
         s = ops.mult_pt(s, self.block_start * float(scale))
         return ops.rotate_and_sum(s, -self.t, HEAD * self.t)
 
+    def _transpose0(self, ops, x):
+        """Group 0's transpose of ``x`` (a real-linear map: on a complex ``x`` it acts on both axes): per lane ``l``
+        channel ``h 64 + l`` at the block start, masked, copied over the block."""
+        t, nb = self.t, self.nb
+        babies = [x] + [ops.rotate(x, t * b) for b in range(1, nb)]
+        acc = None
+        for g in range(self.ng):
+            G = t * nb * g
+            pts = [np.roll(self._masks[nb * g + b], G) for b in range(nb)]
+            inner = ops.mult_pt_sum(babies, pts)
+            term = inner if G == 0 else ops.rotate(inner, G)
+            acc = term if acc is None else ops.add(acc, term)
+        return ops.rotate_and_sum(acc, -t, HEAD * t)
+
     def transpose(self, ops, v) -> list:
+        if self.filled:
+            # group m's transpose is group 0's of v shifted by t m channels (a rotation by t^2 m); the pair (q, q + M)
+            # enters as ONE complex input rot(v, t^2 q) + i rot(v, t^2 (q + M)), so one transform serves both groups
+            t = self.t
+            out = []
+            for q in range(self.M):
+                lo = v if q == 0 else ops.rotate(v, t * t * q)
+                x = ops.add(lo, ops.mult_i(ops.rotate(v, t * t * (q + self.M))))
+                out.append(self._transpose0(ops, x))
+            return out
         t, nb = self.t, self.nb
         babies = [v] + [ops.rotate(v, t * b) for b in range(1, nb)]
         outs = []
@@ -265,6 +334,8 @@ class Layout:
     def untranspose_lane0(self, ops, Ps):
         """``untranspose`` before its lane copy: ``y[h, t m + l]`` at (channel ``h 64 + t m + l``, lane 0), zero on
         every other lane (the prefill scan moves it to its token's lane instead of copying it)."""
+        if self.filled:
+            return self._untranspose_lane0_filled(ops, Ps)
         t, nb = self.t, self.nb
         acc = None
         for m, P in enumerate(Ps):
@@ -275,6 +346,29 @@ class Layout:
                 pts = [np.roll(self._masks[nb * g + b], (t - 1) * b) for b in range(nb)]
                 inner = ops.mult_pt_sum(babies, pts)
                 term = inner if G == 0 else ops.rotate(inner, -G)
+                acc = term if acc is None else ops.add(acc, term)
+        return acc
+
+    def _untranspose_lane0_filled(self, ops, Ps):
+        """Filled: group m's readout is group 0's rotated by ``-t^2 m``. Per ciphertext q, group 0's transform runs
+        once on both axes (block sums, babies, masks at value 1/2, giants), then one conjugation splits it:
+        ``u + conj u`` is group q's part, ``i (conj u - u)`` group q + M's (the masks' 1/2 makes both exact)."""
+        t, nb = self.t, self.nb
+        acc = None
+        for q, P in enumerate(Ps):
+            R = ops.rotate_and_sum(P, t, HEAD * t)
+            babies = [R] + [ops.rotate(R, -(t - 1) * b) for b in range(1, nb)]
+            u = None
+            for g in range(self.ng):
+                G = (t - 1) * nb * g
+                pts = [np.roll(self._masks[nb * g + b], (t - 1) * b) * 0.5 for b in range(nb)]
+                inner = ops.mult_pt_sum(babies, pts)
+                term = inner if G == 0 else ops.rotate(inner, -G)
+                u = term if u is None else ops.add(u, term)
+            uc = ops.conjugate(u)
+            re, im = ops.add(u, uc), ops.mult_i(ops.sub(uc, u))
+            for m, part in ((q, re), (q + self.M, im)):
+                term = part if m == 0 else ops.rotate(part, -t * t * m)
                 acc = term if acc is None else ops.add(acc, term)
         return acc
 

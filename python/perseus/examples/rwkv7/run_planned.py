@@ -231,7 +231,8 @@ class Rwkv7PlannedRun(PlannedRun):
         is checked here (an unknown compiled scale, 0, is taken as the Ct's)."""
         _nm, lvl, deg, nf = p.inputs[i]
         lvl, deg, nf = int(lvl), int(deg), float(nf)
-        r = np.asarray(rows, dtype=np.float64)
+        r = np.asarray(rows)
+        r = r.astype(np.complex128 if np.iscomplexobj(r) else np.float64)     # complex: the filled state
         v = np.ascontiguousarray(r.T.ravel())               # slot ch * t + tok, as pack_rows lays it out
         ct = Rwkv7PlannedRun.encrypt(self, v, lvl, deg)
         got = (int(ct.level), int(ct.deg), float(ct.nf))
@@ -443,7 +444,8 @@ def main_batch(a) -> int:
         run.reply(reg)
         emit({"kind": "warmup", "seconds": round(time.time() - t0, 3)})
     mirror = BatchedMirror(P, co, model.L.n, K, carry=a.batch_carry, wbits=a.wbits, fuse_l1=a.fuse_l1,
-                           hoist=a.batch_hoist, lora=a.lora, lanes=a.lanes)
+                           hoist=a.batch_hoist, lora=a.lora, lanes=a.lanes,
+                           layout=a.layout)
     mirror.reset(st)
     scorers = [common.Scorer(P, a, poly=polys[c]) for c in range(K)]
     toks = [list(p) for p in prompts]
@@ -1309,7 +1311,8 @@ def main_serve(a) -> int:
         dev.batch(np.stack(wl[:K]))
         dev.reset()
         emit({"kind": "warmup", "seconds": round(time.time() - t0, 3)})
-    mir = Server(MirrorBackend(P, co, st, dm.L.n, K, wbits=a.wbits, lanes=a.lanes, lora=a.lora, fuse_l1=a.fuse_l1), K)
+    mir = Server(MirrorBackend(P, co, st, dm.L.n, K, wbits=a.wbits, lanes=a.lanes, lora=a.lora, fuse_l1=a.fuse_l1,
+                                   layout=a.layout), K)
     scorers = {}
 
     def pick(h):
@@ -1496,7 +1499,8 @@ def main(argv=None) -> int:
             t0 = time.time()
             both.reply(both.prefill(pf_public[0], kv_cts=both.pf.state_cts(st)), T)
             emit({"kind": "warmup", "prefill_chunk": T, "seconds": round(time.time() - t0, 3)})
-    mirror = Mirror(P, co, model.L.n, wbits=a.wbits, fuse_l1=a.fuse_l1, lora=a.lora, lanes=a.lanes)
+    mirror = Mirror(P, co, model.L.n, wbits=a.wbits, fuse_l1=a.fuse_l1, lora=a.lora, lanes=a.lanes,
+                    layout=a.layout)
     mirror.reset(st if a.prefix else None)
     sc = common.Scorer(P, a, mirror=mirror, poly=poly)
     rows = [P.emb[t] for t in ids]

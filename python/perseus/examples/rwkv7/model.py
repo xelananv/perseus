@@ -429,14 +429,14 @@ class Rwkv7Fhe(ImplModel):
 
     def __init__(self, inf, P: Params, coeffs: dict, *, core=None, n_layers=None, unit=None, wbits=24,
                  fuse_l1=False, shifts=None, carry=True, chunk=0, prefill_keys=0, batch=0, batch_carry="decode",
-                 batch_hoist=0, lora="auto", shard_land=True, lanes=0):
+                 batch_hoist=0, lora="auto", shard_land=True, lanes=0, layout="current"):
         super().__init__(inf, core=core, unit=unit)
         self.P = P
         self.n_layers = int(P.n_layer if n_layers is None else n_layers)
         self.coeffs = coeffs
         from .layout import auto_lanes
         lanes = int(lanes) or auto_lanes(P.C, self.rt.dims.N)
-        self.L = Layout(self.rt.dims.N, P.C, P.d_ffn, D=self.rt.dims.N // lanes)
+        self.L = Layout(self.rt.dims.N, P.C, P.d_ffn, D=self.rt.dims.N // lanes, layout=layout)
         self.wbits, self.fuse_l1, self.shifts, self.carry_on = int(wbits), bool(fuse_l1), shifts, bool(carry)
         self.shard_land = bool(shard_land) and self.L.S > 1
         self.W = [LayerW(P, b, self.L, coeffs, fuse_l1=fuse_l1, lora=lora) for b in range(self.n_layers)]
@@ -512,7 +512,8 @@ class Rwkv7Fhe(ImplModel):
         L = self.L
         out = []
         for b in range(self.n_layers):
-            rows = [np.real(v).reshape(L.D, L.t).T.copy() for v in L.state_slots_sh(state.S[b])]
+            # the filled state's rows are complex (group q real, group q + M imaginary); the current layout's real
+            rows = [(v if L.filled else np.real(v)).reshape(L.D, L.t).T.copy() for v in L.state_slots_sh(state.S[b])]
             xa, xf = L.encode_row_sh(state.xa[b]), L.encode_row_sh(state.xf[b])
             if self.batch > 1:
                 K = self.batch
@@ -555,10 +556,18 @@ class Rwkv7Fhe(ImplModel):
             if rows is None:
                 cts = [self.zero_ct() for _ in range(n)]
             else:
-                cts = [ops.pack_tokens(r, ops.bts_out()) for r in rows[b]]
+                cts = [self.pack_rows(r) for r in rows[b]]
             for c in cts:
                 ops.bootstrap(c)
             self.state.append(self.make_state(cts))
+
+    def pack_rows(self, r):
+        """``pack_tokens`` of real rows; complex rows (the filled state) as ``pack(Re) + i pack(Im)`` (level-free)."""
+        ops = self.rt.ops
+        r = np.asarray(r)
+        if not np.iscomplexobj(r):
+            return ops.pack_tokens(r, ops.bts_out())
+        return ops.add(ops.pack_tokens(r.real, ops.bts_out()), ops.mult_i(ops.pack_tokens(r.imag, ops.bts_out())))
 
     def encode_input(self, row):
         """Block 0's input shards: the embedding row (ln0 applied, client side) on every lane, at the landing level;
@@ -639,15 +648,15 @@ class Mirror:
     the folds (and any unclamped excursion). ``step`` returns (hidden, the S output slot vectors)."""
 
     def __init__(self, P: Params, coeffs: dict, n_slots: int, n_layers=None, wbits: int | None = 24, fuse_l1=False,
-                 lora="auto", lanes=0):
+                 lora="auto", lanes=0, layout="current"):
         """``lanes``: t (channels per ciphertext n_slots / t); 0 = ``layout.auto_lanes`` (at 2^15 slots the device's
-        t; at width <= 1,024 it is n_slots / 1,024, the tests' t = 16 at 2^14)."""
+        t; at width <= 1,024 it is n_slots / 1,024, the tests' t = 16 at 2^14). ``layout``: the state layout."""
         from perseus.impl.ops import NumpyOps
         from .layout import auto_lanes
         self.P = P
         if lanes == 0:
             lanes = auto_lanes(P.C, n_slots)
-        self.L = Layout(n_slots, P.C, P.d_ffn, **({"D": n_slots // int(lanes)} if lanes else {}))
+        self.L = Layout(n_slots, P.C, P.d_ffn, **({"D": n_slots // int(lanes)} if lanes else {}), layout=layout)
         self.n_layers = int(P.n_layer if n_layers is None else n_layers)
         self.W = [LayerW(P, b, self.L, coeffs, fuse_l1=fuse_l1, lora=lora) for b in range(self.n_layers)]
         self.circ = Circuit(NumpyOps(), self.L, coeffs, numpy_linear(self.L, wbits))

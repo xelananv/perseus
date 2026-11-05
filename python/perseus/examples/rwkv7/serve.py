@@ -175,14 +175,14 @@ class MirrorBackend:
     batched pass."""
 
     def __init__(self, P, coeffs, state, n_slots, K, *, n_layers=None, wbits=None, lanes=0, lora="auto",
-                 fuse_l1=False):
+                 fuse_l1=False, layout="current"):
         from .batched import BatchedMirror
         from .model import Mirror
         self.st = state
         self.single = Mirror(P, coeffs, n_slots, n_layers=n_layers, wbits=wbits, lora=lora, lanes=lanes,
-                             fuse_l1=fuse_l1)
+                             fuse_l1=fuse_l1, layout=layout)
         self.bm = BatchedMirror(P, coeffs, n_slots, K, carry="lane", n_layers=n_layers, wbits=wbits, lora=lora,
-                                lanes=lanes, fuse_l1=fuse_l1)
+                                lanes=lanes, fuse_l1=fuse_l1, layout=layout)
         self.L, self.ops = self.single.L, self.single.circ.ops
 
     def fresh_single(self):

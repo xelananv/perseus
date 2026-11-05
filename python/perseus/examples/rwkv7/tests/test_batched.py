@@ -263,14 +263,16 @@ def test_batched_session_prepare(tmp_path, monkeypatch):
     for k, v in HIGH.items():
         monkeypatch.setenv(k, v)
     K = 4
+    layout = os.environ.get("RWKV7_LAYOUT", "current")       # run_box.sh LAYOUT (FILLED_DESIGN.md)
     root = pathlib.Path(os.environ.get("RWKV7_B_DIR", str(tmp_path))) / "session_prepare"
-    cap, plan = _cap_and_plan(root, f"b{K}", ["--batch", str(K)], HIGH)
+    tag = "" if layout == "current" else f"_{layout}"
+    cap, plan = _cap_and_plan(root, f"b{K}{tag}", ["--batch", str(K), "--layout", layout], HIGH)
     shifts = json.load(open(cap / "pcmm_shifts.json"))
     P = ref.load_params(CKPT, 1)
     co = load_coeffs(COEFFS)
     tok = tokenizer()
     _rf, st = common.prefix_state(P, COEFFS, tok.encode(common.CALIB_TEXT), 1)
-    _f, _i, m = make_model(P, co, capture=True, shifts=shifts, batch=K, batch_carry="lane")
+    _f, _i, m = make_model(P, co, capture=True, shifts=shifts, batch=K, batch_carry="lane", layout=layout)
     m.init_state = st
     run = rp.Rwkv7BatchedRun(rp.Recorder(m, 1), str(plan), session_config(str(plan)), ["block_0", "block_1"], None,
                              model=m, work_dir=str(root / "work_b"))
@@ -278,7 +280,7 @@ def test_batched_session_prepare(tmp_path, monkeypatch):
     run.prepare(public)
     keys = sorted(rp._state_key(run, 0, i) for i, _j, _r in run.reg[0]["kv"])
     print("batched kv", keys, "inputs", [x[:3] for x in run.progs["block_0"].inputs][:4])
-    assert keys == sorted(m.state_names()) and len(keys) == 2 * K + 2
+    assert keys == sorted(m.state_names()) and len(keys) == m.L.M * K + 2
 
 
 def test_read_prompts(tmp_path):

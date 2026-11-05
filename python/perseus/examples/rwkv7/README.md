@@ -109,6 +109,18 @@ The 64 × 64 state of head `h` (`S[h, i, j]`, with `i` the value dimension and `
 
 The steps the layout issues, plus PCMM's ±1: 43 rotation keys (the plan's `plan_rot_steps.json`).
 
+**The filled state (`--layout filled`, `LAYOUT=filled` in `run_box.sh`; `FILLED_DESIGN.md`).** The two value groups
+of a head's state share ONE ciphertext: `S = S_0 + i·S_1` (at t = 32; group q and q + M in general, M = 64 / (2t)).
+Every operand the state meets on the update side (`w`, `κ̂`, `κ̂⊙a`, `k̃`, `r`) is indexed by the key dimension j, so
+it is real and the same for both groups: `(S_0 + i S_1)·w = S_0 w + i S_1 w` is one product for both. The block
+sums, masks and the carry refresh are real-linear and serve both too. Only the two transforms that index by i change:
+group m's transpose is group 0's of `v` shifted by `t²m` slots, so `transpose` feeds group 0's transform the complex
+input `v + i·rot(v, t²)`; `untranspose` runs group 0's transform once on both axes (masks at 1/2) and splits it with
+one conjugation, rotating the imaginary part by `−t²`. Same depth, half the state ciphertexts, carry refreshes, state
+products and plaintext masks; per conversation and block at t = 32, 83 rotations become 46 plus one conjugation. The
+token side, `z = h + i·v_first` and the three broadcast pairs are untouched. Default off; the current layout's op
+stream is unchanged.
+
 ## Execution: planned
 
 This runtime's device path runs planned only (`examples/gpt2/run_decode.py`: "the new runtime runs planned only").
@@ -273,6 +285,10 @@ BLOCKS=1 bash tools/rwkv7/run_box.sh pf                      # smoke: capture, p
 bash tools/rwkv7/run_box.sh pf                               # 12 blocks: 70 prompt tokens = 2 passes + 6 decoded + 4 generated
 LEVERS=best bash tools/rwkv7/run_box.sh pf                   # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
 BLOCKS=1 CFTABLE=1 bash tools/rwkv7/run_box.sh run           # A/B the PCMM CF table against PCMM_CF=6 (decode smoke)
+
+# the filled state layout (FILLED_DESIGN.md; every product gets the suffix _filled): batched under b2 + best
+B_K=4 LAYOUT=filled bash tools/rwkv7/run_box.sh bcheck
+LAYOUT=filled PLANOPT=b2 LEVERS=best B_K=32 B_GENERATE=32 POOL_B=1024 STC_CACHE_B=64 bash tools/rwkv7/run_box.sh b
 
 # any size (ANYSIZE_DESIGN.md): the whole per-size pipeline (calibrate, fit, scan, gate, capture, plan, keys, runs)
 DRY=1 bash tools/rwkv7/size_pipeline.sh /root/d_models/RWKV-x070-World-1.5B-v3-20250127-ctx4096.pth 1.5b   # up to the GPU

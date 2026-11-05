@@ -180,9 +180,10 @@ class BatchedMirror(Mirror):
     """The batched circuit on numpy slot vectors: ``step(rows)`` with row c conversation c's token."""
 
     def __init__(self, P, coeffs, n_slots, K, carry="decode", n_layers=None, wbits=24, fuse_l1=False, hoist=0,
-                 lora="auto", lanes=0):
+                 lora="auto", lanes=0, layout="current"):
         self.K, self.carry_kind, self.hoist = int(K), carry, int(hoist)
-        super().__init__(P, coeffs, n_slots, n_layers=n_layers, wbits=wbits, fuse_l1=fuse_l1, lora=lora, lanes=lanes)
+        super().__init__(P, coeffs, n_slots, n_layers=n_layers, wbits=wbits, fuse_l1=fuse_l1, lora=lora, lanes=lanes,
+                         layout=layout)
         self.bcirc = BatchedCircuit(self.circ.ops, self.L, coeffs, self.circ.linear, self.K, carry, hoist)
 
     def reset(self, state=None):
