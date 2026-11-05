@@ -463,6 +463,18 @@ class Rwkv7Fhe(ImplModel):
                      BatchedCircuit(self.rt.ops, self.L, self.coeffs, self._pcmm, self.batch, self.batch_carry,
                                     self.batch_hoist, step=self.rt.step))
 
+    def set_mode(self, chunk: int = 0, batch: int = 0):
+        """One twin, three programs (serve.py): the decode step (both 0), a T-token prefill pass (``chunk`` T) or a
+        K-conversation batched pass (``batch`` K >= 2). The carried state stays the caller's: decode and prefill read
+        a ``State`` list, a batched pass a ``BatchState`` list (``self.state``). Build the model with ``batch=K`` and
+        ``prefill_keys=T`` so its rotation keys cover all three."""
+        if chunk and batch:
+            raise ValueError("a batched pass and a prefill chunk do not combine")
+        self.batch = 0
+        self.set_chunk(int(chunk))
+        if batch:
+            self.set_batch(int(batch))
+
     def set_chunk(self, T: int):
         """0: decode steps (one token on every lane); T: T-token prefill passes. The carried state is the same."""
         from .prefill import PrefillCircuit

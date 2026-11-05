@@ -36,6 +36,41 @@ def batch_probe(P, ids, K: int, n_passes: int):
     return [[P.emb[t] for t in row] for row in toks], toks
 
 
+def join_probe(P, coeffs, a, L, n_layers):
+    """The join twin's rows (public): the lane-form carries of the public prefix state (every lane equal, as a fresh
+    batch holds them) and the natural-form carries after the public calibration text (a conversation's)."""
+    from .serve import join_rows
+    ids = common.token_ids(a, common.CALIB_TEXT)
+    _rf, lane_st = common.prefix_state(P, coeffs, ids, a.prefix)
+    _rf, new_st = common.prefix_state(P, coeffs, ids, len(ids))
+    return join_rows(L, n_layers, lane_st, new_st)
+
+
+def capture_join(a, P) -> int:
+    """``--join``: the join program's capture (``block_0/graph.json``: one stage, no weights, no rotations)."""
+    from .serve import make_join
+    K = int(a.batch)
+    if K < 2:
+        raise SystemExit("--join needs --batch K >= 2 (the batch the conversations join)")
+    t0 = time.time()
+    os.environ["FHE_GRAPH_CAPTURE_TOKEN"] = str(a.capture_tick)
+    _fhe, _inf, jm = make_join(P, K, capture=True, lanes=a.lanes)
+    jm.set_capture(a.out)
+    rows = join_probe(P, a.coeffs, a, jm.L, jm.n_layers)
+    for pos in range(a.capture_tick + 1):
+        out = jm.step(rows, pos)
+        print(f"[capture] join tick {pos}: {len(out)} carries out at level {jm.rt.ops.level(out[0])}", flush=True)
+    meta = {"kind": "join", "blocks": jm.n_layers, "batch": K, "lane": jm.lane, "capture_tick": a.capture_tick,
+            "keys": jm.keys, "new_keys": jm.new_keys, "prefix": a.prefix, "pth_sha256": common.sha256(a.pth),
+            "coeffs_sha256": common.sha256(a.coeffs), "width": P.C, "shards": jm.L.S, "lanes": jm.L.t,
+            "environment": common.environment()}
+    with open(os.path.join(a.out, "rwkv7_capture.json"), "w") as f:
+        json.dump(meta, f, indent=1)
+    print(f"[capture] wrote the join capture {a.out} ({jm.n_layers} blocks, K = {K}) in {time.time() - t0:.1f} s",
+          flush=True)
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     common.add_args(ap)
@@ -47,9 +82,14 @@ def main(argv=None) -> int:
                     help="do not stop on a site input out of its interval / non-finite (model.SiteGuard)")
     ap.add_argument("--site-guard-tol", type=float, default=0.0,
                     help="the guard's slack, relative to each interval's width (default 0)")
+    ap.add_argument("--join", action="store_true",
+                    help="capture the JOIN program instead (serve.py, SERVE_DESIGN.md): every block's lane-form carries "
+                    "joined with one conversation's natural-form carries on lane 0 of a --batch K pass, one refresh each")
     a = ap.parse_args(argv)
     os.makedirs(a.out, exist_ok=True)
     P, co, _ = common.load(a)
+    if a.join:
+        return capture_join(a, P)
     ids = common.token_ids(a, common.CALIB_TEXT)
     _rf, st = common.prefix_state(P, a.coeffs, ids, a.prefix)
     ids = ids[a.prefix:]

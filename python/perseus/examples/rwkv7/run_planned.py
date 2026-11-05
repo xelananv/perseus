@@ -753,6 +753,616 @@ def keys_header(run, bundle_info=None) -> dict:
             "bundle_info": bundle_info}
 
 
+# ── continuous batching on the device (serve.py, SERVE_DESIGN.md) ──
+
+_KEY = re.compile(r"cache\.([a-z0-9]+)-lvl")
+
+
+class Rwkv7JoinRun(Rwkv7PlannedRun):
+    """The join program (``run_capture --join``; ``serve.Rwkv7Join`` is its twin): one stage, every input a carried
+    value (the lane-form carries ``b<b><carry>`` and one conversation's natural-form carries ``b<b>n<carry>``), the
+    joined carries out. Every input is compiled at its recorded (level, deg); the two masks are plaintexts under their
+    own store names (``join/m``, ``join/keep``), re-staged in place per join (``stage_masks``)."""
+
+    MASKS = ("join/m", "join/keep")
+
+    def _compile_with_schedule(self, fn):
+        from perseus import _pc
+        real, sched, run = _pc.Program, self.schedule, self
+
+        class _Join:
+            @staticmethod
+            def compile(*a, **k):
+                metas = {lab: dict(v) for lab, v in (k.get("input_metas") or {}).items()}
+                for b, r in run.ref.items():
+                    metas.setdefault(run.labels[b], {}).update({n: r.metas[n] for n in r.inputs() if n in r.metas})
+                k["input_metas"] = metas
+                if sched != "program":
+                    k["schedule"] = sched
+                return real.compile(*a, **k)
+        _pc.Program = _Join
+        try:
+            return fn()
+        finally:
+            _pc.Program = real
+
+    def prepare(self, rows, argmax=False):
+        self._compile_with_schedule(lambda: PlannedRun.prepare(self, rows, argmax))
+        if any(self.dyn.values()):
+            raise RuntimeError(f"join: dynamic steps in the stream: {self.dyn}")
+        for b, r in self.ref.items():
+            o = self.records[0][b]
+            if set(o.pts) != set(r.pts) or any(not np.array_equal(o.pts[k], r.pts[k]) for k in r.pts):
+                raise RuntimeError("join: a plaintext differs between the probe tokens (not static)")
+        self.map_io()
+        self.static = True
+        self.al = self.pt_aliases()
+        return self
+
+    def map_io(self):
+        """``ins`` {key: program input}, ``outs`` {lane key: program output}; refuses a stage that is not the join."""
+        if sorted(self.ref) != [0]:
+            raise RuntimeError(f"join: stages {sorted(self.ref)}, one expected")
+        r, p, m = self.ref[0], self.progs[self.labels[0]], self.model
+        self.ins = {}
+        for i, nm in enumerate(r.inputs()):
+            hit = _KEY.search(nm)
+            if hit is None:
+                raise RuntimeError(f"join: input {i} ({nm}) is not a named carried value")
+            self.ins[hit.group(1)] = i
+        want = set(m.keys) | set(m.new_keys)
+        if set(self.ins) != want:
+            raise RuntimeError(f"join: inputs {sorted(self.ins)}, expected {sorted(want)}")
+        if len(r.out_names) != len(m.keys):
+            raise RuntimeError(f"join: {len(r.out_names)} outputs, {len(m.keys)} lane carries")
+        self.outs = {k: p.output_index(o) for k, o in zip(m.keys, r.out_names)}
+        return self
+
+    def pt_aliases(self):
+        """The two masks by value (the capture's lane): ``join/m``, ``join/keep``; anything else by digest."""
+        out = {}
+        m, keep = self.model.m, self.model.keep
+        for b in sorted(self.ref):
+            lab, r = self.labels[b], self.ref[b]
+            for nm, _lv, _d, f in self.progs[lab].pt_refs:
+                if f in ("stream", "diag"):
+                    continue
+                v = np.real(np.asarray(r.pts[nm]))
+                out[(lab, nm)] = (self.MASKS[0] if np.array_equal(v, m) else self.MASKS[1] if np.array_equal(v, keep)
+                                  else "v/" + digest(np.asarray(r.pts[nm])))
+        if set(out.values()) != set(self.MASKS):
+            raise RuntimeError(f"join: plaintexts {sorted(set(out.values()))}, expected exactly the two masks")
+        return out
+
+    def mask_slots(self) -> list[tuple[str, int]]:
+        lab = self.labels[0]
+        return sorted({(self.al[(lab, nm)], int(lv)) for nm, lv, _d, f in self.progs[lab].pt_refs
+                       if f not in ("stream", "diag")})
+
+    def stage_masks(self, lanes):
+        """Lane(s) ``lanes``' masks into the store, in place (a resident key is re-encoded at its own slot, after every
+        earlier reader in stream order: the bound program's CUDA graph stays valid)."""
+        from .serve import join_masks
+        m, keep = join_masks(self.model.L, self.model.K, lanes)
+        vals = {self.MASKS[0]: m, self.MASKS[1]: keep}
+        return int(self.store.stage([(a, lv, np.ascontiguousarray(vals[a], dtype=np.float64))
+                                     for a, lv in self.mask_slots()]))
+
+
+def _remap_regs(runs, f):
+    for run in runs:
+        for b in list(run.reg):
+            run.reg[b] = {"kv": [(i, j, f[r]) for i, j, r in run.reg[b]["kv"]],
+                          "out": [(j, f[r]) for j, r in run.reg[b]["out"]]}
+
+
+class Rwkv7ServeRun:
+    """Decode, prefill (``Rwkv7PrefillRun``), the K-conversation batched pass and the join in ONE planned session
+    (SERVE_DESIGN.md §3). The register map:
+
+    * the batched pass's registers: lane c's ``s<m>[h<j>]c<c>``, the lane-form carries, the stage outputs;
+    * the single-conversation programs (decode, prefill) read and write ``S`` in the registers of the lane the
+      conversation will join (``bind_lane``: the register hand-over), their natural-form carries in their own
+      registers (the join reads them), their stage outputs in their own;
+    * the join reads the lane-form carry registers and the single carry registers and writes the lane-form ones.
+
+    ``prepare`` (CPU) compiles the four program sets, relabels them (``pf_block_<b>``, ``b_block_<b>``,
+    ``join_block_0``), numbers the registers densely and compares the (level, deg) of every hand-over direction
+    before any session exists, naming each mismatch: single S out -> batched S in (every lane), batched S / carry out
+    -> batched in, single carry out -> join natural-form in, batched carry out -> join lane in, join out -> batched in
+    and -> join lane in (two joins before a pass)."""
+
+    def __init__(self, dec, pf, bat, join, T: int, K: int, log=print):
+        self.dec, self.pf, self.bat, self.join, self.T, self.K, self.log = dec, pf, bat, join, int(T), int(K), log
+        self.single = Rwkv7PrefillRun(dec, pf, T, log=log)
+
+    @property
+    def runs(self):
+        return (self.dec, self.pf, self.bat, self.join)
+
+    def prepare(self, dec_rows, pf_chunks, b_passes, j_rows):
+        dec, pf, bat, join = self.runs
+        self.single.prepare(dec_rows, pf_chunks)
+        bat.prepare(b_passes)
+        join.prepare(j_rows)
+        for lab, p in bat.progs.items():
+            p.relabel(f"b_{lab}")
+        for lab, p in join.progs.items():
+            p.relabel(f"join_{lab}")
+        n0 = self.single.n_regs
+        _remap_regs([bat], {r: r + n0 for b in bat.reg for r in
+                            [x[2] for x in bat.reg[b]["kv"]] + [x[1] for x in bat.reg[b]["out"]]})
+        self.n_layers = dec.rec.n_layers
+        self._keymaps()
+        sk = sorted(k for k in self.dkv[0] if k.startswith("s"))
+        ck = sorted(k for k in self.dkv[0] if not k.startswith("s"))
+        for b in range(self.n_layers):
+            want = {f"{s}c{c}" for s in sk for c in range(self.K)} | set(ck)
+            if set(self.bkv[b]) != want:
+                raise RuntimeError(f"block {b}: batched state {sorted(self.bkv[b])[:8]}..., expected the K = {self.K} "
+                                   f"lanes of the decode state {sorted(self.dkv[b])}")
+        self.s_keys, self.c_keys = sk, ck
+        self.check_landings()
+        # the single programs' S onto lane 0 (bind_lane moves them per conversation); then number densely: the decode
+        # plan's own S registers are never used
+        self.bind_lane(0)
+        used = sorted({r for run in (dec, pf, bat) for b in run.reg for r in
+                       [x[2] for x in run.reg[b]["kv"]] + [x[1] for x in run.reg[b]["out"]]})
+        f = {r: i for i, r in enumerate(used)}
+        _remap_regs([dec, pf, bat], f)
+        self.n_regs = len(used)
+        self.single.n_regs = self.n_regs
+        for run in self.runs:
+            run.n_regs = self.n_regs
+        self._keymaps()
+        self.bound = None
+        self.bind_lane(0)
+        return self
+
+    def _keymaps(self):
+        """{block: {state key: (input, output, register)}} for the decode, prefill and batched programs."""
+        def km(run):
+            return {b: {_state_key(run, b, i): (i, j, r) for i, j, r in run.reg[b]["kv"]}
+                    for b in range(self.n_layers)}
+        self.dkv, self.pkv, self.bkv = km(self.dec), km(self.pf), km(self.bat)
+
+    def lane_reg(self, b, key, c):
+        """Lane c's register of single-conversation state ``key`` (``s0``, ``s1h1``, ...) in block b."""
+        return self.bkv[b][f"{key}c{c}"][2]
+
+    def bind_lane(self, c):
+        """The register hand-over: the decode and prefill programs read and write S in lane c's registers."""
+        if getattr(self, "bound", None) == c:
+            return
+        for run, kv in ((self.dec, self.dkv), (self.pf, self.pkv)):
+            for b in range(self.n_layers):
+                s = set(self.s_keys)
+                run.reg[b]["kv"] = [(i, j, self.lane_reg(b, k, c) if k in s else r)
+                                    for k, (i, j, r) in ((_state_key(run, b, i), (i, j, r))
+                                                         for i, j, r in run.reg[b]["kv"])]
+        self.bound = c
+        self._keymaps()
+
+    def join_map(self):
+        """[(block, carry key, lane input, natural input, output)] of the join program."""
+        out = []
+        for b in range(self.n_layers):
+            for k in self.c_keys:
+                out.append((b, k, self.join.ins[f"b{b}{k}"], self.join.ins[f"b{b}n{k}"], self.join.outs[f"b{b}{k}"]))
+        return out
+
+    def check_landings(self):
+        dec, pf, bat, join = self.runs
+        pj = join.progs[join.labels[0]]
+        bad = []
+
+        def cmp(what, wp, wj, rp, ri):
+            w, rd = tuple(wp.outputs[wj][1:3]), tuple(rp.inputs[ri][1:3])
+            if w[:2] != rd[:2]:
+                bad.append(f"{what}: written at {w[:2]}, read at {rd[:2]}")
+        want = {f"b{b}{k}" for b in range(self.n_layers) for k in self.c_keys}
+        if set(join.outs) != want or set(join.ins) != want | {f"b{b}n{k}" for b in range(self.n_layers)
+                                                               for k in self.c_keys}:
+            raise RuntimeError(f"the join program's carries {sorted(join.ins)} do not match the batched pass's "
+                               f"{sorted(want)} (a join captured for another block count or width?)")
+        for b in range(self.n_layers):
+            pd, pp, pb = dec.progs[dec.labels[b]], pf.progs[pf.labels[b]], bat.progs[bat.labels[b]]
+            for s in self.s_keys:
+                for c in range(self.K):
+                    bi, bj, _r = self.bkv[b][f"{s}c{c}"]
+                    cmp(f"block {b} {s} decode -> batched lane {c}", pd, self.dkv[b][s][1], pb, bi)
+                    cmp(f"block {b} {s} prefill -> batched lane {c}", pp, self.pkv[b][s][1], pb, bi)
+                    cmp(f"block {b} {s}c{c} batched -> batched", pb, bj, pb, bi)
+            for k in self.c_keys:
+                bi, bj, _r = self.bkv[b][k]
+                li, ni, jo = join.ins[f"b{b}{k}"], join.ins[f"b{b}n{k}"], join.outs[f"b{b}{k}"]
+                cmp(f"block {b} {k} batched -> batched", pb, bj, pb, bi)
+                cmp(f"block {b} {k} batched -> join (lane form)", pb, bj, pj, li)
+                cmp(f"block {b} {k} join -> batched", pj, jo, pb, bi)
+                cmp(f"block {b} {k} join -> join (lane form)", pj, jo, pj, li)
+                cmp(f"block {b} {k} decode -> join (natural form)", pd, self.dkv[b][k][1], pj, ni)
+                cmp(f"block {b} {k} prefill -> join (natural form)", pp, self.pkv[b][k][1], pj, ni)
+        if bad:
+            raise RuntimeError(f"the serve programs land the carried state differently ({len(bad)}): "
+                               + "; ".join(bad[:8]))
+
+    def session_kwargs(self):
+        dec, pf, bat, join = self.runs
+        kd, kb, kj = self.single.session_kwargs(), bat.session_kwargs(), join.session_kwargs()
+        if sorted(kd["pcmm"] or []) != sorted(kb["pcmm"] or []):
+            raise RuntimeError("the decode and batched twins encode the PCMM linears differently (shifts?)")
+        if kj.get("pcmm"):
+            raise RuntimeError("the join program has PCMM linears")
+        kw = dict(kd)
+        kw["programs"] = kd["programs"] + kb["programs"] + kj["programs"]
+        kw["regs"] = self.n_regs
+        kw["pool"] = max(kd["pool"], kb["pool"], kj["pool"])
+        kw["stc_cache"] = max(kd["stc_cache"], kb["stc_cache"])
+        writes = []
+        for run in (dec, pf, bat):
+            for b in sorted(run.ref):
+                p = run.progs[run.labels[b]]
+                writes += [(p, j, r) for _i, j, r in run.reg[b]["kv"]] + [(p, j, r) for j, r in run.reg[b]["out"]]
+        for b in range(self.n_layers):                    # the single programs write S into every lane's registers
+            for s in self.s_keys:
+                for run, kv in ((dec, self.dkv), (pf, self.pkv)):
+                    p = run.progs[run.labels[b]]
+                    writes += [(p, kv[b][s][1], self.lane_reg(b, s, c)) for c in range(self.K)]
+        pj = join.progs[join.labels[0]]
+        writes += [(pj, jo, self.bkv[b][k][2]) for b, k, _li, _ni, jo in self.join_map()]
+        kw["reg_levels"] = register_levels(self.n_regs, writes)
+        pairs = {(run.al[(lab, nm)], int(lv)) for run in self.runs for lab, p in run.progs.items()
+                 for nm, lv, _d, f in p.pt_refs if f not in ("stream", "diag")}
+        kw["pt_levels"] = [lv for _a, lv in sorted(pairs)]
+        kw["pt_slots"] = len(kw["pt_levels"]) + 8
+        kw["pt_rows"] = max(kd.get("pt_rows") or 0, kb.get("pt_rows") or 0, kj.get("pt_rows") or 0)
+        return kw
+
+    def setup(self, dec_rows, pf_chunks, b_passes, j_rows):
+        from perseus import _pc
+        from perseus.impl.ops import FheOps
+        t0 = time.time()
+        self.prepare(dec_rows, pf_chunks, b_passes, j_rows)
+        kw = self.session_kwargs()
+        for run in self.runs:
+            run.rot_keys = plan_rot_scope(run.plan_dir, [run.progs[run.labels[b]] for b in sorted(run.ref)],
+                                          run.dyn_rot)
+        sess = self.dec.open_session(kw)
+        for run in self.runs:
+            run.sess, run.store = sess, sess.pt_store
+            for b in sorted(run.ref):
+                run.progs[run.labels[b]].bind(sess, run.store)
+        sess.complete_setup()
+        for run in self.runs:
+            run.fhe, run._pt_vals = sess.fhe, {}
+            run.ops = FheOps(sess.fhe, _pc, run.model.rt.ops.unit)
+            run.static = True
+        for name, lin in self.dec.model.linears().items():
+            sess.pcmm_upload(name, np.ascontiguousarray(lin.Wd, dtype=np.int8).tobytes())
+        items = {}
+        for run in self.runs:
+            for k, v in run.pt_items().items():
+                items.setdefault(k, v)
+        n = int(self.dec.store.stage([(nm, lv, v) for (nm, lv), v in items.items()]))
+        self.sess, self.setup_s = sess, time.time() - t0
+        self.log(f"[serve] one session: {len(kw['programs'])} programs (decode + prefill T = {self.T} + batched "
+                 f"K = {self.K} + join), {self.n_regs} registers, {n} plaintext slots, rotation keys "
+                 f"{[run.rot_keys for run in self.runs]}; setup {self.setup_s:.1f} s")
+        self.log("[serve] " + sess.mem_report.replace("\n", " | "))
+        return self
+
+    def close(self):
+        self.dec.close()
+
+
+class DeviceServer:
+    """``serve.Server``'s operations on the device (``serve_loop`` drives it). ``src`` says where each batched state
+    input comes from: a register, or an encryption of the public prefix state (the start, and a lane after a leave).
+    ``Program.run`` copies an input Ct into its slab, so ONE encryption per (block, state key, compiled meta) serves
+    every program and every lane that reads that value at that meta: the decode and prefill programs' first pass, every
+    lane's S, the lane-form carries at the start (all lanes equal) and the join's natural-form input on a leave
+    (``prefix``: 4 x blocks ciphertexts at width <= 1,024 instead of one per input). Untimed: the prefix is public."""
+
+    def __init__(self, sr: Rwkv7ServeRun, state, log=print):
+        from .serve import new_carry_rows
+        self.sr, self.log = sr, log
+        dec, pf, bat, join = sr.runs
+        self.enc = {}
+        self.kv_dec, self.kv_pf, self.kv_bat = (self._prefix(run, state) for run in (dec, pf, bat))
+        pj = join.progs[join.labels[0]]
+        rows = new_carry_rows(join.model.L, sr.n_layers, state)
+        self.new_prefix = {(b, k): self._enc(join, pj, b, k, ni, rows[(b, k)]) for b, k, _li, ni, _jo in sr.join_map()}
+        self.levels = {}
+        self.log(f"[serve] the public prefix state: {len(self.enc)} encryptions")
+        self.reset()
+
+    def _enc(self, run, p, b, base, i, rows):
+        key = (b, base, tuple(p.inputs[i][1:4]))
+        if key not in self.enc:
+            self.enc[key] = run.encrypt_input(rows, p, i, f"prefix b{b} {base}")[0]
+        return self.enc[key]
+
+    def _prefix(self, run, state) -> dict:
+        """``{block: {input position: Ct}}`` of ``run``'s carried inputs, the public prefix state (``state_cts``'s
+        values, shared through ``enc``)."""
+        names, rows = run.model.state_names(), run.model.state_rows(state)
+        out = {}
+        for b in range(self.sr.n_layers):
+            p = run.progs[run.labels[b]]
+            for i, _j, _r in run.reg[b]["kv"]:
+                key = _state_key(run, b, i)
+                base = re.sub(r"c\d+$", "", key)                  # s0c3 -> s0: every lane holds the same value
+                out.setdefault(b, {})[i] = self._enc(run, p, b, base, i, rows[b][names.index(key)])
+        return out
+
+    def reset(self):
+        """Every lane at the public prefix state (the batched inputs from their encryptions)."""
+        self.src = {(b, k): self.kv_bat[b][i] for b in range(self.sr.n_layers) for k, (i, _j, _r) in self.sr.bkv[b].items()}
+
+    def _reply(self, run, regs, T=None):
+        vals, level = run.decrypt_regs(regs)
+        self.levels[run] = level
+        L = run.model.L
+        return L.decode_lanes_sh(vals, T) if T else L.decode_sh(vals)
+
+    def prefill(self, c, rows, first):
+        self.sr.bind_lane(c)
+        regs = self.sr.single.prefill(rows, kv_cts=self.kv_pf if first else None)
+        return self._reply(self.sr.pf, regs, len(rows)), None
+
+    def decode(self, c, row, first):
+        sr = self.sr
+        sr.bind_lane(c)
+        dec = sr.dec
+        nb = dec.rec.n_layers + 1
+        for b in range(nb):
+            xs = dec.input_ct(0, [row], dec.progs[dec.labels[0]]) if b == 0 else dec.out_regs(b - 1)
+            dec.run_stage(b, 1, xs, self.kv_dec if first else None)
+        return self._reply(dec, dec.out_regs(nb - 1)), None
+
+    def _join(self, lanes, new):
+        sr = self.sr
+        join = sr.join
+        p = join.progs[join.labels[0]]
+        join.stage_masks(lanes)
+        ins, outs = [None] * len(p.inputs), []
+        for b, k, li, ni, jo in sr.join_map():
+            r = sr.bkv[b][k][2]
+            ins[li] = self.src[(b, k)]
+            ins[ni] = new(b, k)
+            outs.append((jo, r))
+            self.src[(b, k)] = r
+        p.run(ins, outs)
+
+    def join(self, c):
+        sr = self.sr
+        self._join([c], lambda b, k: sr.dkv[b][k][2])          # the single programs' natural-form carry registers
+        for b in range(sr.n_layers):
+            for s in sr.s_keys:
+                self.src[(b, f"{s}c{c}")] = sr.lane_reg(b, s, c)   # written by the single programs: the hand-over
+
+    def leave(self, lanes):
+        sr = self.sr
+        for c in lanes:
+            for b in range(sr.n_layers):
+                for s in sr.s_keys:
+                    i = sr.bkv[b][f"{s}c{c}"][0]
+                    self.src[(b, f"{s}c{c}")] = self.kv_bat[b][i]
+        self._join(list(lanes), lambda b, k: self.new_prefix[(b, k)])
+
+    def batch(self, rows):
+        sr = self.sr
+        bat = sr.bat
+        nb = bat.rec.n_layers + 1
+        for b in range(nb):
+            p = bat.progs[bat.labels[b]]
+            xs = bat.input_ct(0, [np.asarray(rows)], p) if b == 0 else bat.out_regs(b - 1)
+            ins = [None] * len(p.inputs)
+            for i, x in zip(bat.zin[b], xs):
+                ins[i] = x
+            writes = []
+            for k, (i, j, r) in sr.bkv.get(b, {}).items():
+                ins[i] = self.src[(b, k)]
+                writes.append((j, r))
+                self.src[(b, k)] = r
+            p.run(ins, writes + list(bat.reg[b]["out"]))
+        vals, level = bat.decrypt_regs(bat.out_regs(nb - 1))
+        self.levels[bat] = level
+        return bat.model.L.decode_lanes_sh(vals, self.sr.K), None
+
+
+class TeeServer:
+    """The device server with the circuit's numpy mirror in lockstep (the same tokens): each call returns the
+    device's hidden and the mirror's (``hidden_relErrRms_vs_mirror``)."""
+
+    def __init__(self, dev, mirror):
+        self.dev, self.mir = dev, mirror
+
+    def prefill(self, c, rows, first):
+        return self.dev.prefill(c, rows, first)[0], self.mir.prefill(c, rows, first)[0]
+
+    def decode(self, c, row, first):
+        return self.dev.decode(c, row, first)[0], self.mir.decode(c, row, first)[0]
+
+    def join(self, c):
+        self.dev.join(c)
+        self.mir.join(c)
+
+    def leave(self, lanes):
+        self.dev.leave(lanes)
+        self.mir.leave(lanes)
+
+    def batch(self, rows):
+        return self.dev.batch(rows)[0], self.mir.batch(rows)[0]
+
+
+def main_serve(a) -> int:
+    """``--serve FILE``: continuous batching (SERVE_DESIGN.md). Conversations arrive at batched passes (FILE rows
+    ``<pass> <prompt>``); an arrival is prefilled in single-conversation mode while the batch waits (floor(n / T)
+    passes of ``--prefill-chunk`` T, decode steps for the remainder), joined to a free lane of the ``--batch`` K pass,
+    generates ``--generate`` tokens there and leaves (its lane back to the public prefix state). Plans: ``--plan``
+    (decode), ``--pf-plan``, ``--b-plan`` (batched, lane carries), ``--join-plan`` (``run_capture --join``), one
+    shifts file. Every conversation's every position is scored like the decode runner's (top-1 against its own poly
+    model, logits relErrRms, hidden vs the circuit's numpy mirror run on the same schedule)."""
+    from perseus import _pc
+    from perseus.examples.fhe_ssm.run_planned import session_config
+
+    from .run_capture import batch_probe, join_probe
+    from .serve import MirrorBackend, Server, idle_token, make_join, read_arrivals, serve_loop
+    K, T = int(a.batch), int(a.prefill_chunk)
+    if K < 2 or not (a.b_plan and a.join_plan and a.prefix):
+        raise SystemExit("--serve needs --batch K >= 2, --b-plan, --join-plan and a public prefix (--prefix >= 1)")
+    if T and not a.pf_plan:
+        raise SystemExit("--serve with --prefill-chunk T needs --pf-plan")
+    if not T:
+        raise SystemExit("--serve needs --prefill-chunk T (the prefill programs share the session; T >= 1)")
+    if a.batch_carry != "lane":
+        raise SystemExit("--serve joins lane-form carries: --batch-carry lane")
+    t_all = time.time()
+    P, co, shifts = common.load(a)
+    tok = common.tokenizer(a.harness, a.vocab)
+    if tok is None:
+        raise SystemExit("--serve needs --harness (the tokenizer)")
+    rows_in = read_arrivals(a.serve)
+    all_ids = [tok.encode(s) for _p, s in rows_in]
+    pre = all_ids[0][: a.prefix]
+    if any(ids[: a.prefix] != pre for ids in all_ids):
+        raise SystemExit(f"the prompts do not share the public prefix ids {pre}")
+    arrivals = [(p, ids[a.prefix:]) for (p, _s), ids in zip(rows_in, all_ids)]
+    if any(not ids for _p, ids in arrivals):
+        raise SystemExit("an empty prompt (nothing after the prefix)")
+    rf, st = common.prefix_state(P, a.coeffs, all_ids[0], a.prefix)
+    head_model = rf
+    kw = dict(fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts, **model_kw(a))
+    _f1, _i1, dm = make_model(P, co, capture=True, **kw)
+    _f2, _i2, pm = make_model(P, co, capture=True, chunk=T, **kw)
+    _f3, _i3, bm = make_model(P, co, capture=True, batch=K, batch_carry="lane", batch_hoist=a.batch_hoist,
+                              prefill_keys=T, **kw)
+    for m in (dm, pm, bm):
+        m.init_state = st
+    _f4, _i4, jm = make_join(P, K, capture=True, lanes=a.lanes)
+    cfg = session_config(a.plan)
+    keys = _pc.KeySource.generate([], conj=True, layout="packed")
+    bundle, client = resolve_keys(a) if a.keyspec is None else (None, None)
+    labels = [f"block_{b}" for b in range(dm.n_layers + 1)]
+    work = a.work_dir or a.out + ".work"
+    cf_map = None
+    if a.pcmm_cf_table:
+        from perseus.examples.fhe_ssm import pcmm_cf_table
+        cf_map = pcmm_cf_table.load(a.pcmm_cf_table)
+    lever = dict(schedule=a.schedule, pcmm_cf_map=cf_map, bundle=bundle, client=client, pcmm_cf=a.pcmm_cf,
+                 pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool)
+    dec = Rwkv7PlannedRun(Recorder(dm, dm.n_layers), a.plan, cfg, labels, keys, model=dm, work_dir=work, **lever)
+    pf = Rwkv7PlannedRun(Recorder(pm, pm.n_layers), a.pf_plan, cfg, labels, keys, model=pm, work_dir=work + ".pf",
+                         **lever)
+    bat = Rwkv7BatchedRun(Recorder(bm, bm.n_layers), a.b_plan, cfg, labels, keys, model=bm, work_dir=work + ".b",
+                          **lever)
+    join = Rwkv7JoinRun(Recorder(jm, 0), a.join_plan, cfg, ["block_0"], keys, model=jm, work_dir=work + ".j",
+                        **lever)
+    sr = Rwkv7ServeRun(dec, pf, bat, join, T, K)
+    try:
+        calib = common.token_ids(a, common.CALIB_TEXT)
+    except SystemExit:
+        calib = []
+    public = probe_rows(P, calib, pre)
+    long_ids = common.token_ids(a, common.CALIB_TEXT_LONG)[a.prefix:]
+    pf_public = [[P.emb[t] for t in long_ids[i * T:(i + 1) * T]] for i in range(2)]
+    b_public, _bt = batch_probe(P, long_ids, K, 2)
+    j_rows = join_probe(P, a.coeffs, a, jm.L, jm.n_layers)
+    probes = (public, pf_public, b_public, [j_rows, j_rows])
+    if a.keyspec is not None:
+        sr.prepare(*probes)
+        return write_keyspec(a.keyspec, cfg, keys, sr.session_kwargs(), bm)
+    binfo = check_bundle(bundle, cfg, bm) if bundle is not None else None
+    out = open(a.out, "w")
+
+    def emit(rec):
+        out.write(json.dumps(rec) + "\n")
+        out.flush()
+        print(json.dumps(rec), flush=True)
+    t0 = time.time()
+    sr.setup(*probes)
+    setup_s = time.time() - t0
+    dev = DeviceServer(sr, st)
+    progs = {f"{pre_}{lab}": p for pre_, run in (("", dec), ("pf_", pf), ("b_", bat), ("join_", join))
+             for lab, p in run.progs.items()}
+    emit({"kind": "header", "driver": "perseus.examples.rwkv7.run_planned --serve", **keys_header(dec, binfo),
+          "width": P.C, "shards": dm.L.S, "lanes": dm.L.t, "lora": dm.W[0].lora, "shard_land": dm.shard_land,
+          "blocks": dm.n_layers, "batch": K, "prefill_chunk": T, "generate": a.generate, "serve": a.serve,
+          "arrivals": [[p, ids] for p, ids in arrivals], "prefix": pre, "plan": a.plan, "pf_plan": a.pf_plan,
+          "b_plan": a.b_plan, "join_plan": a.join_plan, "pcmm_cf": a.pcmm_cf, "wbits": a.wbits,
+          "schedule": a.schedule, "pcmm_cf_table": a.pcmm_cf_table, "pool": a.pool, "stc_cache": a.stc_cache,
+          "fuse_l1": a.fuse_l1, "shifts": a.shifts, "setup_s": round(setup_s, 1), "registers": sr.n_regs,
+          "programs": {lab: {k: v for k in ("n_ops", "n_bootstraps", "n_launches", "n_finishes")
+                             if isinstance(v := getattr(p, k, None), (int, float))} for lab, p in progs.items()},
+          "mem_report_text": str(sr.sess.mem_report),
+          "pth_sha256": common.sha256(a.pth), "coeffs_sha256": common.sha256(a.coeffs),
+          "environment": common.environment()})
+    idle_tok = idle_token(P, a.coeffs, pre)
+    if not a.no_warmup:                       # untimed, public: every program once (CUDA graphs), then a clean start
+        t0 = time.time()
+        wl = [P.emb[t] for t in long_ids]
+        dev.prefill(0, pf_public[0], True)
+        dev.decode(0, wl[0], False)
+        dev.join(0)
+        dev.leave([0])
+        dev.batch(np.stack(wl[:K]))
+        dev.reset()
+        emit({"kind": "warmup", "seconds": round(time.time() - t0, 3)})
+    mir = Server(MirrorBackend(P, co, st, dm.L.n, K, wbits=a.wbits, lanes=a.lanes, lora=a.lora, fuse_l1=a.fuse_l1), K)
+    scorers = {}
+
+    def pick(h):
+        return int(np.argmax(head_model.head(np.asarray(h, dtype=np.float64))))
+
+    recs = []
+
+    def record(cv, i, token, hidden, aux, mode, lane):
+        if cv.k not in scorers:
+            scorers[cv.k] = common.Scorer(P, a, poly=common.prefix_state(P, a.coeffs, all_ids[cv.k], a.prefix)[0])
+        r = {"kind": "token", "mode": mode, "conv": cv.k, "lane": lane, "index": i,
+             "phase": "prompt" if i < len(cv.prompt) else "generate",
+             **scorers[cv.k].score(a.prefix + i, token, hidden),
+             "hidden_relErrRms_vs_mirror": common.rel_rms(hidden, aux) if aux is not None else None}
+        recs.append(r)
+        emit(r)
+    events = []
+
+    def ev(e):
+        events.append(e)
+        emit(e)
+    t_loop = time.time()
+    convs, _idle = serve_loop(TeeServer(dev, mir), arrivals, K=K, T=T, generate=a.generate, emb=P.emb, pick=pick,
+                              idle_token=idle_tok, record=record, emit=ev)
+    loop_s = time.time() - t_loop
+    by = {k: [e["seconds"] for e in events if e["kind"] == k] for k in ("pass", "prefill", "decode", "join", "leave")}
+    gen = [r for r in recs if r["phase"] == "generate"]
+    emit({"kind": "summary", "batch": K, "prefill_chunk": T, "conversations": len(convs), "tokens": len(recs),
+          "top1_agree": sum(r["top1_agree"] for r in recs),
+          "top1_agree_per_conv": [sum(r["top1_agree"] for r in recs if r["conv"] == cv.k) for cv in convs],
+          "tokens_per_conv": [len(cv.hidden) for cv in convs],
+          "lanes": [[cv.k, cv.lane, cv.arrival, cv.joined, cv.left] for cv in convs],
+          "generated_ids": [cv.toks[len(cv.prompt):] for cv in convs],
+          "poly_sites_out_of_range_tokens": [(r["conv"], r["mode"], r["pos"], r["poly_sites_out_of_range"])
+                                             for r in recs if r["poly_sites_out_of_range"]],
+          "logits_relErrRms_max": max(r["logits_relErrRms"] for r in recs),
+          "logits_relErrRms_median": float(np.median([r["logits_relErrRms"] for r in recs])),
+          "hidden_relErrRms_vs_mirror_max": max(r["hidden_relErrRms_vs_mirror"] for r in recs),
+          "passes": len(by["pass"]), "seconds_per_pass_median": float(np.median(by["pass"])) if by["pass"] else None,
+          "active_lanes_mean": float(np.mean([e["active"] for e in events if e["kind"] == "pass"])) if by["pass"] else None,
+          "prefill_passes": len(by["prefill"]), "prefill_seconds_median": float(np.median(by["prefill"])) if by["prefill"] else None,
+          "decode_steps": len(by["decode"]), "decode_seconds_median": float(np.median(by["decode"])) if by["decode"] else None,
+          "joins": len(by["join"]), "join_seconds_median": float(np.median(by["join"])) if by["join"] else None,
+          "leave_runs": len(by["leave"]), "leave_seconds_median": float(np.median(by["leave"])) if by["leave"] else None,
+          "loop_s": round(loop_s, 1), "generated_tokens": len(gen),
+          "aggregate_generated_tokens_per_s": round(len(gen) / loop_s, 4) if loop_s else None,
+          "aggregate_tokens_per_s": round(len(recs) / loop_s, 4) if loop_s else None,
+          "setup_s": round(setup_s, 1), "wall_s": round(time.time() - t_all, 1),
+          "planned_stats": str(sr.sess.planned_stats())})
+    sr.close()
+    return 0
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     common.add_args(ap)
@@ -779,12 +1389,19 @@ def main(argv=None) -> int:
                     help="inproc: in-process keys (INSECURE: the session holds the secret; recorded insecure-inproc); "
                     "bundle: the client's bundle directory in $RWKV7_KEYS; DIR: that directory (keys.pckb + "
                     "client_secret.bin, from --keygen)")
+    ap.add_argument("--serve", default=None, metavar="FILE",
+                    help="continuous batching (SERVE_DESIGN.md): FILE rows '<arrival pass> <prompt>'; needs --batch K, "
+                    "--prefill-chunk T, --plan (decode), --pf-plan, --b-plan, --join-plan")
+    ap.add_argument("--b-plan", default=None, help="with --serve: the batched plan (run_capture --batch K)")
+    ap.add_argument("--join-plan", default=None, help="with --serve: the join plan (run_capture --join --batch K)")
     ap.add_argument("--keyspec", default=None, metavar="FILE",
                     help="write the session's key request (Session.key_manifest) for these plans and stop")
     argv = sys.argv[1:] if argv is None else list(argv)
     if "--keygen" in argv:
         return keygen_main(argv)
     a = ap.parse_args(argv)
+    if a.serve:
+        return main_serve(a)
     if a.batch > 1:
         if a.prefill_chunk:
             raise SystemExit("--batch and --prefill-chunk do not combine")

@@ -1,4 +1,4 @@
-# RWKV-7 under CKKS on `perseus.impl`: encrypted decode, prefill and batched decode, any RWKV-x070-World size
+# RWKV-7 under CKKS on `perseus.impl`: encrypted decode, prefill, batched decode and continuous batching, any RWKV-x070-World size
 
 `python/perseus/examples/rwkv7/` runs RWKV-7 (x070, `RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth`: 12 blocks, width
 768, 12 heads of 64, d_ffn 3,072) one token per step, every block on ciphertexts. The client decrypts the last
@@ -195,6 +195,23 @@ Planner, K = 32, block 0: **222 refreshes per pass**, against 32 × 31 = 992 for
 **47–60 s per pass**. That is 5.1–6.5× decode's aggregate throughput, at 4.9–6.3× its per-token latency
 (`BATCHED_DESIGN.md` §4; nothing has run on a GPU).
 
+## Continuous batching: prefill, then join the batch (`serve.py`, `SERVE_DESIGN.md`)
+
+`run_planned.py --serve FILE` serves a stream of conversations (FILE rows `<arrival pass><TAB><prompt>`) on ONE
+session holding four program sets: decode, prefill (`pf_block_<b>`), the K-lane batched pass (`b_block_<b>`) and the
+join (`join_block_0`). An arrival is read in single-conversation mode while the batch waits (⌊n/T⌋ prefill passes,
+decode steps for the remainder), then joins a free lane:
+- **state:** the single-conversation programs write `S_0, S_1` straight into the lane's registers (`s0c<c>`, `s1c<c>`):
+  a register hand-over, no server arithmetic;
+- **carries:** the join program overwrites lane c of the lane-form carries, `xa ← xa ⊙ (1 − m_c) + xa_new ⊙ m_c`, one
+  plaintext product per operand, one add, one refresh per carry (24 per join for the 0.1B); the masks are plaintext
+  inputs re-staged per join, so one program serves every lane.
+
+A conversation that has generated `--generate` tokens leaves: its S registers go back to an encryption of the public
+prefix state, its carries to the prefix carry through the same join program (all lanes leaving at one pass in one
+run; skipped when the lane is reused before the next pass). Idle lanes run from the prefix state on their own picks
+(in range). `prepare` refuses, by name, any hand-over whose (level, deg) differs between writer and reader.
+
 ## What is verified on the CPU (`tests/`, `python -m pytest python/perseus/examples/rwkv7/tests`)
 
 | test | what | result |
@@ -218,6 +235,10 @@ Planner, K = 32, block 0: **222 refreshes per pass**, against 32 × 31 = 992 for
 | `test_batched` (`session_prepare`, box only) | a K = 4 batched plan compiled, every conversation's state found as inputs | skipped here; `run_box.sh bcheck` |
 | `test_levers` | the CF table from this capture; `--schedule` reaches `Program.compile`; a PAIR=1 + fused-EvalMod plan (`--rwkv7-plan`) | covers all 11 linears (CF 2–3); siblings passed; `PC_BTS_PAIR=1 PC_EM_FUSE_RESCALE=1` on `runtime=` |
 | `test_anysize` | synthetic checkpoints (`synth.py`) at widths 768–4,096 in both layouts: the mirror vs the poly reference; at 2,048 the fake and recorder vs the mirror, prefill vs T decodes, batched vs K decodes; the 1-block capture + plan (`--rwkv7-heavy` for the 5–9 GB ones, one per process) | ANYSIZE_DESIGN.md §6 |
+| `test_serve` (mirror) | 5 conversations, K = 3 / 2 / 3 lanes, T = 4 / 1 / 0 (prefill + decode remainder, prefill only, decode only), arrivals at passes 0, 0, 0, 1, 9, 2 generated each: a queue, lane reuse, a 2-lane leave, a clock jump | every position of every conversation **bit-identical** to that conversation decoded alone; every idle segment identical to a fresh conversation from the prefix; a join onto the wrong lane and a leave without reset both break it |
+| `test_serve` (fake, recorder) | the same schedule (K = 3, T = 4) on the fake and the recorder | identical to the conversation decoded alone on a fresh fake; **top-1 36/36** against each conversation's poly model |
+| `test_serve` (`join_capture_and_plan`, `--rwkv7-plan`) | `run_capture --join` + plan | per carry 2 products, 1 add, 1 deliberate refresh; 12 blocks: 24 refreshes, 0 placed, landing 26 = the batched carries' |
+| `test_serve_session` | the serve session's CPU half on stand-ins: the hand-over register map, dense numbering, a landing mismatch in each direction, the device server's register flow (provenance), the join twin on the recorder, `--serve --keyspec` end to end with `Program.compile` stubbed | as named; `serve_session_prepare` (real plans) is box only: `run_box.sh scheck` |
 | `test_keys` | `--keys / --keyspec / --keygen` on stand-ins for the device `_pc`; the z-shard chain check | flag → key source, client-only encryption / decryption on a bundle run |
 
 The planner tests run with `--rwkv7-plan` (`--rwkv7-pf-t T`, `--rwkv7-pf-blocks N`, `--rwkv7-pf-dir DIR` keep the
@@ -266,7 +287,17 @@ BLOCKS=1 B_K=4 B_GENERATE=2 bash tools/rwkv7/run_box.sh b    # smoke: capture, p
 bash tools/rwkv7/run_box.sh b                                # 12 blocks, K = 32: --pool 192 --stc-cache 160
 LEVERS=best bash tools/rwkv7/run_box.sh b                    # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
 B_K=16 STC_CACHE_B=80 bash tools/rwkv7/run_box.sh b          # if K = 32 runs out of memory
+
+# continuous batching (SERVE_DESIGN.md; tools/rwkv7/serve_arrivals.txt: 8 conversations, 3 longer than one pass)
+B_K=4 bash tools/rwkv7/run_box.sh scheck                     # once: the serve session's CPU half (1 block, T = 4, K = 4)
+BLOCKS=1 B_K=4 S_GENERATE=2 bash tools/rwkv7/run_box.sh s    # smoke: every capture and plan, then serve
+B_K=4 bash tools/rwkv7/run_box.sh s                          # 12 blocks, K = 4, T = 32, 8 generated each
 ```
+
+`serve` writes `$OUT/serve4[_b1][_best].jsonl`: `"prefill"`, `"decode"`, `"join"`, `"leave"` and `"pass"` lines with
+seconds, one `"token"` line per conversation and position (`mode` prefill / decode / batch, `lane`, top-1 against that
+conversation's poly model, `hidden_relErrRms_vs_mirror` against the mirror run on the same schedule), and a summary
+(`lanes`: conversation, lane, arrival, join and leave pass; medians per event kind; aggregate tokens per second).
 
 `batch` writes `$OUT/batch32[_b1][_best].jsonl`:
 - `"kind": "pass"` lines (seconds per pass, conversations still active);

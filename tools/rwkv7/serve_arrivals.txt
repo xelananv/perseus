@@ -1,0 +1,11 @@
+# run_planned --serve: one conversation per line, "<arrival pass><TAB><prompt>" (\n escapes a newline; the public
+# prefix "\n\n" is prepended). A conversation that arrives while every lane is busy waits for one; with B_K = 4 the
+# eight rows below reuse lanes. Rows 0, 3 and 6 are longer than one T = 32 prefill pass.
+0	The Eiffel Tower is a wrought-iron lattice tower on the Champ de Mars in Paris, France. It is named after the engineer Gustave Eiffel, whose company designed and built the tower. It is
+0	The capital of Japan is
+0	User: A shop sells 3 pencils for 2 dollars. How much do 12 pencils cost? Answer with the number.\n\nAssistant:
+1	Photosynthesis is the process by which plants use sunlight, water and carbon dioxide to make food. The process takes place mainly in the leaves, inside small structures called chloroplasts, which
+2	Once upon a time, in a small village by the sea,
+4	The history of the Roman Empire begins with
+6	Water boils at a temperature of 100 degrees Celsius at sea level. At higher altitudes the air pressure is lower, so water boils at a lower temperature. This is why cooking pasta in the mountains
+9	A healthy breakfast usually includes

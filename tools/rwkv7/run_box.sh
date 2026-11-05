@@ -41,6 +41,21 @@
 #               position (top-1 vs that conversation's poly model) -> $OUT/batch$B_K$S.jsonl, summary line last
 #   b           capture, plan, capture_b, plan_b, batch
 #
+# Continuous batching (python/perseus/examples/rwkv7/SERVE_DESIGN.md): conversations arrive at batched passes
+# (S_FILE rows "<pass><TAB><prompt>"), are read by prefill (PF_T) and decode steps while the batch waits, join a free
+# lane of the B_K pass, generate S_GENERATE tokens there and leave (the lane back to the public prefix state). ONE
+# session holds the decode, prefill, batched and join programs; the decode, prefill and batched captures above are reused:
+#   capture_j   CPU only: run_capture --join --batch $B_K (every block's carries; no weights) -> $JCAP
+#   plan_j      make_plan.sh $JCAP -> $JPLAN (one deliberate refresh per carry, nothing placed)
+#   scheck      the serve session's CPU half on the device build (Program.compile of 1-block decode, T = 4 prefill,
+#               K = 4 batched and join plans; every hand-over must land where its reader reads): run it once
+#   serve       run_planned --serve $S_FILE: "prefill" / "decode" / "join" / "leave" / "pass" lines with seconds, one
+#               "token" line per conversation and position (top-1 vs its own poly model, hidden vs the mirror run on
+#               the same schedule) -> $OUT/serve$B_K$S.jsonl, summary line last
+#   s           capture, plan, capture_pf, plan_pf, capture_b, plan_b, capture_j, plan_j, serve
+#   Start with B_K=4 (and BLOCKS=1 for the smoke): a K = 32 batched pass alone peaked at 94.9 GB of the 97.9 GB card,
+#   and this session also holds the decode and prefill programs.
+#
 # Levers from the fhe_ssm stack (PREFILL_DESIGN.md §6), opt-in, on their own capture-free plan dirs:
 #   LEVERS=best   PAIR=1 (pairs of sibling real refreshes in one complex refresh) + PC_EM_FUSE_RESCALE=1 (the fused
 #                 EvalMod) on the plans' runtime= line, and --schedule siblings on the run
@@ -64,7 +79,8 @@
 # (calib | zero), PCMM_CF (6), TORCH_PY (crosscheck), RUN_EXTRA (more run_planned flags), RUN_TAG (suffix of the run's
 # record names: run_<tag>.jsonl), STC_CACHE (160), POOL (96;
 # run_pf 192), PF_T (32), PF_TEXT, PF_TOKENS (70), PF_GENERATE (4), LEVERS, CFTABLE, B_K (32), B_CARRY (lane |
-# decode), B_PROMPTS (tools/rwkv7/batch_prompts.txt), B_GENERATE (16), POOL_B (192), STC_CACHE_B ($STC_CACHE).
+# decode), B_PROMPTS (tools/rwkv7/batch_prompts.txt), B_GENERATE (16), POOL_B (192), STC_CACHE_B ($STC_CACHE),
+# S_FILE (tools/rwkv7/serve_arrivals.txt), S_GENERATE (8), POOL_S (256), STC_CACHE_S ($STC_CACHE).
 set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=$(git -C "$HERE" rev-parse --show-toplevel)
@@ -94,6 +110,9 @@ CFT=$OUT/pcmm_cf_table$S.json
 B_K=${B_K:-32}; B_CARRY=${B_CARRY:-lane}; B_PROMPTS=${B_PROMPTS:-$HERE/batch_prompts.txt}; B_GENERATE=${B_GENERATE:-16}
 BCAP=$OUT/cap_rwkv7_b$B_K${B_CARRY/lane/}$S
 BPLAN=$OUT/bootstrap_placements/plan_rwkv7_b$B_K${B_CARRY/lane/}$S$LV
+S_FILE=${S_FILE:-$HERE/serve_arrivals.txt}; S_GENERATE=${S_GENERATE:-8}
+JCAP=$OUT/cap_rwkv7_join$B_K$S
+JPLAN=$OUT/bootstrap_placements/plan_rwkv7_join$B_K$S$LV
 # the LANDING=high runtime switches (tools/fhe_ssm/run_gpu.sh CAPENV): PCMM needs the StC-first dense route
 CAPENV="FIDESLIB_BTS_STC_FIRST=2 FIDESLIB_BTS_STC_FIRST_ROUTES=dense FIDESLIB_BTS_STC_FIRST_CF=13 FIDESLIB_BTS_RAISE_DROP=512:1 AUTO_BTS_LEVEL=44"
 LORA=${LORA:-auto}; SHARD_LAND=${SHARD_LAND:-1}; KEYS=${KEYS:-inproc}; KEYMODE=${KEYMODE:-decode}; LANES=${LANES:-0}
@@ -176,7 +195,7 @@ cf_flags() {
     echo "--pcmm-cf-table $CFT"
 }
 
-keydir() { echo "$OUT/keys_$1$S$LV"; }   # keydir decode|pf|b
+keydir() { echo "$OUT/keys_$1$S$LV"; }   # keydir decode|pf|b|s
 
 keys_flag() {   # keys_flag decode|pf|b (need_keys has checked it in the calling shell)
     case "$KEYS" in
@@ -199,7 +218,8 @@ mode_flags() {   # the run_planned flags of a key mode (the same plans the run o
         decode) echo "--plan $PLAN --shifts $CAP/pcmm_shifts.json --ids $(ids)" ;;
         pf) echo "--plan $PLAN --pf-plan $PFPLAN --prefill-chunk $PF_T --shifts $CAP/pcmm_shifts.json --ids $(ids)" ;;
         b) echo "--plan $BPLAN --batch $B_K --batch-carry $B_CARRY --prompts $B_PROMPTS --shifts $CAP/pcmm_shifts.json" ;;
-        *) die "KEYMODE=$1: decode | pf | b" ;;
+        s) echo "--serve $S_FILE --plan $PLAN --pf-plan $PFPLAN --prefill-chunk $PF_T --b-plan $BPLAN --join-plan $JPLAN --batch $B_K --shifts $CAP/pcmm_shifts.json" ;;
+        *) die "KEYMODE=$1: decode | pf | b | s" ;;
     esac
 }
 
@@ -280,6 +300,47 @@ step_batch() {
     [ $rc = 0 ] || { tail -30 "$R.log"; die "batch failed ($R.log)"; }
 }
 
+step_capture_j() {
+    [ -f "$JCAP/capture_config.json" ] && { log "capture_j: reusing $JCAP"; return 0; }
+    log "capture_j K=$B_K -> $JCAP"
+    pyrun env CUDA_VISIBLE_DEVICES="" $CAPENV "$PY" -m perseus.examples.rwkv7.run_capture $COMMON \
+        --join --batch "$B_K" --out "$JCAP" > "$OUT/capture_j$B_K$S.log" 2>&1 \
+        || { tail -20 "$OUT/capture_j$B_K$S.log"; die "capture_j failed"; }
+    tail -2 "$OUT/capture_j$B_K$S.log" | tee -a "$OUT/session.log"
+}
+
+step_plan_j() { plan_one "$JCAP" "$JPLAN" "$OUT/plan_j$B_K$S$LV.log"; }
+
+step_scheck() {
+    pyrun env RWKV7_PTH="$PTH" RWKV7_COEFFS="$COEFFS" RWKV7_HARNESS="$HARNESS" $CAPENV \
+        "$PY" -m pytest -q -s -p no:warnings "$W/python/perseus/examples/rwkv7/tests/test_serve_session.py" \
+        -k serve_session_prepare --rwkv7-plan --rwkv7-b-dir "$OUT/scheck" > "$OUT/scheck.log" 2>&1 \
+        || { tail -30 "$OUT/scheck.log"; die "scheck failed ($OUT/scheck.log)"; }
+    grep -E "serve registers|passed|skipped" "$OUT/scheck.log" | tee -a "$OUT/session.log"
+    grep -q "1 passed" "$OUT/scheck.log" || die "scheck did not run (skipped?) — see $OUT/scheck.log"
+}
+
+step_serve() {
+    need_keys s
+    [ "$B_CARRY" = lane ] || die "serve joins lane-form carries: B_CARRY=lane"
+    for f in "$PLAN" "$PFPLAN" "$BPLAN" "$JPLAN"; do
+        [ -f "$f/PLAN_CMD.txt" ] || die "no plan $f (serve needs plan, plan_pf, plan_b, plan_j)"
+    done
+    [ -f "$S_FILE" ] || die "no arrivals file $S_FILE"
+    local busy; busy=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i "$GPU" 2>/dev/null)
+    [ -z "$busy" ] || log "WARNING: GPU $GPU has other processes ($busy): timings are not clean"
+    local R=$OUT/serve$B_K$S$LV${CFTABLE:+_cft}${RUN_TAG:+_$RUN_TAG}
+    log "serve: K=$B_K T=$PF_T, arrivals $S_FILE, $S_GENERATE generated each, pool ${POOL_S:-256}"
+    pyrun env CUDA_VISIBLE_DEVICES=$GPU $CAPENV "$PY" -m perseus.examples.rwkv7.run_planned $COMMON \
+        $(mode_flags s) --generate "$S_GENERATE" --pcmm-cf "$PCMM_CF" --schedule "$SCHED" $(cf_flags) \
+        --stc-cache "${STC_CACHE_S:-$STC_CACHE}" --pool "${POOL_S:-256}" $(keys_flag s) --out "$R.jsonl" ${RUN_EXTRA:-} \
+        > "$R.log" 2>&1
+    local rc=$?
+    grep -E '"kind": "(prefill|join|leave|pass|warmup)"' "$R.jsonl" 2>/dev/null | cut -c1-200 | tee -a "$OUT/session.log"
+    grep '"kind": "summary"' "$R.jsonl" 2>/dev/null | cut -c1-1500 | tee -a "$OUT/session.log"
+    [ $rc = 0 ] || { tail -30 "$R.log"; die "serve failed ($R.log)"; }
+}
+
 step_run() {
     need_keys decode
     [ -f "$PLAN/PLAN_CMD.txt" ] || die "no plan $PLAN (run the plan step)"
@@ -301,9 +362,12 @@ step_run() {
 cmd=${1:-all}
 case "$cmd" in
     build|check|crosscheck|capture|plan|run|capture_pf|plan_pf|pfcheck|run_pf|capture_b|plan_b|bcheck|batch|keyspec|keygen) "step_$cmd" ;;
+    capture_j|plan_j|scheck|serve) "step_$cmd" ;;
     all) step_build; step_check; step_crosscheck; step_capture; step_plan; step_run ;;
     pf) step_capture; step_plan; step_capture_pf; step_plan_pf; step_run_pf ;;
     b) step_capture; step_plan; step_capture_b; step_plan_b; step_batch ;;
+    s) step_capture; step_plan; step_capture_pf; step_plan_pf; step_capture_b; step_plan_b; step_capture_j; step_plan_j
+       step_serve ;;
     *) die "unknown step $cmd" ;;
 esac
 log "$cmd: done"
