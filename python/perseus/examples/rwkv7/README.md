@@ -89,6 +89,13 @@ zero state). The comparison model continues from the same state. On the texts te
 positions ≥ 1 after `"\n\n"` stay inside every Chebyshev interval. Newton sites still go somewhat out of range at
 later positions, but stay convergent.
 
+**The 1/√x sites' method is a property of the coefficients file**, not a switch: `newton` (a Chebyshev seed, the
+original fit), `newton_const` (P6, `ROBUST_NORMS.md`: the constant seed that converges for every input below 3× the
+widened top; the gate-3 files) or `newton_scaled` (the same seed, range and convergence region with per-step constants,
+about half the depth: `tools/rwkv7/convert_newton_scaled.py` converts a `newton_const` file; `tests/test_newton_scaled.py`;
+the speed-up map's T1, `results/rwkv7-fhe-20261104/SPEEDUP_MAP_20261105.md`). The port, the mirror (`ref.py`) and the
+harness evaluate all three.
+
 ## The layout (`layout.py`)
 
 Ring 2^16 gives 32,768 complex slots. The filled layout (PCMM's `reshape(1024, t)`) puts channel `c` of lane `l` at

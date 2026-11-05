@@ -73,12 +73,29 @@ Example, block 7 `att.gn_rsqrt` (0.1B): old interval [0.000984, 10.46] with 9 st
 That is +7 refreshes per token in block 0 (+50%). Block 0's new steps (11/21/14/10) are near the 0.1B means
 (12.1/15.4/17.3/11.9). Expect a similar +6 to +9 in other blocks, but only block 0 was planned.
 
-### The next lever (not built)
+### The next lever: `method: newton_scaled` (built 2026-11-05, default off; the speed-up map's T1)
 
-`perseus.impl.poly.inv_sqrt_newton_scaled` / `scaled_newton_steps` use the same constant seed, but give each step its
-own (a, b) constants. Each step then covers about 6.7× of range ratio instead of 2.25×: 8 steps instead of 14 at a
-ratio of 1e4, 10 instead of 20 at 1e6 (computed 2026-11-05 with `scaled_newton_steps(ratio, 1e-3)`). That roughly
-halves the added depth. Its behaviour between the widened top and 3× it needs the same check as above before use.
+`perseus.impl.poly.scaled_newton_steps` keeps the constant seed but gives each step its own (a, b): the first step is
+newton_const's (1.5, 0.5), with its zero at u = 3 (the same divergence bound), and every later step is the pair that
+maps the band of t = u y² onto the widest image that stays ≤ 1 (q peaks at exactly 1 inside the band), so one step covers
+about 6.7× of range ratio instead of 2.25×. Because every step keeps t ≤ 1, an input anywhere in (0, 3·scale) stays finite,
+positive and under-normalised at worst: the monotone-from-below argument above holds unchanged, and the accuracy range,
+pre-scale, eps and output convention are the newton_const site's own.
+
+- **Converter:** `tools/rwkv7/convert_newton_scaled.py --coeffs coeffs_final.json --out coeffs_final_sc.json` (every
+  non-1/√x site byte-equal; per site: max relative error ≤ tol on [lo, hi], finite / positive / from below on
+  (hi, 0.98·conv_hi), finite at 0). Site fields: `steps [[a, b], …]`, `n_steps`, `depth` = 1 + 2(n_steps − 1), plus
+  newton_const's range fields and `const_steps` / `const_depth`.
+- **Port:** `model.py Circuit.newton` (the affine map of u folded onto x; the d2 product order: one scalar level for
+  step 1, two levels per later step, the same shape as newton_const), `ref.py newton_scaled_rsqrt` (the mirror), the
+  harness's `rwkv7_model.py newton_scaled_eval` and `scan_ranges.py` (the gate and the scans accept the method).
+- **Depth, measured by the converter** (tol 1e-3, zero 3.0): 0.1B 48 sites, the four chains' mean depth per block
+  109.5 → 60.2 levels (ln1 23.2 → 13.5, kk 29.8 → 16.0, gn 33.7 → 17.3, ln2 22.8 → 13.3); 0.4B 96 sites, 107.8 → 58.7
+  (ln1 22.9 → 12.9, kk 30.2 → 15.9, gn 32.1 → 16.8, ln2 22.5 → 13.0). Max relative error over the accuracy ranges ≤ 9.5e-4
+  (`tests/test_newton_scaled.py`).
+- **Not yet done:** the gate (WikiText-103 / LAMBADA, clamped and unclamped, plus the full scans) on the converted
+  files, and any device run. The planner's refresh count on a 1-block decode capture is `test_newton_scaled.py::
+  test_plan_cost_const_vs_scaled` (`--rwkv7-plan`).
 
 ## What is built
 

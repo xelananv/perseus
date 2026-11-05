@@ -69,6 +69,18 @@ def newton_rsqrt(x, p, steps=None):
     return y * p["scale"] ** -0.5
 
 
+def newton_scaled_rsqrt(x, p):
+    """The converter's newton_scaled (tools/rwkv7/convert_newton_scaled.py): the constant seed, per-step (a, b):
+    y_1 = a_0 - b_0 u, then y <- a y - b u y^3 on u = (x + eps)/scale; the accuracy range and the convergence region
+    are newton_const's."""
+    u = (x + p["eps"]) / p["scale"]
+    a, b = p["steps"][0]
+    y = a - b * u
+    for a, b in p["steps"][1:]:
+        y = a * y - b * u * y * y * y
+    return y * p["scale"] ** -0.5
+
+
 def newton_const_rsqrt(x, p, steps=None):
     """The harness's newton_const (rsqrt_const.py, P6): Newton from the constant seed 1 on u = (x + eps)/scale;
     converges for every u in (0, 3), accurate to the site's tol on [lo, hi]."""
@@ -111,6 +123,8 @@ class Sites:
                 return newton_rsqrt(xx, s)
             if s.get("method") == "newton_const":
                 return newton_const_rsqrt(xx, s)
+            if s.get("method") == "newton_scaled":
+                return newton_scaled_rsqrt(xx, s)
             return cheb_eval(xx, s["coeffs"], lo, hi)
         return SITE_FUNCS[site_kind(name)](x)
 

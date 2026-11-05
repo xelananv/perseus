@@ -214,6 +214,19 @@ class Circuit:
         """y with y scale^-1/2 = 1/sqrt(xscale x + eps) (fit.py's Newton form, on the raw statistic x)."""
         ops, s = self.ops, self.coeffs[name]
         a, b0 = float(xscale) / s["scale"], s["eps"] / s["scale"]
+        if s.get("method") == "newton_scaled":
+            # per-step constants (tools/rwkv7/convert_newton_scaled.py; poly.scaled_newton_steps): the same constant
+            # seed, accuracy range and convergence region as newton_const, ~6.7x of range ratio per step instead of
+            # 2.25x. Step 1 is affine in u = a x + b0 (one scalar level); every later step y <- A y - B u y^3 in the
+            # d2 product order ((c y) y^2, c = -B u folded onto x: one scalar level, never deeper than y): two levels
+            if self.guard is not None:
+                self.guard(name, x, float(s["lo"]) / xscale, float(s["hi"]) / xscale)
+            (A, B), rest = s["steps"][0], s["steps"][1:]
+            y = ops.add(ops.mult(x, -B * a), A - B * b0)
+            for A, B in rest:
+                c = ops.add(ops.mult(x, -B * a), -B * b0)
+                y = ops.add(ops.mult(y, A), ops.mult(ops.mult(c, y), ops.square(y)))
+            return y
         if s.get("method") == "newton_const":
             # P6: constant seed 1 (ROBUST_NORMS.md). The guard judges the accuracy range [lo, hi] (x units of the
             # harness statistic, i.e. xscale x); the iteration itself converges on the wider (conv_lo, conv_hi).
