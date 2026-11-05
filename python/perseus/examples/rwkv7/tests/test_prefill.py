@@ -32,7 +32,7 @@ def _ids(n):
 def _states_close(a, b):
     errs = []
     for sa, sb in zip(a, b):
-        for x, y in zip([*sa.S, sa.xa, sa.xf], [*sb.S, sb.xa, sb.xf]):
+        for x, y in zip(sa.cts(), sb.cts()):
             errs.append(float(np.max(np.abs(np.asarray(x) - np.asarray(y)))))
     return max(errs)
 
@@ -63,7 +63,7 @@ def test_mirror_prefill_equals_token_by_token(params2, n_slots, T):  # noqa: F81
         bad.reset(st)
         hb, _ = bad.prefill([params2.emb[t] for t in chunk[::-1]])      # the chunk reversed: lanes matter
         assert rel_rms(hb[-1], hs[-1]) > 1e-3
-    assert np.abs(z.imag.reshape(1024, -1)[768:]).max() < 1e-9
+    assert np.abs(z[0].imag.reshape(1024, -1)[768:]).max() < 1e-9
 
 
 def _fake_run(params2, co, ids, T, capture):  # noqa: F811

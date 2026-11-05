@@ -22,6 +22,9 @@ def pytest_addoption(parser):
     parser.addoption("--rwkv7-b-planenv", default=None, help="extra plan env, e.g. 'PAIR=1'")
     parser.addoption("--rwkv7-b-blocks", default=None, help="blocks in the batched capture test (default 1)")
     parser.addoption("--rwkv7-coeffs", default=None, help="the coefficients JSON (as RWKV7_COEFFS; P6: the _nc file)")
+    parser.addoption("--rwkv7-heavy", action="store_true",
+                     help="also the any-size checks that hold 5-9 GB (widths 2,560 / 4,096, the 2,048 fakes, K = 32): "
+                     "run them one test per process (RWKV7_HEAVY=1)")
 
 
 def pytest_configure(config):
@@ -33,7 +36,7 @@ def pytest_configure(config):
                      ("rwkv7_pf_blocks", "RWKV7_PF_BLOCKS"), ("rwkv7_b_k", "RWKV7_B_K"),
                      ("rwkv7_b_carry", "RWKV7_B_CARRY"), ("rwkv7_b_hoist", "RWKV7_B_HOIST"),
                      ("rwkv7_b_dir", "RWKV7_B_DIR"), ("rwkv7_b_planenv", "RWKV7_B_PLANENV"),
-                     ("rwkv7_b_blocks", "RWKV7_B_BLOCKS")):
+                     ("rwkv7_b_blocks", "RWKV7_B_BLOCKS"), ("rwkv7_heavy", "RWKV7_HEAVY")):
         v = config.getoption(opt, default=None)
         if v:
             os.environ[env] = "1" if v is True else str(v)

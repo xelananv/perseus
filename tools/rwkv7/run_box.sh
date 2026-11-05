@@ -1,5 +1,6 @@
 #!/bin/bash
-# run_box.sh — RWKV-7 0.1B encrypted decode on the GPU box (checkout /root/perseus-rwkv7, branch fhe-ssm-rwkv7).
+# run_box.sh — RWKV-7 (any RWKV-x070-World size) encrypted decode on the GPU box (checkout /root/perseus-rwkv7).
+# tools/rwkv7/size_pipeline.sh drives it for a new size (calibrate, fit, scan, gate, then these steps).
 #
 #   bash tools/rwkv7/run_box.sh all          build, check, crosscheck, capture, plan, run (BLOCKS unset = 12 blocks)
 #   BLOCKS=1 bash tools/rwkv7/run_box.sh all one block + the tail (the smoke: same steps, own directories)
@@ -45,9 +46,23 @@
 #                 EvalMod) on the plans' runtime= line, and --schedule siblings on the run
 #   CFTABLE=1     --pcmm-cf-table from the capture (fhe_ssm/pcmm_cf_table.py); A/B it against PCMM_CF first
 #
+# Keys (run_planned --keys; the 11-02 fhe_ssm publication path): KEYS=inproc (default: the session generates every key
+# and holds the secret; recorded insecure-inproc) | bundle (the client's bundle $OUT/keys_<mode>$S$LV, made below) | DIR.
+#   keyspec     run_planned --keyspec for KEYMODE (decode | pf | b): the session's key request for exactly the plans
+#               that run -> $OUT/keys_<mode>$S$LV/keyspec.json (CPU half + Session.key_manifest; device build)
+#   keygen      the client role: run_planned --keygen DIR --keyspec-file DIR/keyspec.json -> DIR/keys.pckb and
+#               DIR/client_secret.bin (a fresh secret; the session never sees it); then KEYS=bundle for run / run_pf /
+#               batch: the session opens with Session.from_bundle (has_secret false in the header), the client object
+#               encrypts every input and decrypts every reply as wire frames
+#
+# Any size (ANYSIZE_DESIGN.md): every shape is read from PTH. LANES (0 = one ciphertext per vector: t = 32 up to width
+# 1,024, 16 up to 2,048, 8 up to 4,096 | 32 = channel shards of 1,024 | 16 | 8), LORA (auto | fold | split), SHARD_LAND
+# (1 | 0: --no-shard-land) pass through to every step; B_K and PF_T must be <= the lanes.
+#
 # Environment: OUT (default /root/out_rwkv7), PTH, COEFFS, HARNESS (defaults: the brief's paths), TOKENS (12),
 # BLOCKS (unset = all 12), GPU (0), TEXT (the prompt; must start with "\n\n", the public prefix), PCMM_SHIFT
-# (calib | zero), PCMM_CF (6), TORCH_PY (crosscheck), RUN_EXTRA (more run_planned flags), STC_CACHE (160), POOL (96;
+# (calib | zero), PCMM_CF (6), TORCH_PY (crosscheck), RUN_EXTRA (more run_planned flags), RUN_TAG (suffix of the run's
+# record names: run_<tag>.jsonl), STC_CACHE (160), POOL (96;
 # run_pf 192), PF_T (32), PF_TEXT, PF_TOKENS (70), PF_GENERATE (4), LEVERS, CFTABLE, B_K (32), B_CARRY (lane |
 # decode), B_PROMPTS (tools/rwkv7/batch_prompts.txt), B_GENERATE (16), POOL_B (192), STC_CACHE_B ($STC_CACHE).
 set -uo pipefail
@@ -81,7 +96,9 @@ BCAP=$OUT/cap_rwkv7_b$B_K${B_CARRY/lane/}$S
 BPLAN=$OUT/bootstrap_placements/plan_rwkv7_b$B_K${B_CARRY/lane/}$S$LV
 # the LANDING=high runtime switches (tools/fhe_ssm/run_gpu.sh CAPENV): PCMM needs the StC-first dense route
 CAPENV="FIDESLIB_BTS_STC_FIRST=2 FIDESLIB_BTS_STC_FIRST_ROUTES=dense FIDESLIB_BTS_STC_FIRST_CF=13 FIDESLIB_BTS_RAISE_DROP=512:1 AUTO_BTS_LEVEL=44"
-COMMON="--pth $PTH --coeffs $COEFFS --harness $HARNESS ${BLOCKS:+--blocks $BLOCKS}"
+LORA=${LORA:-auto}; SHARD_LAND=${SHARD_LAND:-1}; KEYS=${KEYS:-inproc}; KEYMODE=${KEYMODE:-decode}; LANES=${LANES:-0}
+COMMON="--pth $PTH --coeffs $COEFFS --harness $HARNESS ${BLOCKS:+--blocks $BLOCKS} --lora $LORA --lanes $LANES"
+[ "$SHARD_LAND" = 1 ] || COMMON="$COMMON --no-shard-land"
 mkdir -p "$OUT"
 log() { echo "[rwkv7 $(date -u +%H:%M:%S)] $*" | tee -a "$OUT/session.log"; }
 die() { log "STOP: $*"; exit 1; }
@@ -159,19 +176,65 @@ cf_flags() {
     echo "--pcmm-cf-table $CFT"
 }
 
+keydir() { echo "$OUT/keys_$1$S$LV"; }   # keydir decode|pf|b
+
+keys_flag() {   # keys_flag decode|pf|b (need_keys has checked it in the calling shell)
+    case "$KEYS" in
+        inproc) echo "--keys inproc" ;;
+        bundle) echo "--keys $(keydir "$1")" ;;
+        *) echo "--keys $KEYS" ;;
+    esac
+}
+
+need_keys() {   # stops here (not inside a $(...)) when the bundle is missing
+    case "$KEYS" in
+        inproc) log "keys: inproc (INSECURE: the session holds the secret; recorded insecure-inproc)" ;;
+        bundle) [ -f "$(keydir "$1")/keys.pckb" ] || die "KEYS=bundle: no $(keydir "$1")/keys.pckb (KEYMODE=$1 keyspec, keygen)" ;;
+        *) [ -f "$KEYS/keys.pckb" ] || die "KEYS=$KEYS: no keys.pckb there" ;;
+    esac
+}
+
+mode_flags() {   # the run_planned flags of a key mode (the same plans the run opens)
+    case "$1" in
+        decode) echo "--plan $PLAN --shifts $CAP/pcmm_shifts.json --ids $(ids)" ;;
+        pf) echo "--plan $PLAN --pf-plan $PFPLAN --prefill-chunk $PF_T --shifts $CAP/pcmm_shifts.json --ids $(ids)" ;;
+        b) echo "--plan $BPLAN --batch $B_K --batch-carry $B_CARRY --prompts $B_PROMPTS --shifts $CAP/pcmm_shifts.json" ;;
+        *) die "KEYMODE=$1: decode | pf | b" ;;
+    esac
+}
+
+step_keyspec() {
+    local d; d=$(keydir "$KEYMODE"); mkdir -p "$d"
+    log "keyspec $KEYMODE -> $d/keyspec.json"
+    pyrun env CUDA_VISIBLE_DEVICES=$GPU $CAPENV "$PY" -m perseus.examples.rwkv7.run_planned $COMMON $(mode_flags "$KEYMODE") \
+        --schedule "$SCHED" --pcmm-cf "$PCMM_CF" --stc-cache "$STC_CACHE" --pool "$POOL" --keyspec "$d/keyspec.json" \
+        --out "$d/keyspec_run.jsonl" > "$d/keyspec.log" 2>&1 || { tail -20 "$d/keyspec.log"; die "keyspec failed ($d/keyspec.log)"; }
+    tail -2 "$d/keyspec.log" | tee -a "$OUT/session.log"
+}
+
+step_keygen() {
+    local d; d=$(keydir "$KEYMODE")
+    [ -f "$d/keyspec.json" ] || die "no $d/keyspec.json (run keyspec first, KEYMODE=$KEYMODE)"
+    log "keygen $KEYMODE (the client role) -> $d/keys.pckb"
+    pyrun env CUDA_VISIBLE_DEVICES=$GPU "$PY" -m perseus.examples.rwkv7.run_planned --keygen "$d" --keyspec-file "$d/keyspec.json" \
+        --threads "${KEYGEN_THREADS:-8}" > "$d/keygen.log" 2>&1 || { tail -20 "$d/keygen.log"; die "keygen failed ($d/keygen.log)"; }
+    tail -1 "$d/keygen.log" | cut -c1-400 | tee -a "$OUT/session.log"
+}
+
 step_run_pf() {
+    need_keys pf
     [ -f "$PLAN/PLAN_CMD.txt" ] || die "no plan $PLAN"
     [ -f "$PFPLAN/PLAN_CMD.txt" ] || die "no prefill plan $PFPLAN (run capture_pf and plan_pf)"
     local busy; busy=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i "$GPU" 2>/dev/null)
     [ -z "$busy" ] || log "WARNING: GPU $GPU has other processes ($busy): timings are not clean"
     local I; I=$(pyrun "$PY" -m perseus.examples.rwkv7.run_ids --harness "$HARNESS" --text "$PF_TEXT" --n $((PF_TOKENS + 1))) \
         || die "tokenizer failed"
-    local R=$OUT/run_pf$PF_T$S$LV${CFTABLE:+_cft}
+    local R=$OUT/run_pf$PF_T$S$LV${CFTABLE:+_cft}${RUN_TAG:+_$RUN_TAG}
     log "run_pf: T=$PF_T, $PF_TOKENS prompt tokens after the prefix + $PF_GENERATE generated, ids $I"
     pyrun env CUDA_VISIBLE_DEVICES=$GPU $CAPENV "$PY" -m perseus.examples.rwkv7.run_planned $COMMON --ids "$I" \
         --tokens "$PF_TOKENS" --generate "$PF_GENERATE" --plan "$PLAN" --shifts "$CAP/pcmm_shifts.json" \
         --prefill-chunk "$PF_T" --pf-plan "$PFPLAN" --schedule "$SCHED" $(cf_flags) --pcmm-cf "$PCMM_CF" \
-        --stc-cache "$STC_CACHE" --pool "${POOL_PF:-192}" --out "$R.jsonl" ${RUN_EXTRA:-} > "$R.log" 2>&1
+        --stc-cache "$STC_CACHE" --pool "${POOL_PF:-192}" $(keys_flag pf) --out "$R.jsonl" ${RUN_EXTRA:-} > "$R.log" 2>&1
     local rc=$?
     grep -E '"kind": "(prefill|warmup)"' "$R.jsonl" 2>/dev/null | tee -a "$OUT/session.log"
     grep '"kind": "summary"' "$R.jsonl" 2>/dev/null | cut -c1-900 | tee -a "$OUT/session.log"
@@ -200,16 +263,17 @@ step_bcheck() {
 }
 
 step_batch() {
+    need_keys b
     [ -f "$BPLAN/PLAN_CMD.txt" ] || die "no batched plan $BPLAN (run capture_b and plan_b)"
     [ -f "$B_PROMPTS" ] || die "no prompts file $B_PROMPTS"
     local busy; busy=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i "$GPU" 2>/dev/null)
     [ -z "$busy" ] || log "WARNING: GPU $GPU has other processes ($busy): timings are not clean"
-    local R=$OUT/batch$B_K${B_CARRY/lane/}$S$LV${CFTABLE:+_cft}
+    local R=$OUT/batch$B_K${B_CARRY/lane/}$S$LV${CFTABLE:+_cft}${RUN_TAG:+_$RUN_TAG}
     log "batch: K=$B_K carry=$B_CARRY, prompts $B_PROMPTS, $B_GENERATE generated each, pool ${POOL_B:-192}"
     pyrun env CUDA_VISIBLE_DEVICES=$GPU $CAPENV "$PY" -m perseus.examples.rwkv7.run_planned $COMMON \
         --batch "$B_K" --batch-carry "$B_CARRY" --prompts "$B_PROMPTS" --generate "$B_GENERATE" \
         --plan "$BPLAN" --shifts "$CAP/pcmm_shifts.json" --pcmm-cf "$PCMM_CF" --schedule "$SCHED" $(cf_flags) \
-        --stc-cache "${STC_CACHE_B:-$STC_CACHE}" --pool "${POOL_B:-192}" --out "$R.jsonl" ${RUN_EXTRA:-} > "$R.log" 2>&1
+        --stc-cache "${STC_CACHE_B:-$STC_CACHE}" --pool "${POOL_B:-192}" $(keys_flag b) --out "$R.jsonl" ${RUN_EXTRA:-} > "$R.log" 2>&1
     local rc=$?
     grep -E '"kind": "(pass|warmup)"' "$R.jsonl" 2>/dev/null | tee -a "$OUT/session.log"
     grep '"kind": "summary"' "$R.jsonl" 2>/dev/null | cut -c1-1200 | tee -a "$OUT/session.log"
@@ -217,15 +281,16 @@ step_batch() {
 }
 
 step_run() {
+    need_keys decode
     [ -f "$PLAN/PLAN_CMD.txt" ] || die "no plan $PLAN (run the plan step)"
     local busy; busy=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i "$GPU" 2>/dev/null)
     [ -z "$busy" ] || log "WARNING: GPU $GPU has other processes ($busy): timings are not clean"
     local I; I=$(ids) || die "tokenizer failed"
     log "run: $TOKENS tokens after the prefix, ids $I"
-    local R=$OUT/run$S$LV${CFTABLE:+_cft}
+    local R=$OUT/run$S$LV${CFTABLE:+_cft}${RUN_TAG:+_$RUN_TAG}
     pyrun env CUDA_VISIBLE_DEVICES=$GPU $CAPENV "$PY" -m perseus.examples.rwkv7.run_planned $COMMON --ids "$I" \
         --tokens "$TOKENS" --plan "$PLAN" --shifts "$CAP/pcmm_shifts.json" --pcmm-cf "$PCMM_CF" \
-        --schedule "$SCHED" $(cf_flags) --stc-cache "$STC_CACHE" --pool "$POOL" \
+        --schedule "$SCHED" $(cf_flags) --stc-cache "$STC_CACHE" --pool "$POOL" $(keys_flag decode) \
         --out "$R.jsonl" ${RUN_EXTRA:-} > "$R.log" 2>&1
     local rc=$?
     grep '"kind": "token"' "$R.jsonl" 2>/dev/null | cut -c1-220 | tee -a "$OUT/session.log"
@@ -235,7 +300,7 @@ step_run() {
 
 cmd=${1:-all}
 case "$cmd" in
-    build|check|crosscheck|capture|plan|run|capture_pf|plan_pf|pfcheck|run_pf|capture_b|plan_b|bcheck|batch) "step_$cmd" ;;
+    build|check|crosscheck|capture|plan|run|capture_pf|plan_pf|pfcheck|run_pf|capture_b|plan_b|bcheck|batch|keyspec|keygen) "step_$cmd" ;;
     all) step_build; step_check; step_crosscheck; step_capture; step_plan; step_run ;;
     pf) step_capture; step_plan; step_capture_pf; step_plan_pf; step_run_pf ;;
     b) step_capture; step_plan; step_capture_b; step_plan_b; step_batch ;;

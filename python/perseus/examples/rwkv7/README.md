@@ -1,4 +1,4 @@
-# RWKV-7 0.1B under CKKS on `perseus.impl`: encrypted decode, one conversation
+# RWKV-7 under CKKS on `perseus.impl`: encrypted decode, prefill and batched decode, any RWKV-x070-World size
 
 `python/perseus/examples/rwkv7/` runs RWKV-7 (x070, `RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth`: 12 blocks, width
 768, 12 heads of 64, d_ffn 3,072) one token per step, every block on ciphertexts. The client decrypts the last
@@ -10,7 +10,35 @@ of `coeffs_mixed.json` (the research harness's `poly` mode, `results/vector-d-20
   (`results/rwkv7-fhe-20261104/README.md`).
 - Prefill (below) is verified on the CPU only.
 
-`tools/rwkv7/run_box.sh` is the box procedure.
+`tools/rwkv7/run_box.sh` is the box procedure; `tools/rwkv7/size_pipeline.sh` takes any `RWKV-x070-World-*` checkpoint
+from its `.pth` through calibration, the final fit, the scans and the quality gate to the encrypted runs
+(`ANYSIZE_DESIGN.md`).
+
+## Any size (`ANYSIZE_DESIGN.md`)
+
+Every shape is read from the checkpoint (layers, width, heads, d_ffn, the LoRA ranks of w, a, v, g). Ring 2^16 holds
+32 lanes x 1,024 channels, so a width above 1,024 needs one of two layouts, both built (`--lanes`):
+
+- **channel shards** (`--lanes 32`, the default): a width-C vector is `S = ceil(C / 1024)` ciphertexts; every
+  per-channel op runs per shard; LayerNorm adds the shards' statistics before one rotate-and-sum and one Newton chain;
+  a head never straddles a shard, so the head state is 2 ciphertexts per shard (C / 512 per block); a PCMM linear takes
+  and returns shard lists (`n_in`, `n_out` in 1,024-blocks). Above one shard the a / v LoRA pairs run as two PCMMs
+  through the rank (`--lora split`, the fold would cost S^2 blocks of planes) and every block refreshes its output
+  shards (`shard_land`: the runtime chains only a block's first output into the next block; the others enter as
+  registers at a fixed landing, checked before the session opens). K and T stay at 32.
+- **fewer lanes** (`--lanes 16` / `8`): 2,048 / 4,096 channels per ciphertext, PCMM at its own t = 16 / 8 shape; one
+  ciphertext per vector, 64 / t state ciphertexts per block. K and T <= t.
+
+Which one a size runs is a cost question the planner answers (`ANYSIZE_DESIGN.md` §3); at width <= 1,024 both are the
+original layout and the op stream is unchanged (the fake's call log and values are identical to `4bba3a93`'s for
+decode, prefill and batched passes on 2 blocks of the 0.1B checkpoint).
+
+**Keys** (`run_planned.py --keys`): `inproc` (the default, INSECURE: the session holds the secret; recorded
+`insecure-inproc`) or a client bundle: `--keyspec F` writes the session's key request for the plans that run,
+`--keygen DIR --keyspec-file F` is the client role (a fresh secret, `DIR/keys.pckb`, `DIR/client_secret.bin`), and
+`--keys DIR` opens the session with `Session.from_bundle` (no secret: `has_secret false` in the header) while a
+separate `_pc.Client` encrypts every input and decrypts every reply as wire frames. `run_box.sh keyspec | keygen`
+(KEYMODE = decode | pf | b) and `KEYS=bundle` wrap it.
 
 ## The circuit
 
@@ -189,6 +217,8 @@ Planner, K = 32, block 0: **222 refreshes per pass**, against 32 × 31 = 992 for
 | `test_batched` (capture, `--rwkv7-plan --rwkv7-b-k K`) | `run_capture --batch K` + plan | block 0: 55 / 79 / 127 / 222 refreshes at K = 4 / 8 / 16 / 32; block 1 (K = 32): 167; decode-layout carries (K = 32): 284 |
 | `test_batched` (`session_prepare`, box only) | a K = 4 batched plan compiled, every conversation's state found as inputs | skipped here; `run_box.sh bcheck` |
 | `test_levers` | the CF table from this capture; `--schedule` reaches `Program.compile`; a PAIR=1 + fused-EvalMod plan (`--rwkv7-plan`) | covers all 11 linears (CF 2–3); siblings passed; `PC_BTS_PAIR=1 PC_EM_FUSE_RESCALE=1` on `runtime=` |
+| `test_anysize` | synthetic checkpoints (`synth.py`) at widths 768–4,096 in both layouts: the mirror vs the poly reference; at 2,048 the fake and recorder vs the mirror, prefill vs T decodes, batched vs K decodes; the 1-block capture + plan (`--rwkv7-heavy` for the 5–9 GB ones, one per process) | ANYSIZE_DESIGN.md §6 |
+| `test_keys` | `--keys / --keyspec / --keygen` on stand-ins for the device `_pc`; the z-shard chain check | flag → key source, client-only encryption / decryption on a bundle run |
 
 The planner tests run with `--rwkv7-plan` (`--rwkv7-pf-t T`, `--rwkv7-pf-blocks N`, `--rwkv7-pf-dir DIR` keep the
 products): e.g. `pytest tests/test_prefill.py -k plan -s --rwkv7-plan --rwkv7-pf-t 32 --rwkv7-pf-blocks 2`. The
@@ -220,6 +250,14 @@ BLOCKS=1 bash tools/rwkv7/run_box.sh pf                      # smoke: capture, p
 bash tools/rwkv7/run_box.sh pf                               # 12 blocks: 70 prompt tokens = 2 passes + 6 decoded + 4 generated
 LEVERS=best bash tools/rwkv7/run_box.sh pf                   # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
 BLOCKS=1 CFTABLE=1 bash tools/rwkv7/run_box.sh run           # A/B the PCMM CF table against PCMM_CF=6 (decode smoke)
+
+# any size (ANYSIZE_DESIGN.md): the whole per-size pipeline (calibrate, fit, scan, gate, capture, plan, keys, runs)
+DRY=1 bash tools/rwkv7/size_pipeline.sh /root/d_models/RWKV-x070-World-1.5B-v3-20250127-ctx4096.pth 1.5b   # up to the GPU
+bash tools/rwkv7/size_pipeline.sh /root/d_models/RWKV-x070-World-1.5B-v3-20250127-ctx4096.pth 1.5b keys,run,run_pf,batch,records
+
+# client-separated keys for any run (KEYMODE = decode | pf | b), then KEYS=bundle on run / run_pf / batch
+KEYMODE=decode bash tools/rwkv7/run_box.sh keyspec && KEYMODE=decode bash tools/rwkv7/run_box.sh keygen
+KEYS=bundle bash tools/rwkv7/run_box.sh run
 
 # batched decode (B_K = 32 conversations, lane carries, tools/rwkv7/batch_prompts.txt, 16 generated each;
 # reuses the decode capture's shifts)

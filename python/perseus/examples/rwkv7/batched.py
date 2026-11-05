@@ -35,8 +35,9 @@ from .model import STATE, Circuit, Mirror, State
 
 
 class BatchState:
-    """One block's carried state for K conversations: ``S[c]`` (M ciphertexts each, decode's layout) and the carries,
-    a list of K natural-form ciphertexts each (``lane=False``) or one lane-form ciphertext each (``lane=True``)."""
+    """One block's carried state for K conversations: ``S[c]`` (its S M ciphertexts, decode's sharded layout) and the
+    carries: per conversation a list of shard ciphertexts in natural form (``lane=False``: ``xa[c][j]``), or one list
+    of lane-form shard ciphertexts (``lane=True``: ``xa[j]``)."""
 
     def __init__(self, S, xa, xf, lane: bool):
         self.S = [list(s) for s in S]
@@ -46,23 +47,32 @@ class BatchState:
     def K(self):
         return len(self.S)
 
+    @property
+    def Sh(self):
+        return len(self.xa) if self.lane else len(self.xa[0])
+
     def cts(self):
         out = [c for Sc in self.S for c in Sc]
-        return out + ([self.xa, self.xf] if self.lane else [*self.xa, *self.xf])
+        if self.lane:
+            return out + [*self.xa, *self.xf]
+        return out + [c for xs in self.xa for c in xs] + [c for xs in self.xf for c in xs]
 
     def names(self):
-        K, M = self.K, len(self.S[0])
-        out = [f"{STATE[m]}c{c}" for c in range(K) for m in range(M)]
-        return out + (["xa", "xf"] if self.lane else [f"xac{c}" for c in range(K)] + [f"xfc{c}" for c in range(K)])
+        return state_names(self.K, len(self.S[0]) // self.Sh, self.lane, self.Sh)
 
     def conv(self, c) -> State:
-        """Conversation c's state as a decode ``State`` (the carry: its natural-form carry; lane form: None)."""
+        """Conversation c's state as a decode ``State`` (its natural-form carries; lane form: None)."""
         return State(self.S[c], None if self.lane else self.xa[c], None if self.lane else self.xf[c])
 
 
-def state_names(K: int, M: int, lane: bool) -> list[str]:
-    return BatchState([[None] * M for _ in range(K)], None if lane else [None] * K,
-                      None if lane else [None] * K, lane).names()
+def state_names(K: int, M: int, lane: bool, Sh: int = 1) -> list[str]:
+    """``s<m>[h<j>]c<c>`` per conversation (shard-major within it), then the carries: ``xa[h<j>]`` (lane form) or
+    ``xa[h<j>]c<c>`` (conversation-major). Shard 0 keeps the single-shard names."""
+    sfx = [""] + [f"h{j}" for j in range(1, Sh)]
+    out = [f"{STATE[m]}{x}c{c}" for c in range(K) for x in sfx for m in range(M)]
+    if lane:
+        return out + [f"xa{x}" for x in sfx] + [f"xf{x}" for x in sfx]
+    return out + [f"xa{x}c{c}" for c in range(K) for x in sfx] + [f"xf{x}c{c}" for c in range(K) for x in sfx]
 
 
 class BatchedCircuit(Circuit):
@@ -104,14 +114,22 @@ class BatchedCircuit(Circuit):
 
     # ── the two per-conversation steps ──
     def token_shift(self, x, carry):
+        """``x``: the LN output shards. Lane carries: decode's own token shift (the carry is ``x``). Decode carries:
+        ``carry[c]`` conversation c's natural-form shards; per shard the partner is ``sum_c carry_c * mask(lane c)``
+        and the new carry of c is lane c of ``x`` on every lane."""
         if self.carry == "lane":
             return carry, x                                       # decode's own token shift: the carry is x
         ops = self.ops
-        xp = ops.mult_pt_sum(list(carry), self.m_conv)
-        return xp, [self.bcast_lane0(xc, self.m_0) for xc in self.lanes_to_0(x)]   # noqa: C416
+        xp, new = [], [[] for _ in range(self.K)]
+        for j, xj in enumerate(x):
+            xp.append(ops.mult_pt_sum([cc[j] for cc in carry], self.m_conv))
+            for c, xc in enumerate(self.lanes_to_0(xj)):
+                new[c].append(self.bcast_lane0(xc, self.m_0))
+        return xp, new
 
-    def wkv(self, st: BatchState, w, kkn, bb, kt, r, v):
-        ops, L, K = self.ops, self.L, self.K
+    def wkv_shard(self, st: BatchState, j, w, kkn, bb, kt, r, v):
+        """Shard j's heads: every conversation's update of its own M state ciphertexts of that shard."""
+        ops, L, K, M = self.ops, self.L, self.K, self.L.M
         with self._scope("src"):
             srcs = [ops.add(w, ops.mult_i(kkn)), ops.add(bb, ops.mult_i(kt)), ops.add(r, ops.mult_i(v))]
             at0 = [self.lanes_to_0(s) for s in srcs]
@@ -119,16 +137,17 @@ class BatchedCircuit(Circuit):
         for c in range(K):
             with self._scope("bcast"):
                 vec = []
-                for j in range(3):
+                for i in range(3):
                     with self._scope("src"):
-                        xc = next(at0[j])
+                        xc = next(at0[i])
                     B = self.bcast_lane0(xc, self.m_0h)                  # (x + i y) / 2 on every lane
                     Bc = ops.conjugate(B)
                     vec += [ops.add(B, Bc), ops.mult_i(ops.sub(Bc, B))]
                 wc, kkc, bbc, ktc, rc, vc = vec
                 V = L.transpose(ops, vc)
             with self._scope("update"):
-                st.S[c], Ps = self.state_step(st.S[c], wc, kkc, bbc, ktc, rc, V)
+                Sj, Ps = self.state_step(st.S[c][j * M:(j + 1) * M], wc, kkc, bbc, ktc, rc, V)
+                st.S[c][j * M:(j + 1) * M] = Sj
             with self._scope("readout"):
                 acc = L.untranspose_lane0(ops, Ps)
                 Q = acc if Q is None else ops.add(ops.rotate(Q, 1), acc)
@@ -147,21 +166,23 @@ def rotation_steps(L, K: int, hoist: int = 0) -> set[int]:
     return {x % L.n for x in s} - {0}
 
 
-def batch_state(lane: bool, K: int, M: int, make) -> BatchState:
-    """A BatchState of fresh ciphertexts / vectors: ``make(kind, c)`` with kind in ("S", "xa", "xf"); with
-    ``lane`` the carries are made once (c = None)."""
-    S = [[make("S", c, m) for m in range(M)] for c in range(K)]
+def batch_state(lane: bool, K: int, M: int, make, Sh: int = 1) -> BatchState:
+    """A BatchState of fresh ciphertexts / vectors: ``make(kind, c, i)`` with kind "S" (i: the state index, shard-major
+    over the S M), "xa", "xf" (i: the shard); with ``lane`` the carries are made once (c = None)."""
+    S = [[make("S", c, i) for i in range(Sh * M)] for c in range(K)]
     if lane:
-        return BatchState(S, make("xa", None, None), make("xf", None, None), True)
-    return BatchState(S, [make("xa", c, None) for c in range(K)], [make("xf", c, None) for c in range(K)], False)
+        return BatchState(S, [make("xa", None, j) for j in range(Sh)], [make("xf", None, j) for j in range(Sh)], True)
+    return BatchState(S, [[make("xa", c, j) for j in range(Sh)] for c in range(K)],
+                      [[make("xf", c, j) for j in range(Sh)] for c in range(K)], False)
 
 
 class BatchedMirror(Mirror):
     """The batched circuit on numpy slot vectors: ``step(rows)`` with row c conversation c's token."""
 
-    def __init__(self, P, coeffs, n_slots, K, carry="decode", n_layers=None, wbits=24, fuse_l1=False, hoist=0):
+    def __init__(self, P, coeffs, n_slots, K, carry="decode", n_layers=None, wbits=24, fuse_l1=False, hoist=0,
+                 lora="auto", lanes=0):
         self.K, self.carry_kind, self.hoist = int(K), carry, int(hoist)
-        super().__init__(P, coeffs, n_slots, n_layers=n_layers, wbits=wbits, fuse_l1=fuse_l1)
+        super().__init__(P, coeffs, n_slots, n_layers=n_layers, wbits=wbits, fuse_l1=fuse_l1, lora=lora, lanes=lanes)
         self.bcirc = BatchedCircuit(self.circ.ops, self.L, coeffs, self.circ.linear, self.K, carry, hoist)
 
     def reset(self, state=None):
@@ -169,17 +190,18 @@ class BatchedMirror(Mirror):
         single = self.state
         lane = self.carry_kind == "lane"
         self.state = [batch_state(lane, self.K, self.L.M,
-                                  lambda kind, c, m, s=s: (s.S[m] if kind == "S" else getattr(s, kind)).copy())
+                                  lambda kind, c, i, s=s: (s.S[i] if kind == "S" else getattr(s, kind)[i]).copy(),
+                                  self.L.S)
                       for s in single]
 
     def step(self, rows):
         rows = np.asarray(rows, dtype=np.float64)
         assert rows.shape[0] == self.K, rows.shape
-        z = self.L.chunk(rows).astype(np.complex128)
+        z = [v.astype(np.complex128) for v in self.L.chunk_sh(rows)]
         for b in range(self.n_layers):
             z = self.bcirc.block(b, z, self.state[b], self.W[b])
-        z = z * self.L.live
-        return self.L.decode_lanes(np.real(z), self.K), z
+        z = [zi * lv for zi, lv in zip(z, self.L.lives)]
+        return self.L.decode_lanes_sh([np.real(zi) for zi in z], self.K), z
 
     def conv_state(self, c) -> list[State]:
         """Conversation c's carried state in decode's form (natural-form carries; from lane c with ``carry=lane``)."""
@@ -187,8 +209,10 @@ class BatchedMirror(Mirror):
         for st in self.state:
             if st.lane:
                 bc = self.bcirc
-                xa, xf = (np.real(bc.bcast_lane0(np.roll(x, -c), bc.m_0)) for x in (st.xa, st.xf))
+                xa = [np.real(bc.bcast_lane0(np.roll(x, -c), bc.m_0)) for x in st.xa]
+                xf = [np.real(bc.bcast_lane0(np.roll(x, -c), bc.m_0)) for x in st.xf]
                 out.append(State([s.copy() for s in st.S[c]], xa, xf))
             else:
-                out.append(State([s.copy() for s in st.S[c]], st.xa[c].copy(), st.xf[c].copy()))
+                out.append(State([s.copy() for s in st.S[c]], [x.copy() for x in st.xa[c]],
+                                 [x.copy() for x in st.xf[c]]))
         return out

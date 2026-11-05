@@ -67,7 +67,7 @@ def _separate_run(make_step, head, P, prompt, n):
 def _max_state_err(a, b):
     errs = []
     for sa, sb in zip(a, b):
-        for x, y in zip([*sa.S, sa.xa, sa.xf], [*sb.S, sb.xa, sb.xf]):
+        for x, y in zip(sa.cts(), sb.cts()):
             errs.append(float(np.max(np.abs(np.asarray(x) - np.asarray(y)))))
     return max(errs)
 

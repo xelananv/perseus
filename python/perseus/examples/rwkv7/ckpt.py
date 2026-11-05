@@ -76,7 +76,11 @@ class _Unpickler(pickle.Unpickler):
 
 
 def load_state_dict(path: str) -> dict[str, np.ndarray]:
-    """{name: float32 numpy array} of a ``torch.save``d state dict."""
+    """{name: float32 numpy array} of a ``torch.save``d state dict, or of a ``.npz`` with the same names (the
+    synthetic checkpoints of ``synth.py``)."""
+    if str(path).endswith(".npz"):
+        with np.load(path) as z:
+            return {k: np.asarray(z[k], dtype=np.float32) for k in z.files}
     with zipfile.ZipFile(path) as zf:
         pkl = next(n for n in zf.namelist() if n.endswith("data.pkl"))
         prefix = pkl[: -len("/data.pkl")]

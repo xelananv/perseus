@@ -19,7 +19,8 @@ over channels within a lane. Two steps change:
   accumulated Horner-style (``Q <- rot(Q, +1) + acc_t``; one rotation by ``-(T - 1)`` at the end puts token ``t``'s
   readout on lane ``t``). Lanes past a short chunk (T < t) get the last token's readout.
 
-The chunk's lanes past T repeat its last row (``Layout.encode_rows``) and are never read back.
+The chunk's lanes past T repeat its last row (``Layout.encode_rows``) and are never read back. Above width 1,024
+every step runs per channel shard (layout.py): the token shift on each shard, the scan on each shard's heads.
 """
 from __future__ import annotations
 
@@ -44,15 +45,21 @@ class PrefillCircuit(Circuit):
         return self.ops.rotate_and_sum(self.ops.mult_pt(x, value_mask), -1, self.L.t)
 
     def token_shift(self, x, carry):
+        """Per shard: lane l takes lane l - 1, lane 0 the carry; the new carry is lane T - 1 on every lane."""
         ops, T = self.ops, self.T
-        xp = ops.add(ops.mult_pt(ops.rotate(x, -1), self.m_not0), ops.mult_pt(carry, self.m_0))
-        last = x if T == 1 else ops.rotate(x, T - 1)
-        return xp, self.bcast_lane0(last, self.m_0)
+        xps, carries = [], []
+        for xi, ci in zip(x, carry):
+            xps.append(ops.add(ops.mult_pt(ops.rotate(xi, -1), self.m_not0), ops.mult_pt(ci, self.m_0)))
+            last = xi if T == 1 else ops.rotate(xi, T - 1)
+            carries.append(self.bcast_lane0(last, self.m_0))
+        return xps, carries
 
-    def wkv(self, st: State, w, kkn, bb, kt, r, v):
-        ops, L = self.ops, self.L
+    def wkv_shard(self, st: State, j, w, kkn, bb, kt, r, v):
+        """Shard j's sequential scan over the T tokens of the pass (its heads, its M state ciphertexts)."""
+        ops, L, M = self.ops, self.L, self.L.M
         srcs = [ops.add(w, ops.mult_i(kkn)), ops.add(bb, ops.mult_i(kt)), ops.add(r, ops.mult_i(v))]
         Q = acc = None
+        S = st.S[j * M:(j + 1) * M]
         for t in range(self.T):
             if t:
                 srcs = [ops.rotate(s, 1) for s in srcs]
@@ -62,9 +69,10 @@ class PrefillCircuit(Circuit):
                 Bc = ops.conjugate(B)
                 vec += [ops.add(B, Bc), ops.mult_i(ops.sub(Bc, B))]
             wt, kkt, bbt, ktt, rt, vt = vec
-            st.S, Ps = self.state_step(st.S, wt, kkt, bbt, ktt, rt, L.transpose(ops, vt))
+            S, Ps = self.state_step(S, wt, kkt, bbt, ktt, rt, L.transpose(ops, vt))
             acc = L.untranspose_lane0(ops, Ps)
             Q = acc if Q is None else ops.add(ops.rotate(Q, 1), acc)
+        st.S[j * M:(j + 1) * M] = S
         y = Q if self.T == 1 else ops.rotate(Q, -(self.T - 1))
         if self.m_past is not None:
             y = ops.add(y, ops.mult_pt(ops.rotate_and_sum(acc, -1, L.t), self.m_past))

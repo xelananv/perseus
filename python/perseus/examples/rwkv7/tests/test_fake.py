@@ -34,7 +34,7 @@ def test_fake_matches_mirror(params2, capture):  # noqa: F811
         errs.append(rel_rms(h, hm))
         errs_ref.append(rel_rms(h, hr))
         counts.append((getattr(fhe, "n_bootstraps", 0) - b0, getattr(fhe, "n_reactive", 0) - r0,
-                       model.rt.ops.level(out)))
+                       model.rt.ops.level(out[0])))
     print("capture" if capture else "fake", "vs mirror", [f"{e:.1e}" for e in errs], "vs poly ref",
           [f"{e:.1e}" for e in errs_ref], "(bootstraps, reactive, out level) per token", counts, "start", n0)
     assert max(errs) < 1e-9

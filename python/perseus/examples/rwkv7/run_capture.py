@@ -20,6 +20,12 @@ from . import common
 from .session import make_model
 
 
+def model_kw(a) -> dict:
+    """The any-size switches every model of a run shares (capture, twin, mirror)."""
+    return {"lora": getattr(a, "lora", "auto"), "shard_land": not getattr(a, "no_shard_land", False),
+            "lanes": getattr(a, "lanes", 0)}
+
+
 def batch_probe(P, ids, K: int, n_passes: int):
     """Public batched passes: pass i, lane c reads ``ids[s c + i]`` (each conversation its own window of the public
     text, stride s <= 7). Returns (the passes' row matrices (K, C), the token ids [[pass 0's K ids], ...])."""
@@ -57,7 +63,8 @@ def main(argv=None) -> int:
     elif a.pcmm_shift == "calib":
         calib = os.path.join(a.out, "pcmm_calib.json")
         os.environ["PF_PCMM_CALIB"] = calib
-        _fhe, _inf, model = make_model(P, co, capture=False, fuse_l1=a.fuse_l1, wbits=a.wbits, prefill_keys=T)
+        _fhe, _inf, model = make_model(P, co, capture=False, fuse_l1=a.fuse_l1, wbits=a.wbits, prefill_keys=T,
+                                       **model_kw(a))
         model.start(st if a.prefix else None)
         for pos, t in enumerate(ids[: a.calib_tokens]):
             model.step(P.emb[t], pos)
@@ -72,7 +79,7 @@ def main(argv=None) -> int:
         from .model import pcmm_shifts
         shifts = pcmm_shifts(json.load(open(calib)))
     else:
-        _fhe, _inf, model = make_model(P, co, capture=False, fuse_l1=a.fuse_l1, wbits=a.wbits)
+        _fhe, _inf, model = make_model(P, co, capture=False, fuse_l1=a.fuse_l1, wbits=a.wbits, **model_kw(a))
         shifts = {name: 0 for name in model.linears()}
     with open(os.path.join(a.out, "pcmm_shifts.json"), "w") as f:
         json.dump(shifts, f, indent=1, sort_keys=True)
@@ -81,7 +88,7 @@ def main(argv=None) -> int:
     T = int(a.prefill_chunk)
     K = int(a.batch)
     fhe, _inf, model = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts, chunk=T,
-                                  batch=K, batch_carry=a.batch_carry, batch_hoist=a.batch_hoist)
+                                  batch=K, batch_carry=a.batch_carry, batch_hoist=a.batch_hoist, **model_kw(a))
     model.set_capture(a.out)
     guard = None
     if not a.no_site_guard:
@@ -110,13 +117,15 @@ def main(argv=None) -> int:
         h, out = model.step(row, pos)
         if not np.all(np.isfinite(h)):
             raise SystemExit(f"[capture] {'pass' if T else 'token'} {pos}: non-finite hidden state")
-        print(f"[capture] {'pass' if T else 'token'} {pos} out level {model.rt.ops.level(out)} in "
+        print(f"[capture] {'pass' if T else 'token'} {pos} out level {model.rt.ops.level(out[0])} in "
               f"{time.time() - t1:.1f} s", flush=True)
     meta = {"blocks": model.n_layers, "capture_tick": a.capture_tick, "tokens": ids, "prefill_chunk": T,
             "batch": K, "batch_carry": a.batch_carry if K > 1 else None, "batch_hoist": a.batch_hoist if K > 1 else None,
             "prefix": a.prefix,
             "pth_sha256": common.sha256(a.pth), "coeffs_sha256": common.sha256(a.coeffs), "wbits": a.wbits,
-            "fuse_l1": a.fuse_l1, "pcmm_shift": a.pcmm_shift, "environment": common.environment()}
+            "fuse_l1": a.fuse_l1, "pcmm_shift": a.pcmm_shift, "width": P.C, "n_layer_ckpt": P.n_layer,
+            "shards": model.L.S, "lanes": model.L.t, "channels_per_ct": model.L.D, "lora": model.W[0].lora if model.W else None, "shard_land": model.shard_land,
+            "state_names": model.state_names(), "environment": common.environment()}
     with open(os.path.join(a.out, "rwkv7_capture.json"), "w") as f:
         json.dump(meta, f, indent=1)
     print(f"[capture] wrote {a.out} ({model.n_layers} blocks + tail) in {time.time() - t0:.1f} s", flush=True)

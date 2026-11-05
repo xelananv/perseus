@@ -34,6 +34,6 @@ def test_mirror_matches_poly_reference(params2, wbits, tol, fuse):
         _, h_ref = rf.step(t)
         h, z = mir.step(params2.emb[t])
         errs.append(rel_rms(h, h_ref))
-        assert np.abs(z.real.reshape(1024, -1)[768:]).max() < 1e-9
+        assert np.abs(z[0].real.reshape(1024, -1)[768:]).max() < 1e-9
     print("wbits", wbits, "relErrRms per token", [f"{e:.2e}" for e in errs])
     assert max(errs) < tol

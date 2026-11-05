@@ -62,6 +62,17 @@ def add_args(ap, n_tokens=12):
                     "0: a running rotation by +1")
     ap.add_argument("--prefix", type=int, default=1, help="leading tokens run in plaintext as a public prefix "
                     "(default 1: the text's leading \\n\\n); 0 = every token encrypted from zero state")
+    ap.add_argument("--lora", default="auto", choices=("auto", "fold", "split"),
+                    help="the a / v LoRA pairs: one folded C x C PCMM (fold), two PCMMs through the rank (split); auto "
+                    "folds at width <= 1,024 (one channel shard) and splits above (ANYSIZE_DESIGN.md)")
+    ap.add_argument("--lanes", type=int, default=0, choices=(0, 32, 16, 8),
+                    help="lanes per ciphertext (t): 0 (default) = one ciphertext per vector (32 up to width 1,024, 16 "
+                    "up to 2,048, 8 up to 4,096; layout.auto_lanes); 32 = 1,024 channels per ciphertext, wider models "
+                    "as channel shards (K and T up to 32); 16 / 8 = 2,048 / 4,096 channels (batched K and prefill T "
+                    "<= t). ANYSIZE_DESIGN.md §3 compares them by planned refreshes")
+    ap.add_argument("--no-shard-land", action="store_true",
+                    help="width > 1,024: do not refresh the stage's output shards at block end (then the shards enter "
+                    "the next block at the compiled exit, checked before the session opens)")
 
 
 def tokenizer(harness, vocab=None):
@@ -73,7 +84,9 @@ def tokenizer(harness, vocab=None):
 
 
 def token_ids(a, text=None):
-    if a.ids and text is None:
+    """``--ids``, else the tokenizer's ids of ``text`` (default ``--text``). Without a tokenizer (``--harness`` unset)
+    ``--ids`` stands in for every text (the synthetic checkpoints: public calibration ids)."""
+    if a.ids and (text is None or a.harness is None):
         ids = [int(x) for x in a.ids.split(",")]
     else:
         tok = tokenizer(a.harness, a.vocab)

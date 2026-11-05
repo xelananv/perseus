@@ -31,7 +31,7 @@ def test_full_model_on_fake():
         lr, hr = rf.step(t)
         lf = rf.head(h)
         rows.append((pos, t, int(np.argmax(lf)), int(np.argmax(lr)), common.rel_rms(lf, lr), common.rel_rms(h, hr),
-                     fhe.n_bootstraps - b0, model.rt.ops.level(out), round(time.time() - t0, 1)))
+                     fhe.n_bootstraps - b0, model.rt.ops.level(out[0]), round(time.time() - t0, 1)))
     peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss / 2 ** 30
     print("(pos, token, top1 fhe, top1 poly, logits relErrRms, hidden relErrRms, refreshes, out level, s)")
     for r in rows:

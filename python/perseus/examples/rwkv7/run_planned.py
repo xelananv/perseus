@@ -11,8 +11,17 @@ then the decode from zero state: per token the row is encrypted at block 0's com
 the reply is decrypted, the client applies ``ln_out`` and the head, and the token is scored against the plaintext
 polynomial model (``ref.RefModel`` in poly mode, clamp on) and the circuit's numpy mirror.
 
-KEYS: in-process (``KeySource.generate``): the session holds the secret. A correctness and timing run, not a
-deployment (recorded as ``keys: insecure-inproc``).
+KEYS (``--keys``): ``inproc`` (the default) generates every key in the session process, which then holds the secret:
+a correctness and timing run, recorded as ``keys: insecure-inproc``. ``bundle`` / a directory: the client's key
+bundle (``keys.pckb``, made by ``--keygen`` from the server's ``--keyspec`` request), opened with
+``Session.from_bundle``: the session holds no secret (``has_secret: false`` in the header); the client's secret
+(``client_secret.bin`` beside the bundle, a separate ``_pc.Client`` object the session never sees) encrypts each
+input and decrypts each reply as wire frames (fhe_ssm's 11-02 publication path).
+
+Widths above 1,024 (ANYSIZE_DESIGN.md): every stage reads and writes the ``S`` shard ciphertexts of ``z``; the
+runtime chains only a block's first output to the next block's entry (``compile_dir``), so the other shards are
+compiled at their recorded (level, deg) (``input_metas``, as the carried state) and each block's output shards are
+checked against the next block's inputs before the session opens.
 
     python -m perseus.examples.rwkv7.run_planned --pth P --coeffs C --harness H --plan PLAN --shifts S \\
         --tokens 12 --out OUT.jsonl
@@ -21,7 +30,10 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import pathlib
 import re
+import sys
 import time
 
 import numpy as np
@@ -31,8 +43,8 @@ from perseus.examples.fhe_ssm.planned import N32_Q_PRIMES, SsmRecorder, digest
 from perseus.impl.driver import PlannedRun, plan_rot_scope, register_levels
 
 from . import common
-from .layout import D
 from .model import Mirror
+from .run_capture import model_kw
 from .session import make_model
 
 
@@ -50,7 +62,7 @@ class Recorder(SsmRecorder):
 
 class Rwkv7PlannedRun(PlannedRun):
     def __init__(self, recorder, plan_dir, config, labels, keys, *, model, work_dir, pcmm_cf=6, pt_rows=28,
-                 stc_cache=8, pool=16, log=print, schedule="program", pcmm_cf_map=None):
+                 stc_cache=8, pool=16, log=print, schedule="program", pcmm_cf_map=None, bundle=None, client=None):
         super().__init__(recorder, plan_dir, config, labels, keys, ref_token=1, probe=2, work_dir=work_dir,
                          pt_rows=pt_rows, dyn_rot=[], stc_cache=stc_cache, pool=pool, log=log)
         self.model, self.pcmm_cf = model, int(pcmm_cf)
@@ -58,25 +70,70 @@ class Rwkv7PlannedRun(PlannedRun):
         self.pcmm_cf_map = None if pcmm_cf_map is None else {str(k): int(v) for k, v in pcmm_cf_map.items()}
         self.ops = None
         self.static = False
+        self.bundle, self.client = bundle, client          # a client's key bundle file; its secret (_pc.Client)
+        self.zin: dict = {}                                 # block -> the program input index of each z shard
+
+    def shard_inputs(self, r) -> list[int]:
+        """The program input index of each of the stage's z shards (the recorder's stage input objects)."""
+        xin = r.x_in if isinstance(r.x_in, (list, tuple)) else [r.x_in]
+        ins = r.inputs()
+        idx = []
+        for o in xin:
+            hit = [i for i, n in enumerate(ins) if n in r.objs and r.objs[n] is o]
+            if len(hit) != 1:
+                raise RuntimeError(f"a stage input shard is read {len(hit)} times as a program input")
+            idx.append(hit[0])
+        if idx[0] != 0:
+            raise RuntimeError(f"the first z shard is program input {idx[0]}, not 0 (the runtime chains input 0)")
+        return idx
 
     def _compile_with_schedule(self, fn):
-        """``PlannedRun.prepare`` calls ``_pc.Program.compile`` without a schedule: run ``fn`` with the module's
-        ``Program`` standing in for one whose ``compile`` passes ``schedule`` (siblings: sibling ops, refresh pairs
-        under PAIR=1 included, batched into one launch; fhe_ssm's ``--schedule``)."""
+        """``PlannedRun.prepare`` calls ``_pc.Program.compile`` without a schedule and with the carried state's input
+        metas only: run ``fn`` with the module's ``Program`` standing in for one whose ``compile`` passes
+        ``schedule`` (siblings: sibling ops, refresh pairs under PAIR=1 included, batched into one launch; fhe_ssm's
+        ``--schedule``) and adds the recorded (level, deg) of every z shard after the first (S > 1)."""
         from perseus import _pc
-        if self.schedule == "program":
+        model = getattr(self, "model", None)
+        S = getattr(getattr(model, "L", None), "S", 1)
+        if self.schedule == "program" and S == 1:
             return fn()
-        real, sched = _pc.Program, self.schedule
+        real, sched, run = _pc.Program, self.schedule, self
 
         class _Scheduled:
             @staticmethod
             def compile(*a, **k):
-                return real.compile(*a, schedule=sched, **k)
+                if S > 1:
+                    metas = {lab: dict(v) for lab, v in (k.get("input_metas") or {}).items()}
+                    for b, r in run.ref.items():
+                        lab, ins = run.labels[b], r.inputs()
+                        for i in run.shard_inputs(r)[1:]:
+                            metas.setdefault(lab, {})[ins[i]] = r.metas[ins[i]]
+                    k["input_metas"] = metas
+                if sched != "program":
+                    k["schedule"] = sched
+                return real.compile(*a, **k)
         _pc.Program = _Scheduled
         try:
             return fn()
         finally:
             _pc.Program = real
+
+    def check_shard_chain(self):
+        """S > 1: block b's output shard s must land at the (level, deg) block b + 1 compiled for its input shard s
+        (``Program.run`` refuses a register otherwise); stops before the session opens, naming the shards."""
+        bad = []
+        for b in sorted(self.ref):
+            if b == 0 or b not in self.zin:
+                continue
+            po, pi = self.progs[self.labels[b - 1]], self.progs[self.labels[b]]
+            for s, i in enumerate(self.zin[b]):
+                j = self.reg[b - 1]["out"][s][0]
+                w, rd = tuple(po.outputs[j][1:3]), tuple(pi.inputs[i][1:3])
+                if w[:2] != rd[:2]:
+                    bad.append(f"block {b - 1} writes shard {s} at {w}, block {b} reads {rd}")
+        if bad:
+            raise RuntimeError("the z shards do not chain: " + "; ".join(bad[:6]) +
+                               " (run with the shard landing on: no --no-shard-land)")
 
     # the store: one slot per distinct (value digest, level)
     def pt_aliases(self):
@@ -101,12 +158,21 @@ class Rwkv7PlannedRun(PlannedRun):
         bad = [b for b in range(self.rec.n_layers) if len(self.kv.get(b, ())) != n_state]
         if bad:
             raise RuntimeError(f"blocks {bad}: the carried state was not recognised as block inputs")
+        self.zin = {b: self.shard_inputs(r) for b, r in self.ref.items()}
+        bad = {b: len(z) for b, z in self.zin.items() if len(z) != self.model.L.S}
+        if bad:
+            raise RuntimeError(f"stages {bad}: not {self.model.L.S} z shards in")
+        for b, r in self.ref.items():
+            if len(r.out_names) != self.model.L.S:
+                raise RuntimeError(f"stage {b}: {len(r.out_names)} outputs, {self.model.L.S} z shards expected")
+        self.check_shard_chain()
         self.static = True
         self.al = self.pt_aliases()
         return self
 
     def session_kwargs(self):
         kw = super().session_kwargs()
+        D = getattr(self.model.L, "D", 1024)
         kw["size"] = {"hidDim": D, "dim": D, "numHeads": 1, "numHeadsReal": 1, "expDim": 3 * D, "expanded": 3 * D,
                       "seqLen": 1}
         lins = self.model.linears()
@@ -167,14 +233,66 @@ class Rwkv7PlannedRun(PlannedRun):
         lvl, deg, nf = int(lvl), int(deg), float(nf)
         r = np.asarray(rows, dtype=np.float64)
         v = np.ascontiguousarray(r.T.ravel())               # slot ch * t + tok, as pack_rows lays it out
-        ct = self.fhe.encrypt(v, lvl, deg)
+        ct = Rwkv7PlannedRun.encrypt(self, v, lvl, deg)
         got = (int(ct.level), int(ct.deg), float(ct.nf))
         if got[:2] != (lvl, deg) or (nf > 0 and abs(np.log2(got[2] / nf)) > 1e-6):
             raise RuntimeError(f"{what}: encrypted at (level, deg, nf) {got}, compiled ({lvl}, {deg}, {nf})")
         return ct, (lvl, deg, nf, got[2])
 
+    # ── the client's end: encryption and decryption ──
+    def encrypt(self, v, level, deg):
+        """A fresh encryption of the slot vector ``v`` at (level, deg): by the client (``_pc.Client``: its secret,
+        a wire frame imported into the session) when a client secret is at hand, else by the session (its secret
+        under inproc keys, the bundle's public key otherwise)."""
+        if getattr(self, "client", None) is not None:
+            from perseus import _pc
+            frame = bytes(self.client.encrypt(np.asarray(v, dtype=np.complex128), int(level), int(deg)))
+            return _pc.import_ct(self.sess, frame)
+        return self.fhe.encrypt(v, level, deg)
+
+    def decrypt(self, ct) -> np.ndarray:
+        if self.client is not None:
+            from perseus import _pc
+            return np.asarray(self.client.decrypt(bytes(_pc.export_ct(self.sess, ct)))[0], dtype=np.complex128)
+        if self.bundle is not None:
+            raise RuntimeError("a bundle session holds no secret and no client secret was given (client_secret.bin)")
+        return np.asarray(self.ops.decrypt_slots_complex(ct))
+
+    def open_session(self, kw):
+        from perseus import _pc
+        if self.bundle is None:
+            return _pc.Session(self.cfg, self.keys, **kw)
+        sess = _pc.Session.from_bundle(self.cfg, self.keys, str(self.bundle), **kw)
+        if sess.has_secret:
+            raise RuntimeError("the bundle session holds a secret")
+        return sess
+
+    def key_mode(self) -> str:
+        return "insecure-inproc" if self.bundle is None else "bundle"
+
+    def input_rows(self, t, rows):
+        """Block 0's ``pack_tokens`` rows per shard for token t (decode: the row on every lane)."""
+        return self.model.L.encode_row_sh(rows[t])
+
     def input_ct(self, t, rows, p):
-        return self.encrypt_input(self.model.L.encode_row(rows[t]), p, 0, "block 0 input")[0]
+        return [self.encrypt_input(r, p, i, f"block 0 input shard {s}")[0]
+                for s, (r, i) in enumerate(zip(self.input_rows(t, rows), self.zin[0]))]
+
+    def run_stage(self, b, t, xs, kv_cts=None, run=None):
+        """Block b on the device: its z shards ``xs`` (Cts or registers) at their program inputs, the carried state
+        from the registers (``None`` at t = 0: empty), or from ``kv_cts[b]`` (the public prefix state)."""
+        run = run or self
+        p = run.progs[run.labels[b]]
+        ins = [None] * len(p.inputs)
+        for i, x in zip(run.zin[b], xs):
+            ins[i] = x
+        for i, _j, r in run.reg[b]["kv"]:
+            ins[i] = kv_cts[b][i] if kv_cts is not None and b in kv_cts else (None if t == 0 else r)
+        return p.run(ins, [(j, r) for _i, j, r in run.reg[b]["kv"]] + list(run.reg[b]["out"]))
+
+    def out_regs(self, b, run=None):
+        run = run or self
+        return [r for _j, r in run.reg[b]["out"]]
 
     def state_cts(self, state) -> dict:
         """The public prefix state as each block's carried inputs ``{block: {input position: Ct}}``, each a fresh
@@ -203,22 +321,17 @@ class Rwkv7PlannedRun(PlannedRun):
         tt = time.time()
         n_blocks = self.rec.n_layers + 1
         for b in range(n_blocks):
-            x = self.input_ct(t, rows, self.progs[self.labels[0]]) if b == 0 else self.reg[b - 1]["out"][0][1]
-            if kv_cts is None or b not in kv_cts:
-                self._run_block(b, t, {}, x)
-                continue
-            p = self.progs[self.labels[b]]
-            ins = [None] * len(p.inputs)
-            ins[0] = x
-            for i, _j, _r in self.reg[b]["kv"]:
-                ins[i] = kv_cts[b][i]
-            p.run(ins, [(j, r) for _i, j, r in self.reg[b]["kv"]] + list(self.reg[b]["out"]))
-        return self.reg[n_blocks - 1]["out"][0][1], {"issue_s": round(time.time() - tt, 4)}
+            xs = self.input_ct(t, rows, self.progs[self.labels[0]]) if b == 0 else self.out_regs(b - 1)
+            self.run_stage(b, t, xs, kv_cts)
+        return self.out_regs(n_blocks - 1), {"issue_s": round(time.time() - tt, 4)}
 
-    def reply(self, reg):
-        ct = self.ct(reg)
-        vals = np.asarray(self.ops.decrypt_slots_complex(ct))
-        return self.model.L.decode(np.real(vals)), int(ct.level)
+    def decrypt_regs(self, regs):
+        cts = [self.ct(r) for r in regs]
+        return [np.real(self.decrypt(c)) for c in cts], int(cts[0].level)
+
+    def reply(self, regs):
+        vals, level = self.decrypt_regs(regs)
+        return self.model.L.decode_sh(vals), level
 
 
 class Rwkv7BatchedRun(Rwkv7PlannedRun):
@@ -226,13 +339,12 @@ class Rwkv7BatchedRun(Rwkv7PlannedRun):
     row c on lane c; the reply is decrypted per lane; every conversation's carried state is its own registers
     (``Rwkv7Fhe.state_names``: ``s0c<c>``, ``s1c<c>`` and the carries)."""
 
-    def input_ct(self, t, rows, p):
-        return self.encrypt_input(self.model.L.encode_rows(np.asarray(rows[t])), p, 0, "batched input")[0]
+    def input_rows(self, t, rows):
+        return self.model.L.encode_rows_sh(np.asarray(rows[t]))
 
-    def reply(self, reg):
-        ct = self.ct(reg)
-        vals = np.asarray(self.ops.decrypt_slots_complex(ct))
-        return self.model.L.decode_lanes(np.real(vals), self.model.batch), int(ct.level)
+    def reply(self, regs):
+        vals, level = self.decrypt_regs(regs)
+        return self.model.L.decode_lanes_sh(vals, self.model.batch), level
 
 
 def read_prompts(path, prefix_text="\n\n") -> list[str]:
@@ -282,10 +394,11 @@ def main_batch(a) -> int:
         poly, st = common.prefix_state(P, a.coeffs, ids, a.prefix)
         polys.append(poly)
     fhe, _inf, model = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts, batch=K,
-                                  batch_carry=a.batch_carry, batch_hoist=a.batch_hoist)
+                                  batch_carry=a.batch_carry, batch_hoist=a.batch_hoist, **model_kw(a))
     model.init_state = st
     cfg = session_config(a.plan)
     keys = _pc.KeySource.generate([], conj=True, layout="packed")
+    bundle, client = resolve_keys(a) if a.keyspec is None else (None, None)
     labels = [f"block_{b}" for b in range(model.n_layers + 1)]
     work = a.work_dir or a.out + ".work"
     out = open(a.out, "w")
@@ -301,14 +414,19 @@ def main_batch(a) -> int:
         cf_map = pcmm_cf_table.load(a.pcmm_cf_table)
     run = Rwkv7BatchedRun(Recorder(model, model.n_layers), a.plan, cfg, labels, keys, model=model, work_dir=work,
                           pcmm_cf=a.pcmm_cf, pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool,
-                          schedule=a.schedule, pcmm_cf_map=cf_map)
+                          schedule=a.schedule, pcmm_cf_map=cf_map, bundle=bundle, client=client)
     long_ids = common.token_ids(a, common.CALIB_TEXT_LONG)[a.prefix:]
     public, _pt = batch_probe(P, long_ids, K, 2)            # the probes: two public passes
+    if a.keyspec is not None:
+        run.prepare(public)
+        return write_keyspec(a.keyspec, cfg, keys, run.session_kwargs(), model)
+    binfo = check_bundle(bundle, cfg, model) if bundle is not None else None
     t0 = time.time()
     run.setup(public)
     setup_s = time.time() - t0
     kv = run.state_cts(st)
-    emit({"kind": "header", "driver": "perseus.examples.rwkv7.run_planned --batch", "keys": "insecure-inproc",
+    emit({"kind": "header", "driver": "perseus.examples.rwkv7.run_planned --batch", **keys_header(run, binfo),
+          "width": P.C, "shards": model.L.S, "lanes": model.L.t, "lora": model.W[0].lora, "shard_land": model.shard_land,
           "blocks": model.n_layers, "batch": K, "batch_carry": a.batch_carry, "batch_hoist": a.batch_hoist,
           "prefix": pre, "prompts": prompts, "generate": a.generate, "plan": a.plan, "pcmm_cf": a.pcmm_cf,
           "wbits": a.wbits, "schedule": a.schedule, "pcmm_cf_table": a.pcmm_cf_table, "pool": a.pool,
@@ -325,7 +443,7 @@ def main_batch(a) -> int:
         run.reply(reg)
         emit({"kind": "warmup", "seconds": round(time.time() - t0, 3)})
     mirror = BatchedMirror(P, co, model.L.n, K, carry=a.batch_carry, wbits=a.wbits, fuse_l1=a.fuse_l1,
-                           hoist=a.batch_hoist)
+                           hoist=a.batch_hoist, lora=a.lora, lanes=a.lanes)
     mirror.reset(st)
     scorers = [common.Scorer(P, a, poly=polys[c]) for c in range(K)]
     toks = [list(p) for p in prompts]
@@ -503,19 +621,18 @@ class Rwkv7PrefillRun:
         L = pf.model.L
         n_blocks = pf.rec.n_layers + 1
         for b in range(n_blocks):
-            p = pf.progs[pf.labels[b]]
-            ins = [None] * len(p.inputs)
-            ins[0] = (pf.encrypt_input(L.encode_rows(rows), p, 0, "prefill chunk")[0] if b == 0
-                      else pf.reg[b - 1]["out"][0][1])
-            for i, _j, r in pf.reg[b]["kv"]:
-                ins[i] = kv_cts[b][i] if kv_cts is not None and b in kv_cts else r
-            p.run(ins, [(j, r) for _i, j, r in pf.reg[b]["kv"]] + list(pf.reg[b]["out"]))
-        return pf.reg[n_blocks - 1]["out"][0][1]
+            if b == 0:
+                p = pf.progs[pf.labels[0]]
+                xs = [pf.encrypt_input(r, p, i, f"prefill chunk shard {s}")[0]
+                      for s, (r, i) in enumerate(zip(L.encode_rows_sh(rows), pf.zin[0]))]
+            else:
+                xs = pf.out_regs(b - 1)
+            pf.run_stage(b, 1, xs, kv_cts)
+        return pf.out_regs(n_blocks - 1)
 
-    def reply(self, reg, T):
-        ct = self.pf.ct(reg)
-        vals = np.asarray(self.pf.ops.decrypt_slots_complex(ct))
-        return self.pf.model.L.decode_lanes(np.real(vals), T), int(ct.level)
+    def reply(self, regs, T):
+        vals, level = self.pf.decrypt_regs(regs)
+        return self.pf.model.L.decode_lanes_sh(vals, T), level
 
     def close(self):
         self.dec.close()
@@ -530,6 +647,110 @@ def probe_rows(P, calib_ids, prefix_ids=()):
     come from); without a tokenizer, the public prefix's token; else token 0."""
     ids = list(calib_ids)[1:3] if len(calib_ids) >= 3 else [prefix_ids[0]] * 2 if len(prefix_ids) else [0, 0]
     return [P.emb[int(t)] for t in ids]
+
+
+# ── keys: in-process (insecure) or a client's bundle ──
+
+def resolve_keys(a):
+    """(bundle file, client) for ``--keys``: ``inproc`` -> (None, None), the session generates every key and holds
+    the secret; ``bundle`` (the directory in ``$RWKV7_KEYS``) or a directory -> its ``keys.pckb`` and a ``_pc.Client``
+    on its ``client_secret.bin`` (the client's end of the run: input encryption, reply decryption)."""
+    if a.keys == "inproc":
+        return None, None
+    from perseus import _pc
+    d = os.environ.get("RWKV7_KEYS") if a.keys == "bundle" else a.keys
+    if not d:
+        raise SystemExit("--keys bundle reads the bundle directory from RWKV7_KEYS")
+    d = pathlib.Path(d)
+    if not (d / "keys.pckb").is_file():
+        raise SystemExit(f"{d}: no keys.pckb (the client's bundle for this run's key request: --keyspec, then --keygen)")
+    if not (d / "client_secret.bin").is_file():
+        raise SystemExit(f"{d}: no client_secret.bin: this runner decrypts and scores every reply (the client's end)")
+    client = _pc.Client(_pc.ClientSecret.from_bytes(list((d / "client_secret.bin").read_bytes())), complex=True)
+    return d / "keys.pckb", client
+
+
+def check_bundle(bundle, cfg, model) -> dict:
+    """The bundle against this session before it opens: the plan contract, PCMM keys, enough switching keys for the
+    layout's rotations (+ conjugation + relinearization), a public key."""
+    from perseus import _pc
+    info = dict(_pc.bundle_info(str(bundle)))
+    want = _pc.contract_hash(cfg)
+    if info.get("contract") != want:
+        raise SystemExit(f"{bundle}: made for plan contract {info.get('contract')}, this session's Config is {want}")
+    ent = dict(info.get("entries") or {})
+    need = key_needs(model)
+    if not ent.get("pcmm"):
+        raise SystemExit(f"{bundle}: no PCMM ring-switch keys (pcmm_t {need['pcmm_t']})")
+    if int(ent.get("ksk", 0)) < need["n_rotation_steps"] + 2:
+        raise SystemExit(f"{bundle}: {ent.get('ksk', 0)} switching keys, the layout needs >= {need['n_rotation_steps'] + 2}")
+    if not ent.get("public_key"):
+        raise SystemExit(f"{bundle}: no public key")
+    return {"bytes": info.get("bytes"), "entries": ent, "contract": info.get("contract"),
+            "params_hash": info.get("params_hash")}
+
+
+def key_needs(model) -> dict:
+    """What the model's layout asks of a key bundle before any program exists (the session's request,
+    ``Session.key_manifest``, adds the refresh routes' keys and relinearization)."""
+    n = model.L.n
+    steps = sorted({int(x) % n for x in model.rotation_steps()} - {0})
+    return {"slots": n, "width": model.P.C, "shards": model.L.S, "rotation_steps": steps,
+            "n_rotation_steps": len(steps), "conjugation": True, "pcmm_t": [model.L.t]}
+
+
+def write_keyspec(path, cfg, keys, kw, model) -> int:
+    """``--keyspec``: the session's key request (``Session.key_manifest`` on the planned programs; device build)."""
+    from perseus import _pc
+    doc = {"model": key_needs(model), "session": None, "note": None}
+    if hasattr(_pc, "Session") and hasattr(_pc.Session, "key_manifest"):
+        doc["session"] = json.loads(_pc.Session.key_manifest(cfg, keys, **kw))
+    else:
+        doc["note"] = "the session's key request needs the device build of perseus._pc"
+    text = json.dumps(doc, indent=1, default=str)
+    if path == "-":
+        print(text)
+    else:
+        pathlib.Path(path).write_text(text, encoding="utf-8")
+        print(f"[keyspec] {path}: {len(doc['model']['rotation_steps'])} rotation steps; session request "
+              f"{'present' if doc['session'] else 'absent (CPU build)'}", flush=True)
+    return 0
+
+
+def keygen_main(argv) -> int:
+    """The client role (``--keygen DIR --keyspec-file F``): a fresh secret, the bundle ``DIR/keys.pckb`` for the
+    server's key request, the secret beside it (``DIR/client_secret.bin``). Runs without the model."""
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--keygen", required=True)
+    ap.add_argument("--keyspec-file", required=True)
+    ap.add_argument("--threads", type=int, default=8)
+    a, _rest = ap.parse_known_args(argv)
+    from perseus import _pc
+    if not hasattr(_pc, "Client"):
+        raise SystemExit("--keygen needs the device build of perseus._pc (Client)")
+    doc = json.load(open(a.keyspec_file, encoding="utf-8"))
+    spec = doc.get("session") if isinstance(doc, dict) and "session" in doc else doc
+    if not isinstance(spec, dict) or "keys" not in spec:
+        raise SystemExit(f"{a.keyspec_file}: no session key request (made on the device build: --keyspec)")
+    out = pathlib.Path(a.keygen)
+    out.mkdir(parents=True, exist_ok=True)
+    secret = _pc.ClientSecret.generate()
+    cl = _pc.Client(secret, complex=True)
+    t0 = time.time()
+    st = dict(cl.keygen(json.dumps(spec), str(out / "keys.pckb"), threads=a.threads))
+    (out / "client_secret.bin").write_bytes(bytes(secret.to_bytes()))
+    st["wall_s"] = round(time.time() - t0, 1)
+    st["info"] = dict(_pc.bundle_info(str(out / "keys.pckb")))
+    print(json.dumps({"keygen": st, "bundle": str(out / "keys.pckb"),
+                      "client_secret": str(out / "client_secret.bin")}, default=str))
+    return 0
+
+
+def keys_header(run, bundle_info=None) -> dict:
+    return {"keys": run.key_mode(), "has_secret": bool(run.sess.has_secret),
+            "input_encryption": "client" if run.client is not None else
+            ("session-secret" if run.bundle is None else "session-public-key"),
+            "bundle_info": bundle_info}
 
 
 def main(argv=None) -> int:
@@ -554,6 +775,15 @@ def main(argv=None) -> int:
                     help="with --prefill-chunk T: the plan cut from run_capture --prefill-chunk T (same shifts file)")
     ap.add_argument("--prompts", default=None,
                     help="with --batch K: one prompt per line (\\n escapes a newline), the first K are the batch")
+    ap.add_argument("--keys", default="inproc", metavar="inproc|bundle|DIR",
+                    help="inproc: in-process keys (INSECURE: the session holds the secret; recorded insecure-inproc); "
+                    "bundle: the client's bundle directory in $RWKV7_KEYS; DIR: that directory (keys.pckb + "
+                    "client_secret.bin, from --keygen)")
+    ap.add_argument("--keyspec", default=None, metavar="FILE",
+                    help="write the session's key request (Session.key_manifest) for these plans and stop")
+    argv = sys.argv[1:] if argv is None else list(argv)
+    if "--keygen" in argv:
+        return keygen_main(argv)
     a = ap.parse_args(argv)
     if a.batch > 1:
         if a.prefill_chunk:
@@ -570,11 +800,13 @@ def main(argv=None) -> int:
     all_ids = common.token_ids(a)
     poly, st = common.prefix_state(P, a.coeffs, all_ids, a.prefix)
     ids = all_ids[a.prefix:][: a.tokens]
-    fhe, _inf, model = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts)
+    fhe, _inf, model = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts,
+                                  **model_kw(a))
     if a.prefix:
         model.init_state = st                    # the twin's probes start where the device does
     cfg = session_config(a.plan)
     keys = _pc.KeySource.generate([], conj=True, layout="packed")
+    bundle, client = resolve_keys(a) if a.keyspec is None else (None, None)
     labels = [f"block_{b}" for b in range(model.n_layers + 1)]
     work = a.work_dir or a.out + ".work"
     out = open(a.out, "w")
@@ -588,7 +820,7 @@ def main(argv=None) -> int:
     if a.pcmm_cf_table:
         from perseus.examples.fhe_ssm import pcmm_cf_table
         cf_map = pcmm_cf_table.load(a.pcmm_cf_table)
-    lever = dict(schedule=a.schedule, pcmm_cf_map=cf_map)
+    lever = dict(schedule=a.schedule, pcmm_cf_map=cf_map, bundle=bundle, client=client)
     run = Rwkv7PlannedRun(Recorder(model, model.n_layers), a.plan, cfg, labels, keys, model=model, work_dir=work,
                           pcmm_cf=a.pcmm_cf, pt_rows=a.pt_rows, stc_cache=a.stc_cache, pool=a.pool, **lever)
     try:                                         # the probes' rows: public, in distribution (probe_rows)
@@ -600,15 +832,25 @@ def main(argv=None) -> int:
     t0 = time.time()
     if T:
         # the prefill twin: the same weights and shifts, T-token passes; its probes are two public chunks
-        _f2, _i2, pmodel = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts, chunk=T)
+        _f2, _i2, pmodel = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts, chunk=T,
+                                      **model_kw(a))
         pmodel.init_state = st
         prun = Rwkv7PlannedRun(Recorder(pmodel, pmodel.n_layers), a.pf_plan, cfg, labels, keys, model=pmodel,
                                work_dir=work + ".pf", pcmm_cf=a.pcmm_cf, pt_rows=a.pt_rows, stc_cache=a.stc_cache,
                                pool=a.pool, **lever)
         long_ids = common.token_ids(a, common.CALIB_TEXT_LONG)[a.prefix:]
         pf_public = [[P.emb[t] for t in long_ids[i * T:(i + 1) * T]] for i in range(2)]
-        both = Rwkv7PrefillRun(run, prun, T).setup(public, pf_public)
+        both = Rwkv7PrefillRun(run, prun, T)
+        if a.keyspec is not None:
+            both.prepare(public, pf_public)
+            return write_keyspec(a.keyspec, cfg, keys, both.session_kwargs(), model)
+        binfo = check_bundle(bundle, cfg, model) if bundle is not None else None
+        both.setup(public, pf_public)
     else:
+        if a.keyspec is not None:
+            run.prepare(public)
+            return write_keyspec(a.keyspec, cfg, keys, run.session_kwargs(), model)
+        binfo = check_bundle(bundle, cfg, model) if bundle is not None else None
         run.setup(public)
     setup_s = time.time() - t0
     kv_dec = run.state_cts(st) if a.prefix else None
@@ -616,7 +858,8 @@ def main(argv=None) -> int:
     progs = {lab: p for lab, p in run.progs.items()}
     if both:
         progs.update({f"pf_{lab}": p for lab, p in both.pf.progs.items()})
-    emit({"kind": "header", "driver": "perseus.examples.rwkv7.run_planned", "keys": "insecure-inproc",
+    emit({"kind": "header", "driver": "perseus.examples.rwkv7.run_planned", **keys_header(run, binfo),
+          "width": P.C, "shards": model.L.S, "lanes": model.L.t, "lora": model.W[0].lora, "shard_land": model.shard_land,
           "blocks": model.n_layers, "prefix": all_ids[: a.prefix], "tokens": ids, "plan": a.plan, "pcmm_cf": a.pcmm_cf, "wbits": a.wbits,
           "prefill_chunk": T, "pf_plan": a.pf_plan, "schedule": a.schedule, "pcmm_cf_table": a.pcmm_cf_table,
           "pcmm_cf_table_sha256": common.sha256(a.pcmm_cf_table) if a.pcmm_cf_table else None,
@@ -636,7 +879,7 @@ def main(argv=None) -> int:
             t0 = time.time()
             both.reply(both.prefill(pf_public[0], kv_cts=both.pf.state_cts(st)), T)
             emit({"kind": "warmup", "prefill_chunk": T, "seconds": round(time.time() - t0, 3)})
-    mirror = Mirror(P, co, model.L.n, wbits=a.wbits, fuse_l1=a.fuse_l1)
+    mirror = Mirror(P, co, model.L.n, wbits=a.wbits, fuse_l1=a.fuse_l1, lora=a.lora, lanes=a.lanes)
     mirror.reset(st if a.prefix else None)
     sc = common.Scorer(P, a, mirror=mirror, poly=poly)
     rows = [P.emb[t] for t in ids]

@@ -30,6 +30,14 @@ with ``a``, ``b``, ``k`` and ``r`` (all indexed by ``j``). The two things that i
 
 Every function takes the ops protocol (``perseus.impl.ops``), so the same code runs on numpy rows (``NumpyOps``),
 the fake, the capture recorder and a device session.
+
+**Channel shards (widths above 1,024; ANYSIZE_DESIGN.md).** A width-C vector is ``S = ceil(C / 1024)`` ciphertexts
+("shards"), shard ``s`` holding channels ``1024 s .. 1024 s + 1023`` in the layout above, every shard at the same
+``t = 32`` lanes. A head's 64 channels never straddle a shard (1,024 = 16 heads), so every per-head kernel
+(``block_allreduce``, ``transpose``, ``untranspose``) runs per shard unchanged, and the state of shard ``s``'s 16
+heads is its own ``M`` ciphertexts: ``S M`` state ciphertexts per block. ``channel_sum`` is linear, so a LayerNorm
+over C channels adds the shards first and sums once. The ``*_sh`` helpers below return one array per shard; the
+unsuffixed ones are the single-shard forms (C <= 1,024), unchanged.
 """
 from __future__ import annotations
 
@@ -39,42 +47,62 @@ D = 1024        # channels per ciphertext (PCMM's nch at t = 32)
 HEAD = 64       # head size (a block of channels)
 
 
+def auto_lanes(C: int, n_slots: int = 1 << 15) -> int:
+    """The default lane count for width C (ANYSIZE_DESIGN.md §3): ONE ciphertext per vector, i.e. the fewest lanes
+    whose channels hold C (32 up to 1,024, 16 up to 2,048, 8 up to 4,096); wider models shard at 4,096 channels. The
+    planner's counts decided it: at width 2,048, decode plans 38 / 42 refreshes in blocks 0 / 1 at t = 16 against
+    67 / 73 as two shards at t = 32, and a batched pass costs the same 4 refreshes per conversation and block in both."""
+    t = n_slots // D
+    while t > 8 and C > n_slots // t:
+        t //= 2
+    return t
+
+
 class Layout:
-    def __init__(self, n_slots: int, C: int = 768, d_ffn: int = 3072):
+    def __init__(self, n_slots: int, C: int = 768, d_ffn: int = 3072, D: int = D):
+        """``D`` channels per ciphertext (default 1,024: t = 32 lanes at 32,768 slots). ``D = 2,048`` / ``4,096`` is the
+        fewer-lanes layout (t = 16 / 8): one ciphertext per vector up to that width, PCMM's own shape at that t
+        (``impl.pcmm.Shape(t).nch = 32,768 / t``)."""
         if n_slots % D:
             raise ValueError(f"{n_slots} slots is not a multiple of {D} channels")
+        self.D = D = int(D)
         self.n = int(n_slots)
         self.t = self.n // D
         if HEAD % self.t:
             raise ValueError(f"t = {self.t} lanes must divide the head size {HEAD}")
-        self.M = HEAD // self.t                  # state ciphertexts per block
+        self.M = HEAD // self.t                  # state ciphertexts per block and shard
         self.nb = min(8, self.t)                  # baby steps over the lanes
         self.ng = self.t // self.nb
         self.C, self.d_ffn = int(C), int(d_ffn)
-        if C > D or d_ffn % D:
-            raise ValueError(f"C = {C} must fit {D} channels and d_ffn = {d_ffn} be whole ciphertexts")
-        self.n_ffn = d_ffn // D
+        if C % HEAD:
+            raise ValueError(f"C = {C} must be whole heads of {HEAD}")
+        self.S = -(-self.C // D)                  # channel shards: ciphertexts per width-C vector
+        self.Cp = self.S * D
+        self.n_ffn = -(-self.d_ffn // D)          # d_ffn zero-padded to whole ciphertexts
         ch = np.arange(self.n) // self.t
         lane = np.arange(self.n) % self.t
         self._ch, self._lane = ch, lane
-        self.live = (ch < C).astype(np.float64)
+        #: shard s's live channels (1 on channels 1024 s + c < C)
+        self.lives = [(ch + s * D < C).astype(np.float64) for s in range(self.S)]
+        self.live = self.lives[0]
         self.block_start = (ch % HEAD == 0).astype(np.float64)
         self._masks = [((ch % HEAD == 0) & (lane == l)).astype(np.float64) for l in range(self.t)]
 
     # ── constants ──
-    def lane(self, v, width: int = D) -> np.ndarray:
+    def lane(self, v, width: int | None = None) -> np.ndarray:
+        width = self.D if width is None else width
         """A per-channel constant (length <= 1,024, zero-padded) in natural form."""
         v = np.asarray(v, dtype=np.float64).ravel()
         if v.size > width:
             raise ValueError(f"{v.size} channels > {width}")
-        p = np.zeros(D)
+        p = np.zeros(self.D)
         p[: v.size] = v
         return np.repeat(p, self.t)
 
     def head_const(self, per_head, fill=0.0) -> np.ndarray:
         """A per-head constant on every channel of its block; the padding blocks get ``fill``."""
         per_head = np.asarray(per_head, dtype=np.float64).ravel()
-        v = np.full(D // HEAD, float(fill))
+        v = np.full(self.D // HEAD, float(fill))
         v[: per_head.size] = per_head
         return np.repeat(np.repeat(v, HEAD), self.t)
 
@@ -85,7 +113,7 @@ class Layout:
 
     def encode_row(self, row) -> np.ndarray:
         """The rows ``pack_tokens`` takes: the row (zero-padded to 1,024) on every lane."""
-        r = np.zeros(D)
+        r = np.zeros(self.D)
         row = np.asarray(row, dtype=np.float64).ravel()
         r[: row.size] = row
         return np.tile(r, (self.t, 1))
@@ -104,7 +132,7 @@ class Layout:
         H = S.shape[0]
         out = []
         for m in range(self.M):
-            v = np.zeros((D, self.t))
+            v = np.zeros((self.D, self.t))
             for h in range(H):
                 # channel h*64 + j, lane l  <-  S[h, t m + l, j]
                 v[h * HEAD:(h + 1) * HEAD, :] = S[h, self.t * m:self.t * (m + 1), :].T
@@ -114,10 +142,76 @@ class Layout:
     def state_from_slots(self, Ss, H: int) -> np.ndarray:
         S = np.zeros((H, HEAD, HEAD))
         for m, s in enumerate(Ss):
-            v = np.real(np.asarray(s)).reshape(D, self.t)
+            v = np.real(np.asarray(s)).reshape(self.D, self.t)
             for h in range(H):
                 S[h, self.t * m:self.t * (m + 1), :] = v[h * HEAD:(h + 1) * HEAD, :].T
         return S
+
+    # ── channel shards (C > 1,024: one ciphertext per 1,024 channels) ──
+    def split(self, v) -> list[np.ndarray]:
+        """A length <= Cp vector, zero-padded to Cp, as S chunks of 1,024."""
+        v = np.asarray(v, dtype=np.float64).ravel()
+        if v.size > self.Cp:
+            raise ValueError(f"{v.size} channels > {self.Cp}")
+        p = np.zeros(self.Cp)
+        p[: v.size] = v
+        return [p[s * self.D:(s + 1) * self.D] for s in range(self.S)]
+
+    def lanes(self, v) -> list[np.ndarray]:
+        """A per-channel constant of any width <= Cp in natural form, one slot vector per shard."""
+        return [self.lane(c) for c in self.split(v)]
+
+    def pad_heads_sh(self, value: float) -> list[np.ndarray]:
+        """``pad_heads`` per shard: ``value`` on every channel >= C of each shard."""
+        return [(1.0 - lv) * float(value) for lv in self.lives]
+
+    def encode_row_sh(self, row) -> list[np.ndarray]:
+        """``pack_tokens`` rows per shard: shard s's 1,024 channels of ``row`` on every lane."""
+        return [np.tile(c, (self.t, 1)) for c in self.split(row)]
+
+    def encode_rows_sh(self, rows) -> list[np.ndarray]:
+        """``encode_rows`` per shard: row l on lane l (lanes past the chunk repeat its last row)."""
+        rows = np.asarray(rows, dtype=np.float64)
+        if rows.ndim != 2 or not 1 <= rows.shape[0] <= self.t:
+            raise ValueError(f"a chunk of 1..{self.t} rows, got {rows.shape}")
+        full = np.zeros((self.t, self.Cp))
+        full[: rows.shape[0], : rows.shape[1]] = rows
+        full[rows.shape[0]:, : rows.shape[1]] = rows[-1]
+        return [full[:, s * self.D:(s + 1) * self.D].copy() for s in range(self.S)]
+
+    def decode_sh(self, vecs) -> np.ndarray:
+        """Lane 0's first C channels of the decrypted shards."""
+        return np.concatenate([np.asarray(v)[np.arange(self.D) * self.t] for v in vecs])[: self.C]
+
+    def decode_lanes_sh(self, vecs, T: int) -> np.ndarray:
+        """(T, C): lane l's first C channels of the decrypted shards."""
+        return np.concatenate([np.asarray(v).reshape(self.D, self.t)[:, :T].T for v in vecs], axis=1)[:, : self.C].copy()
+
+    def natural_sh(self, v) -> list[np.ndarray]:
+        return self.lanes(v)
+
+    def chunk_sh(self, rows) -> list[np.ndarray]:
+        return [r.T.reshape(-1) for r in self.encode_rows_sh(rows)]
+
+    def state_slots_sh(self, S) -> list[np.ndarray]:
+        """``S`` (H, 64, 64) as the S M slot vectors of the sharded state form, shard-major (shard s holds heads
+        16 s .. 16 s + 15 in ``state_slots``' layout)."""
+        hps = self.D // HEAD
+        out = []
+        for s in range(self.S):
+            part = S[s * hps:(s + 1) * hps]
+            if part.shape[0] == 0:
+                part = np.zeros((1, HEAD, HEAD))
+            out += self.state_slots(part)
+        return out
+
+    def state_from_slots_sh(self, Ss, H: int) -> np.ndarray:
+        hps = self.D // HEAD
+        parts = []
+        for s in range(self.S):
+            h = min(hps, H - s * hps)
+            parts.append(self.state_from_slots(Ss[s * self.M:(s + 1) * self.M], h))
+        return np.concatenate(parts, axis=0)
 
     # ── rotations the layout issues ──
     def rotation_steps(self) -> set[int]:
@@ -196,14 +290,14 @@ class Layout:
         rows = np.asarray(rows, dtype=np.float64)
         if rows.ndim != 2 or not 1 <= rows.shape[0] <= self.t:
             raise ValueError(f"a chunk of 1..{self.t} rows, got {rows.shape}")
-        out = np.zeros((self.t, D))
+        out = np.zeros((self.t, self.D))
         out[: rows.shape[0], : rows.shape[1]] = rows
         out[rows.shape[0]:, : rows.shape[1]] = rows[-1]
         return out
 
     def decode_lanes(self, vec, T: int) -> np.ndarray:
         """(T, C): lane l's first C channels of a decrypted slot vector."""
-        v = np.asarray(vec).reshape(D, self.t)
+        v = np.asarray(vec).reshape(self.D, self.t)
         return v[: self.C, :T].T.copy()
 
     def chunk(self, rows) -> np.ndarray:

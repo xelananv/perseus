@@ -9,7 +9,6 @@ from types import SimpleNamespace
 from perseus.examples.fhe_ssm import fakes, port_env
 from perseus.examples.fhe_ssm import run_fake as ssm_run_fake
 
-from .layout import D
 from .model import Rwkv7Fhe
 
 LOGN = 16
@@ -19,11 +18,13 @@ def level_preset(levels: str = "preset"):
     return fakes.level_preset(levels)
 
 
-def make_session(*, capture=False, levels="preset", unit=2, strict=False):
-    """(fhe, inf, core) at this model's dims (1,024 channels, so ``pack_tokens`` lays out t = 32 lanes)."""
+def make_session(*, capture=False, levels="preset", unit=2, strict=False, lanes=32):
+    """(fhe, inf, core) at this model's dims (``32,768 / lanes`` channels per ciphertext: 1,024 at the default t = 32
+    lanes, so ``pack_tokens`` lays out t lanes)."""
     port_env()
     limit, bts_out = level_preset(levels)
-    dims = SimpleNamespace(d=D, d_ffn=3 * D)
+    d = (1 << (LOGN - 1)) // int(lanes)
+    dims = SimpleNamespace(d=d, d_ffn=3 * d)
     return ssm_run_fake.make_session(dims, LOGN, rules="runtime", limit=limit, bts_out=bts_out, unit=unit,
                                      strict=strict, complex_payload=True, capture=capture)
 
@@ -36,8 +37,11 @@ def rot_band(fhe, model: Rwkv7Fhe):
     fhe._rot = steps | {s - n for s in steps}
 
 
-def make_model(P, coeffs, *, capture=False, levels="preset", n_layers=None, **kw):
-    fhe, inf, core = make_session(capture=capture, levels=levels)
-    model = Rwkv7Fhe(inf, P, coeffs, core=core, n_layers=n_layers, **kw)
+def make_model(P, coeffs, *, capture=False, levels="preset", n_layers=None, lanes=0, **kw):
+    """``lanes``: t (32 / 16 / 8), 0 = ``layout.auto_lanes`` for the checkpoint's width."""
+    from .layout import auto_lanes
+    lanes = int(lanes) or auto_lanes(P.C, 1 << (LOGN - 1))
+    fhe, inf, core = make_session(capture=capture, levels=levels, lanes=lanes)
+    model = Rwkv7Fhe(inf, P, coeffs, core=core, n_layers=n_layers, lanes=lanes, **kw)
     rot_band(fhe, model)
     return fhe, inf, model
