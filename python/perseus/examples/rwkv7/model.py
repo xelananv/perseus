@@ -30,7 +30,9 @@ on its interval, without a clamp (a ciphertext cannot be clamped); the inverse s
 """
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -157,6 +159,21 @@ class LayerW:
         return [*self.l1, *self.lora2, self.w2, self.g2, self.wo, self.fk, self.fv]
 
 
+#: the raise drops the runtime builds dense-route variants for (make_plan.sh FIDESLIB_BTS_RAISE_DROPS=1,3,5)
+CARRY_DROPS = (0, 1, 3, 5)
+
+
+def state_levers(carry_drop=None, state_entry=None) -> tuple[int, int]:
+    """(carry_drop, state_entry) from the arguments, else RWKV7_CARRY_DROP / RWKV7_STATE_ENTRY (default 0, 0)."""
+    d = int(carry_drop if carry_drop is not None else os.environ.get("RWKV7_CARRY_DROP", "0") or 0)
+    e = int(state_entry if state_entry is not None else os.environ.get("RWKV7_STATE_ENTRY", "0") or 0)
+    if d not in CARRY_DROPS:
+        raise ValueError(f"RWKV7_CARRY_DROP={d}: the runtime builds the drop variants {CARRY_DROPS[1:]}")
+    if e < 0:
+        raise ValueError(f"RWKV7_STATE_ENTRY={e}")
+    return d, e
+
+
 def state_names(Sh: int, M: int) -> list[str]:
     """One block's carried ciphertexts, in ``State.cts()`` order: shard 0 keeps the single-shard names (``s0 s1 xa
     xf``), shard j > 0 adds ``h<j>`` (``s0h1``, ``xah1``)."""
@@ -175,6 +192,10 @@ class State:
 
     def cts(self):
         return [*self.S, *self.xa, *self.xf]
+
+    def s_cts(self):
+        """The state ciphertexts alone (the carries xa / xf excluded), in ``cts()`` order."""
+        return list(self.S)
 
     def names(self):
         return state_names(len(self.xa), len(self.S) // len(self.xa))
@@ -442,7 +463,8 @@ class Rwkv7Fhe(ImplModel):
 
     def __init__(self, inf, P: Params, coeffs: dict, *, core=None, n_layers=None, unit=None, wbits=24,
                  fuse_l1=False, shifts=None, carry=True, chunk=0, prefill_keys=0, batch=0, batch_carry="decode",
-                 batch_hoist=0, lora="auto", shard_land=True, lanes=0, layout="current"):
+                 batch_hoist=0, lora="auto", shard_land=True, lanes=0, layout="current", carry_drop=None,
+                 state_entry=None):
         super().__init__(inf, core=core, unit=unit)
         self.P = P
         self.n_layers = int(P.n_layer if n_layers is None else n_layers)
@@ -461,6 +483,16 @@ class Rwkv7Fhe(ImplModel):
         # loads a T-token pass's rotation keys while decoding (a session that serves both)
         self.prefill_keys = int(prefill_keys)
         self.batch, self.batch_carry, self.batch_hoist = 0, str(batch_carry), int(batch_hoist)
+        # the carried state's refresh levers (SPEEDUP_MAP_20261105.md S1 / S2; capture-side, default off):
+        #   RWKV7_CARRY_DROP=d   the S carries (and S's landing in start()) refresh under raise drop d (1, 3 or 5: the
+        #                        runtime's built variants): the capture recorder lands them 2 d units deeper
+        #                        (impl/fakecap.py inner_bootstrap, CapFhe.raise_drop), the compiled program takes the
+        #                        dropped route; xa / xf keep drop 0
+        #   RWKV7_STATE_ENTRY=L  after every landing of S (start() and each carry) the capture drops S to level L
+        #                        (a level_reduce): the graph then shows S entering every block at L, as it would on the
+        #                        second pass of a two-pass carry cycle (pass A leaves S unrefreshed at 32), so the
+        #                        planner's acceptance of that pass can be read on the CPU. Capture recorder only.
+        self.carry_drop, self.state_entry = state_levers(carry_drop, state_entry)
         self.set_chunk(chunk)
         if batch:
             self.set_batch(batch)
@@ -557,10 +589,40 @@ class Rwkv7Fhe(ImplModel):
                               [rest[(K + c) * Sh:(K + c + 1) * Sh] for c in range(K)], False)
         return State(cts[: Sh * M], cts[Sh * M:Sh * M + Sh], cts[Sh * M + Sh:Sh * M + 2 * Sh])
 
+    @contextlib.contextmanager
+    def _carry_drop(self):
+        """The S carries' refreshes under raise drop ``carry_drop`` (the capture recorder's ``raise_drop``; a session
+        or the plain fake ignores the attribute: only the recorded graph carries the deeper landing)."""
+        fhe = self.rt.ops.fhe
+        if not self.carry_drop or not hasattr(fhe, "inner_bootstrap"):
+            yield
+            return
+        old = getattr(fhe, "raise_drop", 0)
+        fhe.raise_drop = self.carry_drop
+        try:
+            yield
+        finally:
+            fhe.raise_drop = old
+
+    def land_state(self, st):
+        """The carry refresh of one block's state: S under the drop (then at the entry level), xa / xf plain."""
+        ops = self.rt.ops
+        s_cts = st.s_cts()
+        with self._carry_drop():
+            for c in s_cts:
+                ops.bootstrap(c)
+        if self.state_entry:
+            # the capture recorder records a level_reduce (impl/fakecap.py drop_to_level); the plain fake, which
+            # run_capture runs first for the PCMM shifts, has none and ops.level_drop is a no-op there
+            for c in s_cts:
+                if ops.level(c) < self.state_entry:
+                    ops.level_drop(c, self.state_entry)
+        for c in st.cts()[len(s_cts):]:
+            ops.bootstrap(c)
+
     def start(self, state=None):
         """Zero state (or ``state``, a public ``ref.State``), each ciphertext landed by a bootstrap (as every carried
         value is), so the first token enters the circuit every later token does."""
-        ops = self.rt.ops
         state = self.init_state if state is None else state
         rows = None if state is None else self.state_rows(state)
         self.state = []
@@ -570,9 +632,9 @@ class Rwkv7Fhe(ImplModel):
                 cts = [self.zero_ct() for _ in range(n)]
             else:
                 cts = [self.pack_rows(r) for r in rows[b]]
-            for c in cts:
-                ops.bootstrap(c)
-            self.state.append(self.make_state(cts))
+            st = self.make_state(cts)
+            self.land_state(st)
+            self.state.append(st)
 
     def pack_rows(self, r):
         """``pack_tokens`` of real rows; complex rows (the filled state) as ``pack(Re) + i pack(Im)`` (level-free)."""
@@ -614,8 +676,7 @@ class Rwkv7Fhe(ImplModel):
                     z = self.circ.block(b, z, st, self.W[b])
                     if self.carry_on:
                         with self.rt.step("carry"):
-                            for c in st.cts():
-                                self.rt.ops.bootstrap(c)
+                            self.land_state(st)
                             if self.shard_land:
                                 for c in z:
                                     self.rt.ops.bootstrap(c)

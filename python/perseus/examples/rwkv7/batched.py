@@ -57,6 +57,10 @@ class BatchState:
             return out + [*self.xa, *self.xf]
         return out + [c for xs in self.xa for c in xs] + [c for xs in self.xf for c in xs]
 
+    def s_cts(self):
+        """Every conversation's state ciphertexts (the carries excluded), in ``cts()`` order."""
+        return [c for Sc in self.S for c in Sc]
+
     def names(self):
         return state_names(self.K, len(self.S[0]) // self.Sh, self.lane, self.Sh)
 
