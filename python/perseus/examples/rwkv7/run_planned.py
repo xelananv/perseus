@@ -1549,23 +1549,42 @@ def main_serve(a) -> int:
 LEVERS = ("carry_drop", "carry_skip_s")
 
 
-def refuse_lever_capture(shifts_path):
+def plan_capture_dir(plan_dir):
+    """The capture a plan was cut from: the ``graph=`` line of its PLAN_CMD.txt (make_plan.sh), or None."""
+    if not plan_dir:
+        return None
+    cmd = os.path.join(plan_dir, "PLAN_CMD.txt")
+    if not os.path.exists(cmd):
+        return None
+    with open(cmd) as f:
+        for line in f:
+            if line.startswith("graph="):
+                return line[len("graph="):].split(" (md5", 1)[0].strip()
+    return None
+
+
+def refuse_lever_capture(shifts_path, *plan_dirs):
     """A capture made with a refresh lever (run_capture --carry-drop / --carry-skip-s, recorded in its
-    rwkv7_capture.json beside the shifts file) is a capture-side experiment: its plan has S entering or leaving a block
-    at another level than this driver's twin carries, and this driver has no two-program cycle. Refuse it here, before
-    any device work; a capture without the file (older captures) passes."""
-    if not shifts_path:
-        return
-    meta_path = os.path.join(os.path.dirname(os.path.abspath(shifts_path)), "rwkv7_capture.json")
-    if not os.path.exists(meta_path):
-        return
-    with open(meta_path) as f:
-        meta = json.load(f)
-    on = {k: meta[k] for k in LEVERS if meta.get(k)}
-    if on:
-        raise SystemExit(f"{meta_path}: the capture carries a refresh lever {on} (SPEEDUP_MAP_20261105.md S1 / S2): "
-                         "its plan is a capture-side experiment that this driver cannot run (no two-program cycle, "
-                         "no dropped-carry route)")
+    rwkv7_capture.json) is a capture-side experiment: its plan has S entering or leaving a block at another level than
+    this driver's twin carries, and this driver has no two-program cycle. Refuse it here, before any device work, from
+    every capture the run rests on: the one beside the shifts file (optional, and run_box.sh reuses the decode
+    capture's shifts for plans cut from other captures) and the one each plan records (the graph= line of its
+    PLAN_CMD.txt). A capture without the file (older captures) or a plan without PLAN_CMD.txt passes."""
+    dirs = []
+    if shifts_path:
+        dirs.append(os.path.dirname(os.path.abspath(shifts_path)))
+    dirs += [d for d in (plan_capture_dir(p) for p in plan_dirs) if d]
+    for d in dirs:
+        meta_path = os.path.join(d, "rwkv7_capture.json")
+        if not os.path.exists(meta_path):
+            continue
+        with open(meta_path) as f:
+            meta = json.load(f)
+        on = {k: meta[k] for k in LEVERS if meta.get(k)}
+        if on:
+            raise SystemExit(f"{meta_path}: the capture carries a refresh lever {on} (SPEEDUP_MAP_20261105.md S1 / S2): "
+                             "its plan is a capture-side experiment that this driver cannot run (no two-program "
+                             "cycle, no dropped-carry route)")
 
 
 def main(argv=None) -> int:
@@ -1605,7 +1624,7 @@ def main(argv=None) -> int:
     if "--keygen" in argv:
         return keygen_main(argv)
     a = ap.parse_args(argv)
-    refuse_lever_capture(a.shifts)
+    refuse_lever_capture(a.shifts, a.plan, a.pf_plan, a.b_plan, a.join_plan)
     if a.serve:
         return main_serve(a)
     if a.batch > 1:

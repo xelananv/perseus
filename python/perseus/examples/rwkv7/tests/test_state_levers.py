@@ -109,7 +109,7 @@ def test_levers_are_capture_flags_only(tmp_path, monkeypatch):
     # the capture's own flags, as main() declares them: default off, drops limited to the built variants
     main_src = inspect.getsource(run_capture.main)
     assert "--carry-drop" in main_src and "choices=(0, 1, 3, 5)" in main_src and "--carry-skip-s" in main_src
-    # the driver's guard
+    # the driver's guard: the capture beside the shifts file, and the capture each plan records
     cap = tmp_path / "cap"
     cap.mkdir()
     shifts = cap / "pcmm_shifts.json"
@@ -122,6 +122,28 @@ def test_levers_are_capture_flags_only(tmp_path, monkeypatch):
         with pytest.raises(SystemExit, match="refresh lever"):
             run_planned.refuse_lever_capture(str(shifts))
     run_planned.refuse_lever_capture(None)                        # no shifts file given: nothing to check
+    # a plan cut from a lever capture is refused even when --shifts points at a clean capture (run_box.sh reuses the
+    # decode capture's shifts for every plan) and when no shifts file is given; the plan's PLAN_CMD.txt names it
+    (cap / "rwkv7_capture.json").write_text(json.dumps({"carry_drop": 0, "carry_skip_s": False}))
+    lever_cap = tmp_path / "cap_passA"
+    lever_cap.mkdir()
+    (lever_cap / "rwkv7_capture.json").write_text(json.dumps({"carry_drop": 0, "carry_skip_s": True}))
+    plan = tmp_path / "plan_passA"
+    plan.mkdir()
+    (plan / "PLAN_CMD.txt").write_text(f"graph={lever_cap} (md5 of the stages' graph.json 0123)\ntool=make_plan.sh\n")
+    assert run_planned.plan_capture_dir(str(plan)) == str(lever_cap)
+    for shifts_arg in (str(shifts), None):
+        with pytest.raises(SystemExit, match="refresh lever"):
+            run_planned.refuse_lever_capture(shifts_arg, str(plan))
+        with pytest.raises(SystemExit, match="refresh lever"):      # any of a serve session's plan sets
+            run_planned.refuse_lever_capture(shifts_arg, str(cap), None, str(plan), None)
+    clean_plan = tmp_path / "plan_clean"
+    clean_plan.mkdir()
+    (clean_plan / "PLAN_CMD.txt").write_text(f"graph={cap} (md5 of the stages' graph.json 4567)\n")
+    run_planned.refuse_lever_capture(str(shifts), str(clean_plan))        # a clean plan: allowed
+    run_planned.refuse_lever_capture(str(shifts), str(tmp_path / "no_such_plan"))   # no PLAN_CMD.txt: allowed
+    (clean_plan / "PLAN_CMD.txt").write_text(f"graph={tmp_path / 'gone'} (md5 x)\n")
+    run_planned.refuse_lever_capture(str(shifts), str(clean_plan))        # a capture no longer on disk: allowed
 
 
 @need
