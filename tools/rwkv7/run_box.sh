@@ -67,6 +67,10 @@
 #                 any one conversation's own state work (tools/rwkv7/planopt.sh; PLAN_B2.md): the cut covers it from
 #                 shared values instead. Own plan dir, key bundles and run records (suffix _pob2); decode, prefill and join plans
 #                 are not affected (they have none of those steps). Combines with LEVERS=best
+#   RWKV7_SHED_TWIN=1  host RAM, not speed: the CPU twins keep one slot of each recorded vector only their record still
+#                 references and one copy per distinct plaintext (run_planned.py Recorder; results/rwkv7-fhe-20261104/
+#                 new_pod/HOST_RAM_20261105.md). Default off. Read from the environment (pyrun passes it through); same plans,
+#                 same product names: the record header's shed_twin says which ran
 #
 # Keys (run_planned --keys; the 11-02 fhe_ssm publication path), REQUIRED for run / run_pf / batch / serve (no default,
 # as fhe_ssm's run_gpu.sh): KEYS=inproc (the session generates every key and holds the secret; recorded insecure-inproc)

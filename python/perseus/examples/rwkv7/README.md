@@ -149,6 +149,11 @@ a resident plaintext store far beyond the card.
   * Each reply is decrypted and scored against the poly model and the circuit's numpy mirror.
   * Keys are in-process (`KeySource.generate`): the session holds the secret. This is a correctness and timing run,
     recorded as `keys: insecure-inproc`.
+  * `RWKV7_SHED_TWIN=1` (default off; host RAM only): the twins otherwise keep both probe tokens' every intermediate
+    vector (512 KB each at the fake's fixed ring 2^16) and a copy of every mask for the whole session, about 1.4 GB
+    per block at decode and 9.5 GB per block at K = 32 or T = 32; with the flag they keep one slot of each vector
+    only the record references and one copy per distinct plaintext. Same streams, plans and staged values
+    (`tests/test_shed_twin.py`); the header's `shed_twin` records it (`results/rwkv7-fhe-20261104/new_pod/HOST_RAM_20261105.md`).
 
 ## Prefill: T prompt tokens per pass (`prefill.py`, `PREFILL_DESIGN.md`)
 
