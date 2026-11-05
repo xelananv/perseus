@@ -492,7 +492,12 @@ class Rwkv7Fhe(ImplModel):
         #                        (a level_reduce): the graph then shows S entering every block at L, as it would on the
         #                        second pass of a two-pass carry cycle (pass A leaves S unrefreshed at 32), so the
         #                        planner's acceptance of that pass can be read on the CPU. Capture recorder only.
+        #   RWKV7_CARRY_SKIP_S=1 the two-pass cycle's schedule: at odd positions the carry refreshes xa / xf only and
+        #                        leaves S unrefreshed (pass A: S in at the landing, out 6 units deeper), at even
+        #                        positions S is refreshed (pass B); start() still lands S. A capture at tick 1 records
+        #                        pass A with S entering at the landing
         self.carry_drop, self.state_entry = state_levers(carry_drop, state_entry)
+        self.carry_skip_s = bool(int(os.environ.get("RWKV7_CARRY_SKIP_S", "0") or 0))
         self.set_chunk(chunk)
         if batch:
             self.set_batch(batch)
@@ -604,14 +609,16 @@ class Rwkv7Fhe(ImplModel):
         finally:
             fhe.raise_drop = old
 
-    def land_state(self, st):
-        """The carry refresh of one block's state: S under the drop (then at the entry level), xa / xf plain."""
+    def land_state(self, st, skip_s=False):
+        """The carry refresh of one block's state: S under the drop (then at the entry level), xa / xf plain;
+        ``skip_s`` leaves S unrefreshed (the two-pass cycle's pass A)."""
         ops = self.rt.ops
         s_cts = st.s_cts()
-        with self._carry_drop():
-            for c in s_cts:
-                ops.bootstrap(c)
-        if self.state_entry:
+        if not skip_s:
+            with self._carry_drop():
+                for c in s_cts:
+                    ops.bootstrap(c)
+        if self.state_entry and not skip_s:
             # the capture recorder records a level_reduce (impl/fakecap.py drop_to_level); the plain fake, which
             # run_capture runs first for the PCMM shifts, has none and ops.level_drop is a no-op there
             for c in s_cts:
@@ -676,7 +683,7 @@ class Rwkv7Fhe(ImplModel):
                     z = self.circ.block(b, z, st, self.W[b])
                     if self.carry_on:
                         with self.rt.step("carry"):
-                            self.land_state(st)
+                            self.land_state(st, skip_s=self.carry_skip_s and pos % 2 == 1)
                             if self.shard_land:
                                 for c in z:
                                     self.rt.ops.bootstrap(c)

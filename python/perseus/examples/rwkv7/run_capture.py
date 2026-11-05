@@ -175,6 +175,7 @@ def main(argv=None) -> int:
             "fuse_l1": a.fuse_l1, "pcmm_shift": a.pcmm_shift, "width": P.C, "blocks_loaded": P.n_layer, "n_layer_ckpt": _ckpt_depth(a.pth),
             "shards": model.L.S, "lanes": model.L.t, "channels_per_ct": model.L.D, "layout": model.L.layout, "lora": model.W[0].lora if model.W else None, "shard_land": model.shard_land,
             "state_names": model.state_names(), "carry_drop": model.carry_drop, "state_entry": model.state_entry,
+            "carry_skip_s": model.carry_skip_s,
             "environment": common.environment()}
     with open(os.path.join(a.out, "rwkv7_capture.json"), "w") as f:
         json.dump(meta, f, indent=1)

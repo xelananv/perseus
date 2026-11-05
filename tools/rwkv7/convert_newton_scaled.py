@@ -5,24 +5,16 @@
     PYTHONPATH=python python tools/rwkv7/convert_newton_scaled.py --coeffs coeffs_final.json --out coeffs_final_sc.json
         [--tol 1e-3] [--zero 3.0]
 
-The mechanism (perseus/impl/poly.py ``scaled_newton_steps``, P6's "next lever" in ROBUST_NORMS.md): plain Newton for
-1/sqrt(u) from the constant seed, y <- y (1.5 - 0.5 u y^2), raises y by at most 1.5x per step, so a site whose accuracy
-range spans a ratio of 1e4 in u climbs for ~11 steps before it converges. With t = u y^2, a step maps t -> t (a - b t)^2;
-the pair (a, b) = (1.5, 0.5) is one choice. Per-step constants that map the band [t_lo, 1] onto the widest image that stays
-<= 1 (q peaks at exactly 1 inside the band, q(t_lo) = q(1)) cover ~6.7x of band ratio per step instead of 2.25x. The
-first step keeps its zero at ``zero`` times the band top (3.0: the same divergence bound as newton_const, u = 3), and every
-later step keeps t <= 1, so an input anywhere in (0, 3 scale) stays finite and positive and is under-normalised at worst,
-never sign-flipped: the robustness argument of ROBUST_NORMS.md holds unchanged. The accuracy range [lo, hi], the pre-scale,
-eps and the output convention (y scale^-1/2 = 1/sqrt(x + eps)) are the newton_const site's own.
-
-Site JSON: method newton_scaled, steps [[a, b], ...] (step 1 affine: y = a - b u), n_steps, depth 1 + 2 (n_steps - 1),
-and newton_const's fields (eps, scale, lo, hi, conv_lo, conv_hi, R, tol, calib_min, calib_max) plus const_steps.
+Per-step (a, b) constants from ``perseus.impl.poly.scaled_newton_steps`` on newton_const's seed, pre-scale, eps,
+accuracy range and divergence bound (step 1 is (1.5, 0.5), its zero at u = ``zero``; every later step keeps t = u y^2
+<= 1): ~6.7x of range ratio per step instead of 2.25x, about half the depth. The error profile differs from
+newton_const's (ROBUST_NORMS.md "newton_scaled"): the per-site checks here, and the gate, decide whether a converted file
+may be used. Site fields: steps, n_steps, depth, const_steps, const_depth, max_rel_err, blow_at (x / conv_hi).
 """
 from __future__ import annotations
 
 import argparse
 import json
-import math
 import re
 import sys
 
@@ -39,9 +31,13 @@ def scaled_rsqrt_np(x, p: dict) -> np.ndarray:
     return y * p["scale"] ** -0.5
 
 
-def max_rel_err(p: dict, n: int = 4001) -> float:
-    """max |sqrt(x + eps) y - 1| over the accuracy range (log grid in the argument)."""
-    arg = np.geomspace(p["lo"] + p["eps"], p["hi"] + p["eps"], n)
+def exact(x, p: dict) -> np.ndarray:
+    return 1.0 / np.sqrt(np.asarray(x, dtype=np.float64) + p["eps"])
+
+
+def max_rel_err(p: dict, lo: float, hi: float, n: int = 4001) -> float:
+    """max |sqrt(x + eps) y - 1| over [lo, hi] (log grid in the argument)."""
+    arg = np.geomspace(lo + p["eps"], hi + p["eps"], n)
     return float(np.max(np.abs(scaled_rsqrt_np(arg - p["eps"], p) * np.sqrt(arg) - 1.0)))
 
 
@@ -60,20 +56,28 @@ def scaled_site(s: dict, tol: float, zero: float) -> dict:
                 "R": s.get("R"), "tol": float(tol), "zero": float(zero), "ratio": ratio,
                 "calib_min": s.get("calib_min"), "calib_max": s.get("calib_max"),
                 "const_steps": int(s["steps"]), "const_depth": 1 + 2 * (int(s["steps"]) - 1)})
-    out["max_rel_err"] = max_rel_err(out)
+    out["max_rel_err"] = max_rel_err(out, out["lo"], out["hi"])
+    if out["calib_min"] is not None and out["calib_max"] is not None:
+        out["max_rel_err_calib"] = max_rel_err(out, max(float(out["calib_min"]), 0.0), float(out["calib_max"]))
     return out
 
 
 def robust(p: dict) -> dict:
-    """The robustness checks of ROBUST_NORMS.md on the converted site: finite, positive and from below between the
-    widened top and the divergence bound; finite and positive at zero."""
-    f = lambda x: 1.0 / np.sqrt(np.asarray(x, dtype=np.float64) + p["eps"])  # noqa: E731
-    xb = np.linspace(p["hi"], 0.98 * p["conv_hi"], 400)
+    """The robustness checks on the converted site: finite, positive and from below between the widened top and the
+    divergence bound conv_hi (inclusive); finite and positive at zero; and ``blow_at``, the smallest x / conv_hi in
+    [1, 1.5] where the output is non-finite or 1,000x the exact value (None if it stays bounded there)."""
+    xb = np.linspace(p["hi"], p["conv_hi"], 400)
     yb = scaled_rsqrt_np(xb, p)
     y0 = scaled_rsqrt_np(np.array([0.0]), p)
-    return {"finite_above": bool(np.isfinite(yb).all()), "positive_above": bool((yb > 0).all()),
-            "from_below_above": bool((yb <= f(xb) * (1 + 1e-12)).all()),
-            "finite_at_zero": bool(np.isfinite(y0).all() and (y0 > 0).all())}
+    xo = p["conv_hi"] * np.linspace(1.0, 1.5, 2001)
+    with np.errstate(all="ignore"):
+        yo = scaled_rsqrt_np(xo, p)
+        bad = np.flatnonzero(~np.isfinite(yo) | (np.abs(yo) > 1e3 * exact(xo, p)))
+    # at conv_hi itself u = 3 and y = 0 (rounding may give -1e-16): under-normalised, never sign-flipped
+    return {"finite_to_conv_hi": bool(np.isfinite(yb).all()), "positive_to_conv_hi": bool((yb >= -1e-12).all()),
+            "from_below_to_conv_hi": bool((yb <= exact(xb, p) * (1 + 1e-12)).all()),
+            "finite_at_zero": bool(np.isfinite(y0).all() and (y0 > 0).all()),
+            "blow_at": float(xo[bad[0]] / p["conv_hi"]) if bad.size else None}
 
 
 def convert(coeffs: dict, tol: float = 1e-3, zero: float = 3.0) -> tuple[dict, list]:
@@ -84,12 +88,14 @@ def convert(coeffs: dict, tol: float = 1e-3, zero: float = 3.0) -> tuple[dict, l
             continue
         sc = scaled_site(s, tol, zero)
         r = robust(sc)
-        if sc["max_rel_err"] > tol * (1 + 1e-9) or not all(r.values()):
+        ok = all(v for k, v in r.items() if k != "blow_at")
+        if sc["max_rel_err"] > tol * (1 + 1e-9) or not ok:
             raise ValueError(f"{name}: rel err {sc['max_rel_err']:.3e}, robust {r}")
+        sc["blow_at"] = r["blow_at"]
         out["sites"][name] = sc
         rows.append({"name": name, "short": s.get("short", name), "const_steps": int(s["steps"]),
                      "const_depth": sc["const_depth"], "steps": sc["n_steps"], "depth": sc["depth"],
-                     "ratio": sc["ratio"], "rel": sc["max_rel_err"], **r})
+                     "ratio": sc["ratio"], "rel": sc["max_rel_err"], "rel_calib": sc.get("max_rel_err_calib"), **r})
     out.setdefault("meta", {})["newton_scaled"] = {"tol": tol, "zero": zero, "converted": len(rows)}
     return out, rows
 
@@ -113,16 +119,22 @@ def main(argv=None) -> int:
     ap.add_argument("--tol", type=float, default=1e-3)
     ap.add_argument("--zero", type=float, default=3.0)
     a = ap.parse_args(argv)
-    out, rows = convert(json.load(open(a.coeffs)), a.tol, a.zero)
-    json.dump(out, open(a.out, "w"), indent=1)
+    with open(a.coeffs) as f:
+        coeffs = json.load(f)
+    out, rows = convert(coeffs, a.tol, a.zero)
+    with open(a.out, "w") as f:
+        json.dump(out, f, indent=1)
     for r in rows:
         print(f"{r['name']:28s} const {r['const_steps']:2d} st d{r['const_depth']:2d}  ->  scaled {r['steps']:2d} st "
-              f"d{r['depth']:2d}  ratio {r['ratio']:.3g}  rel {r['rel']:.2e}")
+              f"d{r['depth']:2d}  ratio {r['ratio']:.3g}  rel {r['rel']:.2e} (calib {r['rel_calib']:.2e})  "
+              f"blow_at {r['blow_at']}")
     s = summary(rows)
     print(json.dumps(s, indent=1))
     tot_c = sum(v["const_depth"][2] for v in s.values())
     tot_s = sum(v["depth"][2] for v in s.values())
     print(f"mean depth of the four chains per block: {tot_c:.1f} -> {tot_s:.1f} levels ({tot_s - tot_c:+.1f})")
+    print(f"max rel err: accuracy range {max(r['rel'] for r in rows):.3e}, calibrated range "
+          f"{max(r['rel_calib'] for r in rows):.3e}; blow_at min {min(r['blow_at'] for r in rows if r['blow_at'])}")
     print(f"wrote {a.out}: {len(rows)} sites converted")
     return 0
 

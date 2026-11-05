@@ -92,9 +92,11 @@ later positions, but stay convergent.
 **The 1/√x sites' method is a property of the coefficients file**, not a switch: `newton` (a Chebyshev seed, the
 original fit), `newton_const` (P6, `ROBUST_NORMS.md`: the constant seed that converges for every input below 3× the
 widened top; the gate-3 files) or `newton_scaled` (the same seed, range and convergence region with per-step constants,
-about half the depth: `tools/rwkv7/convert_newton_scaled.py` converts a `newton_const` file; `tests/test_newton_scaled.py`;
-the speed-up map's T1, `results/rwkv7-fhe-20261104/SPEEDUP_MAP_20261105.md`). The port, the mirror (`ref.py`) and the
-harness evaluate all three.
+about half the depth, but a different error profile: the tolerance spread over the whole widened range instead of
+converged on the data, 2× the error below the range, an overflow beyond 1.385× the divergence bound — `ROBUST_NORMS.md`
+"newton_scaled"; `tools/rwkv7/convert_newton_scaled.py` converts a `newton_const` file; `tests/test_newton_scaled.py`;
+the speed-up map's T1, `results/rwkv7-fhe-20261104/SPEEDUP_MAP_20261105.md`). A converted file is not usable before the
+gate passes it against the `newton_const` file. The port, the mirror (`ref.py`) and the harness evaluate all three.
 
 ## The layout (`layout.py`)
 
@@ -181,8 +183,11 @@ a resident plaintext store far beyond the card.
     rebuild) or the current layout's real carries would unblock it.
   * `RWKV7_STATE_ENTRY=L` (default 0; capture recorder only, the map's S1): after every landing of S the capture drops
     S to level L (a `level_reduce` node), so the recorded graph shows S entering every block at L, as it would on the
-    second pass of a two-pass carry cycle (pass A leaves S unrefreshed at 32). It makes the planner's acceptance of
-    that pass readable on the CPU; a device run of a two-pass cycle needs the driver's two program sets (not built).
+    second pass (B) of a two-pass carry cycle. `RWKV7_CARRY_SKIP_S=1` (default 0) runs the cycle's schedule on the
+    capture: at odd positions the carry refreshes xa / xf only and S leaves the block unrefreshed, 6 units deeper
+    (pass A), at even positions S is refreshed (pass B); a capture at tick 1 records pass A. Both make the planner's
+    acceptance of the cycle readable on the CPU (`tests/test_state_levers.py`); a device run of the cycle needs the
+    driver's two program sets per block (not built), and its quality bar is in the map's §2.2.
 
 ## Prefill: T prompt tokens per pass (`prefill.py`, `PREFILL_DESIGN.md`)
 

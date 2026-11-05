@@ -2,13 +2,14 @@
 """The carried state's refresh levers (results/rwkv7-fhe-20261104/SPEEDUP_MAP_20261105.md S1 / S2), capture side:
 
 * ``RWKV7_CARRY_DROP=d``: the S carries refresh under raise drop d and the recorder lands them 2 d units deeper;
-* ``RWKV7_STATE_ENTRY=L``: the recorded graph shows S entering every block at level L (the second pass of a two-pass
-  carry cycle), so the planner's acceptance of that pass is read on the CPU.
+* ``RWKV7_STATE_ENTRY=L``: the recorded graph shows S entering every block at level L (the second pass, B, of a
+  two-pass carry cycle);
+* ``RWKV7_CARRY_SKIP_S=1``: the cycle's schedule, S unrefreshed at odd positions (the capture at tick 1 records pass A).
 
-Both default off. The checks are 1-block K = 4 filled batched captures (the configuration of the 0.1B K = 32 runs, at
+All default off. The checks are 1-block K = 4 filled batched captures (the configuration of the 0.1B K = 32 runs, at
 K = 4) against a baseline capture of the same recipe: the carry nodes' landings and inputs, the state inputs' levels, and
-with --rwkv7-plan the b2 plan's census (no extra placed refresh, the carries as before) and the compile check when its
-binary exists."""
+with --rwkv7-plan the b2 + PAIR=1 plan's census (no extra placed refresh, the carries as expected) and the compile check
+when its binary exists."""
 import json
 import os
 import pathlib
@@ -19,7 +20,7 @@ from perseus.examples.rwkv7.tests.conftest import CKPT, COEFFS, ROOT
 from perseus.examples.rwkv7.tests.test_ref import HARNESS, need
 
 LAND = 26          # the dense StC-first landing (make_plan.sh LANDING=high: BTS_LEVEL 28, PLAN_LEVEL_UNIT 2 -> 26)
-UNIT = 2
+PASS = 6           # units the state chain costs per pass (S in -> the carry refresh's input, graph.json)
 
 
 def _capture(root, name, env, monkeypatch):
@@ -36,14 +37,30 @@ def _capture(root, name, env, monkeypatch):
     return cap
 
 
+def _graph(cap):
+    with open(cap / "block_0" / "graph.json") as f:
+        return json.load(f)
+
+
 def _carries(cap):
-    """(input level, landing) of every carry refresh of a state ciphertext in block 0, and the S inputs' levels."""
-    g = json.load(open(cap / "block_0" / "graph.json"))
-    carry = [n for n in g["nodes"] if n["op_type"] == "deliberate_bootstrap" and str(n.get("step", "")).endswith("carry")]
-    s_in = sorted({x for n in g["nodes"] for x in n["inputs"] if "cache.s0c" in x})
+    """The carry refreshes of block 0 as {(input level, landing): count}, the S inputs' levels, the level_reduce
+    count, and the level S leaves the block at (its stage output: the deepest S-named cache write's input)."""
+    g = _graph(cap)
+    nodes = g["nodes"]
+    carry = [n for n in nodes if n["op_type"] == "deliberate_bootstrap" and str(n.get("step", "")).endswith("carry")]
+    hist = {}
+    for n in carry:
+        k = (int(n["input_levels"][0]), int(n["output_level"]))
+        hist[k] = hist.get(k, 0) + 1
+    s_in = sorted({x for n in nodes for x in n["inputs"] if "cache.s0c" in x})
     levels = sorted({int(x.rsplit("lvl=", 1)[1]) for x in s_in})
-    reduces = [n for n in g["nodes"] if n["op_type"] == "level_reduce"]
-    return carry, levels, reduces
+    reduces = sum(n["op_type"] == "level_reduce" for n in nodes)
+    return hist, levels, reduces
+
+
+def _meta(cap):
+    with open(cap / "rwkv7_capture.json") as f:
+        return json.load(f)
 
 
 def _plan(root, cap, name, monkeypatch):
@@ -55,15 +72,20 @@ def _plan(root, cap, name, monkeypatch):
     monkeypatch.setenv(*kv.split("=", 1))
     plan = root / "bootstrap_placements" / f"plan_{name}"
     if not (plan / "PLAN_CMD.txt").exists():
-        env = {**os.environ, "LANDING": "high", "PAIR": "1", "PLAN_ROOT": str(root), "MEMGUARD_GB": "",
-               "PY": sys.executable, "PYTHONPATH": str(ROOT / "python")}
+        env = {**os.environ, "LANDING": "high", "PAIR": "1", "RUNTIME_EXTRA": "PC_EM_FUSE_RESCALE=1",
+               "PLAN_ROOT": str(root), "MEMGUARD_GB": "", "PY": sys.executable, "PYTHONPATH": str(ROOT / "python")}
         p = subprocess.run(["bash", str(ROOT / "tools/fhe_ssm/make_plan.sh"), str(cap), f"plan_{name}"], env=env,
-                           capture_output=True, text=True, timeout=5400)
+                           capture_output=True, text=True, timeout=5400, check=False)
         assert p.returncode == 0, p.stdout[-2000:] + p.stderr[-2000:]
     c = plan_census(cap, plan, 0)
     cc = plan / "compile_check.json"
-    check = json.load(open(cc))["blocks"][0] if cc.exists() else None
-    return plan, c, check
+    check = None
+    if cc.exists():
+        with open(cc) as f:
+            check = json.load(f)["blocks"][0]
+    with open(plan / "summary.txt") as f:
+        exit_at = [ln for ln in f.read().splitlines() if "block_0:" in ln]
+    return c, check, exit_at
 
 
 def test_default_off(monkeypatch):
@@ -80,61 +102,66 @@ def test_default_off(monkeypatch):
 
 
 @need
-def test_carry_drop_and_entry_in_capture(tmp_path, monkeypatch):
+def test_carry_levers_in_capture(tmp_path, monkeypatch):
     root = pathlib.Path(os.environ.get("RWKV7_SL_DIR", str(tmp_path)))
-    base = _capture(root, "base", {}, monkeypatch)
-    drop = _capture(root, "drop3", {"RWKV7_CARRY_DROP": "3"}, monkeypatch)
-    entry = _capture(root, "entry32", {"RWKV7_STATE_ENTRY": "32"}, monkeypatch)
-    cb, lb, rb = _carries(base)
-    cd, ld, rd = _carries(drop)
-    ce, le, re_ = _carries(entry)
-    print("base  carries", sorted({(tuple(n["input_levels"]), n["output_level"]) for n in cb}), "S in", lb, "reduces", len(rb))
-    print("drop3 carries", sorted({(tuple(n["input_levels"]), n["output_level"]) for n in cd}), "S in", ld, "reduces", len(rd))
-    print("entry carries", sorted({(tuple(n["input_levels"]), n["output_level"]) for n in ce}), "S in", le, "reduces", len(re_))
-    # baseline: 4 S carries + xa + xf, S in at the landing, the carry refresh from the landing + the pass's 6 units
-    assert len(cb) == 6 and lb == [LAND] and not rb
-    s_base = [n for n in cb if n["input_levels"][0] == LAND + 6]
-    assert len(s_base) == 4 and all(n["output_level"] == LAND for n in s_base)
+    caps = {"base": _capture(root, "base", {}, monkeypatch),
+            "drop3": _capture(root, "drop3", {"RWKV7_CARRY_DROP": "3"}, monkeypatch),
+            "entry32": _capture(root, "entry32", {"RWKV7_STATE_ENTRY": "32"}, monkeypatch),
+            "passA": _capture(root, "passA", {"RWKV7_CARRY_SKIP_S": "1"}, monkeypatch)}
+    rec = {k: _carries(c) for k, c in caps.items()}
+    for k, (hist, levels, reduces) in rec.items():
+        print(f"{k:8s} carries {sorted(hist.items())} S in {levels} level_reduce {reduces}")
+    # baseline: 4 S carries from the landing + the pass's 6 units, xa / xf from 42 / 44; S enters at the landing
+    hist, levels, reduces = rec["base"]
+    assert hist.get((LAND + PASS, LAND)) == 4 and sum(hist.values()) == 6 and levels == [LAND] and reduces == 0
+    xaxf = {k: v for k, v in hist.items() if k != (LAND + PASS, LAND)}
     # drop 3: the S carries land 2 x 3 units deeper and start 6 units above that; xa / xf as before
-    s_drop = [n for n in cd if n["output_level"] == LAND + 2 * 3]
-    assert len(s_drop) == 4 and ld == [LAND + 6] and all(n["input_levels"][0] == LAND + 6 + 6 for n in s_drop)
-    assert sorted(n["output_level"] for n in cd if n not in s_drop) == [LAND, LAND]
-    meta = json.load(open(drop / "rwkv7_capture.json"))
-    assert meta["carry_drop"] == 3 and meta["state_entry"] == 0
-    # entry 32: S enters at 32, its carry refresh starts at 38 and lands at 26, then one level_reduce per S per token
-    assert le == [32] and len(re_) == 4
-    s_entry = [n for n in ce if n["input_levels"][0] == 32 + 6]
-    assert len(s_entry) == 4 and all(n["output_level"] == LAND for n in s_entry)
-    assert json.load(open(entry / "rwkv7_capture.json"))["state_entry"] == 32
+    hist, levels, reduces = rec["drop3"]
+    assert hist.get((LAND + 6 + PASS, LAND + 6)) == 4 and levels == [LAND + 6] and reduces == 0
+    assert {k: v for k, v in hist.items() if k != (LAND + 6 + PASS, LAND + 6)} == xaxf
+    assert _meta(caps["drop3"])["carry_drop"] == 3 and _meta(caps["drop3"])["state_entry"] == 0
+    # entry 32 (pass B): S enters at 32, its carry refresh starts at 38 and lands at 26, one level_reduce per S
+    hist, levels, reduces = rec["entry32"]
+    assert hist.get((32 + PASS, LAND)) == 4 and levels == [32] and reduces == 4
+    assert _meta(caps["entry32"])["state_entry"] == 32
+    # pass A: no S carry at all (xa / xf only), S enters at the landing and leaves 6 units deeper, unrefreshed
+    hist, levels, reduces = rec["passA"]
+    assert sum(hist.values()) == 2 and hist == xaxf and levels == [LAND] and reduces == 0
+    assert _meta(caps["passA"])["carry_skip_s"] is True and not _meta(caps["base"]).get("carry_skip_s", False)
     if os.environ.get("RWKV7_PLAN") != "1":
         return
     res = {}
-    for name, cap in (("base", base), ("drop3", drop), ("entry32", entry)):
-        plan, c, check = _plan(root, cap, name, monkeypatch)
-        res[name] = {"placed": c["refreshes"], "by_step": c["by_step"],
+    for name, cap in caps.items():
+        c, check, exit_at = _plan(root, cap, name, monkeypatch)
+        res[name] = {"placed": c["refreshes"], "by_step": c["by_step"], "exit": exit_at,
                      "compile": None if check is None else {"sites": check["sites"], "errors": check["errors"],
                                                              "richer": check["level_richer"], "routes": check["routes"],
                                                              "launches": check["bootstrap_launches"]}}
         print(name, json.dumps(res[name]))
-    json.dump(res, open(root / "state_levers_plans.json", "w"), indent=1)
-    # the levers move no placed refresh: the same placed count as the baseline, nothing in the per-conversation scopes
-    for name in ("drop3", "entry32"):
+    with open(root / "state_levers_plans.json", "w") as f:
+        json.dump(res, f, indent=1)
+    # the levers move no placed refresh: at most the baseline's count, nothing in the per-conversation scopes
+    for name in ("drop3", "entry32", "passA"):
         assert res[name]["placed"] <= res["base"]["placed"], name
         assert not any(k.endswith(("update", "bcast", "readout")) for k in res[name]["by_step"]), name
-    # the second pass of a two-pass cycle binds on this runtime: no error, no level richer than the capture's
-    if res["entry32"]["compile"] is not None:
-        assert res["entry32"]["compile"]["errors"] == [] and res["entry32"]["compile"]["richer"] == 0
+    # pass B (entry 32) and pass A (no S carry) bind on this runtime: no error, no level richer than the capture's
+    for name in ("entry32", "passA"):
+        if res[name]["compile"] is not None:
+            assert res[name]["compile"]["errors"] == [] and res[name]["compile"]["richer"] == 0, name
+    # pass A plans the baseline's placed sites and compiles 4 refresh sites fewer (its S carries); S leaves it
+    # unrefreshed (no carry node, no placed site in the state scopes: the graph and the census above)
+    assert res["passA"]["placed"] == res["base"]["placed"]
+    if res["passA"]["compile"] is not None and res["base"]["compile"] is not None:
+        assert res["passA"]["compile"]["sites"] == res["base"]["compile"]["sites"] - 4
     # the dropped COMPLEX carries do not (2026-11-05, compile_check of this checkout): the dense StC-first route of a
     # complex payload has no drop variant in the compiler's landing table ("no route lands at (32, 2) from (38, 2)"),
     # while the real route has one (dense_stcf_real@32 in the same check). Until the runtime adds the variant the flag
-    # is a capture-side experiment for the filled layout's S; every error must be of that one kind
+    # is a capture-side experiment for the filled layout's S; every error must be that one or its consequences
     if res["drop3"]["compile"] is not None and res["drop3"]["compile"]["errors"]:
         errs = res["drop3"]["compile"]["errors"]
-        root = [e for e in errs if "no route lands at (32, 2)" in e]
-        assert root, errs[:3]
-        # its consequences: the carries' outputs stay at 38 ([plan_level_error] expected 32 actual 38) and the op
-        # accounting no longer balances; nothing else
+        root_cause = [e for e in errs if "no route lands at (32, 2)" in e]
+        assert root_cause, errs[:3]
         assert all(("no route lands at (32, 2)" in e) or ("[plan_level_error]" in e) or ("op accounting" in e)
                    for e in errs), errs[:3]
-        print(f"drop3: {len(errs)} compile errors: {len(root)} 'no route lands at (32, 2)' (the complex route's drop "
-              f"variant) and their consequences")
+        print(f"drop3: {len(errs)} compile errors: {len(root_cause)} 'no route lands at (32, 2)' (the complex route's "
+              f"drop variant) and their consequences")

@@ -76,11 +76,28 @@ That is +7 refreshes per token in block 0 (+50%). Block 0's new steps (11/21/14/
 ### The next lever: `method: newton_scaled` (built 2026-11-05, default off; the speed-up map's T1)
 
 `perseus.impl.poly.scaled_newton_steps` keeps the constant seed but gives each step its own (a, b): the first step is
-newton_const's (1.5, 0.5), with its zero at u = 3 (the same divergence bound), and every later step is the pair that
-maps the band of t = u y² onto the widest image that stays ≤ 1 (q peaks at exactly 1 inside the band), so one step covers
-about 6.7× of range ratio instead of 2.25×. Because every step keeps t ≤ 1, an input anywhere in (0, 3·scale) stays finite,
-positive and under-normalised at worst: the monotone-from-below argument above holds unchanged, and the accuracy range,
-pre-scale, eps and output convention are the newton_const site's own.
+newton_const's (1.5, 0.5), with its zero at u = 3, and every later step is the pair that maps the band of t = u y² onto
+the widest image that stays ≤ 1 (q peaks at exactly 1 inside the band), so one step covers about 6.7× of range ratio
+instead of 2.25×. The accuracy range, pre-scale, eps and output convention are the newton_const site's own. **The error
+profile is not newton_const's** (measured on the 0.1B's 48 sites, `tests/test_newton_scaled.py::
+test_error_profile_against_newton_const`, reviewer's scripts reproduced 2026-11-06):
+
+| where | newton_const | newton_scaled |
+|---|---|---|
+| accuracy range [lo, hi] = [m/10, 10 M], max rel err | 9.42e-4 | 9.47e-4 (0.4B: 9.95e-4) |
+| calibrated range [m, M], per-site max rel err: median / worst | **4.4e-16** / 2.9e-4 | **9.0e-6** / 9.5e-4; worse on 45 of 48 sites |
+| below the range, at lo/2: median / worst | 3.0e-3 / 1.8e-2 | 6.6e-3 / 3.9e-2 (about 2× worse) |
+| (hi, conv_hi]: finite, ≥ 0, from below | yes | yes (y = 0 at conv_hi) |
+| beyond conv_hi | bounded, \|y√scale\| ≤ 0.58 up to 1.5× | **overflows (−6e219, non-finite) from 1.385× conv_hi** (`blow_at` per site) |
+| noise 1e-6 per step: output deviation, max / median | 4.8e-6 / 4.1e-6 | 9.8e-6 / 4.1e-6 |
+
+The mechanism: newton_const's extra steps keep converging quadratically on the data (the tolerance is binding only at
+the widened bottom), while the scaled pairs spend the whole tolerance evenly over [m/10, 10 M]; beyond the bound the
+strong later steps (a up to 2.59) amplify t > 1 instead of damping it. On a device one overflowing slot corrupts its
+whole ciphertext, so the convergence region (−eps, conv_hi) is the robustness claim, not "finite anywhere". **Before a
+converted file is used: the gate's four bars on it, and its ppl / LAMBADA / top-1 side by side with the newton_const
+file's, plus fresh unclamped full scans with zero non-finite values and no convergence-region exit** (nothing of this is
+run; the 2026-11-05 gate-3 numbers are the newton_const file's).
 
 - **Converter:** `tools/rwkv7/convert_newton_scaled.py --coeffs coeffs_final.json --out coeffs_final_sc.json` (every
   non-1/√x site byte-equal; per site: max relative error ≤ tol on [lo, hi], finite / positive / from below on
@@ -91,11 +108,12 @@ pre-scale, eps and output convention are the newton_const site's own.
   harness's `rwkv7_model.py newton_scaled_eval` and `scan_ranges.py` (the gate and the scans accept the method).
 - **Depth, measured by the converter** (tol 1e-3, zero 3.0): 0.1B 48 sites, the four chains' mean depth per block
   109.5 → 60.2 levels (ln1 23.2 → 13.5, kk 29.8 → 16.0, gn 33.7 → 17.3, ln2 22.8 → 13.3); 0.4B 96 sites, 107.8 → 58.7
-  (ln1 22.9 → 12.9, kk 30.2 → 15.9, gn 32.1 → 16.8, ln2 22.5 → 13.0). Max relative error over the accuracy ranges ≤ 9.5e-4
-  (`tests/test_newton_scaled.py`).
-- **Not yet done:** the gate (WikiText-103 / LAMBADA, clamped and unclamped, plus the full scans) on the converted
-  files, and any device run. The planner's refresh count on a 1-block decode capture is `test_newton_scaled.py::
-  test_plan_cost_const_vs_scaled` (`--rwkv7-plan`).
+  (ln1 22.9 → 12.9, kk 30.2 → 15.9, gn 32.1 → 16.8, ln2 22.5 → 13.0). Max relative error over the accuracy ranges 9.47e-4
+  (0.1B) and 9.95e-4 (0.4B, `blocks.*.ln1.rsqrt`).
+- **Planner count** (`test_plan_cost_const_vs_scaled`, `--rwkv7-plan`; a 1-block decode capture of the 0.1B,
+  LANDING=high): block 0's placed refreshes 20 → 13 (the four chains 18 → 9, `tm.state` 0 → 2), compile check 26 → 19
+  sites, 0 errors. Block 0 only; the batched pass's blocks 0 and 1 are in the speed-up map §4.1.
+- **Not yet done:** the gate on the converted files (above) and any device run.
 
 ## What is built
 
