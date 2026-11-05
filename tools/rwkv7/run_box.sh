@@ -352,6 +352,13 @@ step_keygen() {
     tail -1 "$d/keygen.log" | cut -c1-400 | tee -a "$OUT/session.log"
 }
 
+killed_note() {   # killed_note RC LOG: a SIGKILL (rc 137) leaves no traceback; on pod 3 it was the host's OOM killer at
+                  # session setup (new_pod/RESULTS.md, 0.4B prefill / batched): say so in the run's log
+    [ "$1" = 137 ] || return 0
+    echo "Killed (rc 137, SIGKILL: on pod 3 the host's out-of-memory killer during session setup; check host RAM)" >> "$2"
+    log "the run died of SIGKILL (rc 137): host out-of-memory at setup? ($2)"
+}
+
 gpu_busy() {
     local busy; busy=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader -i "$GPU" 2>/dev/null)
     [ -z "$busy" ] || log "WARNING: GPU $GPU has other processes ($busy): timings are not clean"
@@ -372,6 +379,7 @@ step_run_pf() {
         --prefill-chunk "$PF_T" --pf-plan "$PFPLAN" --schedule "$SCHED" $(cf_flags) --pcmm-cf "$PCMM_CF" \
         --stc-cache "$STC_CACHE" --pool "${POOL_PF:-192}" $(keys_flag pf) --out "$R.jsonl" ${RUN_EXTRA:-} > "$R.log" 2>&1
     local rc=$?
+    killed_note "$rc" "$R.log"
     grep -E '"kind": "(prefill|warmup)"' "$R.jsonl" 2>/dev/null | tee -a "$OUT/session.log"
     grep '"kind": "summary"' "$R.jsonl" 2>/dev/null | cut -c1-900 | tee -a "$OUT/session.log"
     [ $rc = 0 ] || { tail -30 "$R.log"; die "run_pf failed ($R.log)"; }
@@ -414,6 +422,7 @@ step_batch() {
         --plan "$BPLAN" --shifts "$CAP/pcmm_shifts.json" --pcmm-cf "$PCMM_CF" --schedule "$SCHED" $(cf_flags) \
         --stc-cache "${STC_CACHE_B:-$STC_CACHE}" --pool "${POOL_B:-192}" $(keys_flag b) --out "$R.jsonl" ${RUN_EXTRA:-} > "$R.log" 2>&1
     local rc=$?
+    killed_note "$rc" "$R.log"
     grep -E '"kind": "(pass|warmup)"' "$R.jsonl" 2>/dev/null | tee -a "$OUT/session.log"
     grep '"kind": "summary"' "$R.jsonl" 2>/dev/null | cut -c1-1200 | tee -a "$OUT/session.log"
     [ $rc = 0 ] || { tail -30 "$R.log"; die "batch failed ($R.log)"; }
@@ -455,6 +464,7 @@ step_serve() {
         --stc-cache "${STC_CACHE_S:-$STC_CACHE}" --pool "${POOL_S:-256}" $(keys_flag s) --out "$R.jsonl" ${RUN_EXTRA:-} \
         > "$R.log" 2>&1
     local rc=$?
+    killed_note "$rc" "$R.log"
     grep -E '"kind": "(prefill|join|leave|pass|warmup)"' "$R.jsonl" 2>/dev/null | cut -c1-200 | tee -a "$OUT/session.log"
     grep '"kind": "summary"' "$R.jsonl" 2>/dev/null | cut -c1-1500 | tee -a "$OUT/session.log"
     [ $rc = 0 ] || { tail -30 "$R.log"; die "serve failed ($R.log)"; }
@@ -473,6 +483,7 @@ step_run() {
         --schedule "$SCHED" $(cf_flags) --stc-cache "$STC_CACHE" --pool "$POOL" $(keys_flag decode) \
         --out "$R.jsonl" ${RUN_EXTRA:-} > "$R.log" 2>&1
     local rc=$?
+    killed_note "$rc" "$R.log"
     grep '"kind": "token"' "$R.jsonl" 2>/dev/null | cut -c1-220 | tee -a "$OUT/session.log"
     grep '"kind": "summary"' "$R.jsonl" 2>/dev/null | tee -a "$OUT/session.log"
     [ $rc = 0 ] || { tail -30 "$R.log"; die "run failed ($R.log)"; }

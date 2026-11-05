@@ -13,7 +13,8 @@ Compared with the capture's rwkv7_capture.json: pth_sha256 and coeffs_sha256 (sh
 prefill_chunk, lora (auto = fold at one shard, split above), shard_land (a 1-shard model never lands). With --plan,
 the md5 of the capture's block_*/graph.json against the md5 the plan's PLAN_CMD.txt recorded (make_plan.sh's graph=
 line): the plan was cut from this capture. A key the capture does not record (older captures, the join capture's
-layout) is printed as unrecorded and not compared. rc 0 = consistent, 3 = mismatch (one line per field), 2 = no
+layout) is printed as unrecorded and not compared, except lanes and layout on a capture older than the any-size port
+(that code had only t = 32 and the current layout: those are inferred and compared). rc 0 = consistent, 3 = mismatch (one line per field), 2 = no
 capture. CAPTURE_MISMATCH_OK=1 prints the mismatches and returns 0.
 """
 from __future__ import annotations
@@ -133,8 +134,13 @@ def main(argv=None) -> int:
     bad, unrec = [], []
     if meta_kind_bad:
         bad.append(meta_kind_bad)
+    # captures older than the any-size port record no lanes / layout: that code had only t = 32 and the current layout
+    legacy = {"lanes": 32, "layout": "current"}
     for k, v in exp.items():
-        if k not in meta:
+        if meta.get(k) is None and k in legacy and meta.get("kind") != "join":
+            unrec.append(f"{k} (pre-any-size capture: {legacy[k]!r} inferred and compared)")
+            meta = {**meta, k: legacy[k]}
+        elif k not in meta:
             unrec.append(k)
             continue
         got = meta[k]
@@ -158,7 +164,7 @@ def main(argv=None) -> int:
                 if g != m.group(1):
                     bad.append(f"plan: {a.plan} was cut from graphs with md5 {m.group(1)}, this capture's are {g}")
     if unrec:
-        print(f"capture_check {a.capture}: unrecorded, not compared: {', '.join(unrec)}")
+        print(f"capture_check {a.capture}: unrecorded: {', '.join(unrec)}")
     if bad:
         for b in bad:
             print(f"capture_check {a.capture}: MISMATCH {b}")
@@ -168,7 +174,7 @@ def main(argv=None) -> int:
         print("capture_check: refusing (a capture or plan of another configuration; remove it, change OUT, or set "
               "CAPTURE_MISMATCH_OK=1)")
         return 3
-    print(f"capture_check {a.capture}: consistent ({len(exp) - len(unrec)} fields{' + plan md5' if a.plan else ''})")
+    print(f"capture_check {a.capture}: consistent ({len(exp) - sum('inferred' not in u for u in unrec)} fields{' + plan md5' if a.plan else ''})")
     return 0
 
 

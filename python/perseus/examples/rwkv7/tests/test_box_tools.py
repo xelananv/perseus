@@ -120,6 +120,12 @@ def test_capture_check(tmp_path):
     # a decode capture is not a batched one
     r = _check(cap, *[a if a != "b" else "decode" for a in base])
     assert r.returncode == 3 and "MISMATCH batch" in r.stdout
+    # a capture older than the any-size port records no lanes / layout: t = 32 and current are inferred and compared
+    old_meta = {k: v for k, v in meta.items() if k not in ("lanes", "layout")}
+    (cap / "rwkv7_capture.json").write_text(json.dumps(old_meta))
+    assert _check(cap, *base).returncode == 0
+    r = _check(cap, *[a if a != "0" else "16" for a in base])
+    assert r.returncode == 3 and "MISMATCH lanes" in r.stdout, r.stdout
 
 
 def test_memory_model_reproduces_the_final_reports():
@@ -138,6 +144,37 @@ def test_memory_model_reproduces_the_final_reports():
     # the 0.4B batched preset: K = 16 with the 64-slot StC cache restored after halving
     p = preset(m(24, 1024))
     assert p["B_K"] == 16 and p["STC_CACHE_B"] == 64
+
+
+def test_memory_model_pod3_refusal_and_host_ram():
+    """The two pod-3 facts of 2026-11-05 (new_pod/RESULTS.md): the 0.4B K = 16 session at POOL_B 1,024 / STC_CACHE_B
+    64 was refused needing 103,450,379,264 B (98,658.0 MiB) of 96,692.9 MiB free, so the model reproduces that total
+    and the 0.4B preset's pool is below 1,024 and fits; host RAM: the model reproduces the sampler's peaks (decode
+    35.1 / 64.2 GB, batched 150.5 / 160.9 GB), puts the OOM-killed 0.4B K = 32 and T = 32 sessions over the host, and
+    the presets start 0.4B and above at T = 16, K <= 16."""
+    from perseus.examples.rwkv7.ckpt_info import CAP_MB, HOST_CAP_GB, HOST_GB, host_gb, memory_mb, preset
+    from perseus.examples.rwkv7.synth import SIZES, lora_ranks
+
+    def m(nl, C):
+        return {"n_layer": nl, "width": C, "d_ffn": 4 * C, "lora": lora_ranks(C)}
+    need = 103450379264 / 2 ** 20
+    got = memory_mb(m(24, 1024), K=16, pool=1024, stc=64)["total"]
+    assert abs(got / need - 1) < 0.001, (got, need)
+    p = preset(m(24, 1024))
+    assert p["POOL_B"] < 1024 and p["POOL_B"] % 32 == 0 and p["PF_T"] == 16
+    assert memory_mb(m(24, 1024), K=16, pool=p["POOL_B"], stc=p["STC_CACHE_B"])["total"] <= CAP_MB
+    for (nl, C, kw), gb in (((12, 768, {}), 35.14), ((24, 1024, {}), 64.21), ((12, 768, {"K": 32}), 150.48),
+                            ((24, 1024, {"K": 16}), 160.9)):
+        assert abs(host_gb(m(nl, C), **kw)[1] - gb) <= 0.1, (nl, C, kw)
+    assert host_gb(m(24, 1024), K=32)[0] > HOST_GB and host_gb(m(24, 1024), T=32)[0] > HOST_GB
+    assert host_gb(m(12, 768), T=32)[1] < HOST_GB                       # the 0.1B T = 32 session fitted
+    for name, (nl, C) in SIZES.items():
+        q = preset(m(nl, C))
+        if name != "0.1B":
+            assert q["PF_T"] <= 16 and q["B_K"] <= 16, (name, q)
+        if q["B_K"] > 1:
+            assert q["host_batched_gb"] <= HOST_CAP_GB, (name, q)
+    assert preset(m(12, 768))["B_K"] == 32 and preset(m(12, 768))["STC_CACHE_B"] == 64   # the measured 0.1B run
 
 
 def test_filled_prefill_scopes_escape_b2():

@@ -364,7 +364,8 @@ def test_main_serve_keyspec_on_stubs(tmp_path, monkeypatch):
     """``run_planned --serve ... --keyspec`` end to end on the CPU with ``Program.compile`` and the key source
     stubbed: arrivals read and tokenized, the four twins (decode, T = 2 prefill, K = 2 batched, join; 1 block) record
     their probes, ``Rwkv7ServeRun.prepare`` merges the registers and checks every hand-over on the recorded metas, and
-    the session arguments cover the four program sets."""
+    the session arguments cover the four program sets. Memory: peaks at ~5.8 GB alone (review lens 1, finding 4): run
+    it in its own process under a 6 GB guard; the whole file in one process piles up past 5.3 GB."""
     import os
     from types import SimpleNamespace
 

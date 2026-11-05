@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: MIT
-"""The any-size port (ANYSIZE_DESIGN.md) on synthetic checkpoints (synth.py: the x070 structure at any width, random
+"""(Memory: the default tests together reach ~5.3 GB in one process; run this file under a 6 GB guard, the heavy ones
+one per process.) The any-size port (ANYSIZE_DESIGN.md) on synthetic checkpoints (synth.py: the x070 structure at any width, random
 values, coefficients fitted on the exact model's site ranges):
 
 * the layout's shard helpers against the matrix algebra (state round trip, per-shard head reductions);
@@ -226,26 +227,34 @@ def test_batched_mirror_2048(tmp_path_factory, K, carry, lanes):
 def test_filled_mirror_2048(tmp_path_factory, lanes):
     """The filled state layout above width 1,024 (review lens 1, finding 4): at 2,048 as one t = 16 ciphertext
     (lanes 0) and as two t = 32 shards, the filled mirror gives the current mirror's hidden states for 3 decode
-    steps and a K = 3 batched pass, with half the state ciphertexts per block (light: 2 blocks, 2^15 slots)."""
+    steps and a K = 3 batched pass, with half the state ciphertexts per block (2 blocks, 2^15 slots). One model is
+    alive at a time (two 2,048-wide mirrors together pass 6 GB on this Mac)."""
+    import gc
+
     from perseus.examples.rwkv7.batched import BatchedMirror
     P, cj, ids = synthetic(2048, 2, tmp_path_factory.getbasetemp())
     co = load_coeffs(cj)
     _rf, st = common.prefix_state(P, cj, [ids[0]], 1)
-    a, b = (Mirror(P, co, SLOTS, wbits=None, lanes=lanes, layout=x) for x in ("current", "filled"))
-    for m in (a, b):
-        m.reset(st)
-    assert len(b.state[0].S) * 2 == len(a.state[0].S)
-    errs = [rel_rms(b.step(P.emb[t])[0], a.step(P.emb[t])[0]) for t in ids[1:4]]
-    ba, bb = (BatchedMirror(P, co, SLOTS, 3, carry="lane", wbits=None, lanes=lanes, layout=x) for x in ("current", "filled"))
-    for m in (ba, bb):
-        m.reset(st)
     rows = np.stack([P.emb[t] for t in ids[4:7]])
-    ya, _ = ba.step(rows)
-    yb, _ = bb.step(rows)
-    errs.append(rel_rms(yb, ya))
+    out, n_s = {}, {}
+    for x in ("current", "filled"):
+        m = Mirror(P, co, SLOTS, wbits=None, lanes=lanes, layout=x)
+        m.reset(st)
+        n_s[x] = len(m.state[0].S)
+        out[x] = [m.step(P.emb[t])[0] for t in ids[1:4]]
+        del m
+        gc.collect()
+        bm = BatchedMirror(P, co, SLOTS, 3, carry="lane", wbits=None, lanes=lanes, layout=x)
+        bm.reset(st)
+        out[x].append(bm.step(rows)[0])
+        del bm
+        gc.collect()
+    assert n_s["filled"] * 2 == n_s["current"]
+    errs = [rel_rms(b_, a_) for a_, b_ in zip(out["current"], out["filled"])]
     print(f"2048 filled vs current, lanes {lanes}: hidden rel max {max(errs):.1e}; state cts per block "
-          f"{len(a.state[0].S)} -> {len(b.state[0].S)}")
+          f"{n_s['current']} -> {n_s['filled']}")
     assert max(errs) < 1e-10
+    ya = out["current"][-1]
     assert rel_rms(ya[0], ya[1]) > 1e-3
 
 

@@ -311,6 +311,10 @@ KEYS=inproc bash tools/rwkv7/run_box.sh b                                # 12 bl
 KEYS=inproc LEVERS=best bash tools/rwkv7/run_box.sh b                    # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
 KEYS=inproc PLANOPT=b2 bash tools/rwkv7/run_box.sh b                     # no refresh inside any conversation's state work (PLAN_B2.md)
 KEYS=inproc B_K=16 STC_CACHE_B=80 bash tools/rwkv7/run_box.sh b          # if K = 32 runs out of memory
+# 0.4B (24 blocks): K = 32 and prefill T = 32 were killed by the HOST OOM killer at setup on pod 3 (~185 GB of 181), and
+# K = 16 at POOL_B 1,024 was refused by the device 2 GB short: the preset (ckpt_info.py, ANYSIZE_DESIGN.md §4) is
+KEYS=inproc B_K=16 POOL_B=768 STC_CACHE_B=64 bash tools/rwkv7/run_box.sh b      # 0.4B batched (PTH / COEFFS of the 0.4B)
+KEYS=inproc PF_T=16 bash tools/rwkv7/run_box.sh pf                              # 0.4B prefill (host 123-210 GB in the model)
 
 # continuous batching (SERVE_DESIGN.md; tools/rwkv7/serve_arrivals.txt: 8 conversations, 3 longer than one pass)
 B_K=4 bash tools/rwkv7/run_box.sh scheck                     # once: the serve session's CPU half (1 block, T = 4, K = 4)

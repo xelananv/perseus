@@ -27,15 +27,19 @@
 #             points, top-1 >= 98 % (FINAL_PLAN.md's bars) -> $RUNS/verdict_final.json; a FAIL stops the pipeline
 #   capture   PCMM band shifts + the decode capture (run_box.sh capture; CPU)
 #   plan      the decode plan (run_box.sh plan), and plan_cost.py's refreshes per stage -> $OUT/plan_cost_decode.json
-#   pf        the prefill capture + plan (run_box.sh capture_pf, plan_pf; T = PF_T)
-#   b         the batched capture + plan (run_box.sh capture_b, plan_b; K = B_K from the preset; skipped when B_K < 2)
+#   pf        the prefill capture + plan (run_box.sh capture_pf, plan_pf; T = PF_T from the preset: 16 at 0.4B and above)
+#   b         the batched capture + plan (run_box.sh capture_b, plan_b; K = B_K from the preset, <= 16 at 0.4B and above;
+#             skipped when B_K < 2). Why 16 (pod 3, 2026-11-05): the 0.4B T = 32 prefill and K = 32 batched sessions
+#             were killed by the HOST out-of-memory killer at setup (~185 GB of 181, the GPU idle); the preset also
+#             holds the host-RAM model (ckpt_info.host_gb; logged at the start) under 92 % of 181 GB
 #   ---- DRY=1 stops here (no GPU, no device build needed) ----
 #   keys      KEYS=bundle: run_box.sh keyspec + keygen for decode, pf and b (the client role; has_secret false; b only
 #             when B_K >= 2)
 #   run       decode P1-P3 + 32 free-running steps each (run_box.sh run, LEVERS from env)
 #   run_pf    prefill on P3 + the long prompts (PF_TEXTS, a file of one prompt per line), 32 generated each
 #   batch     batched K = B_K, the 32 prompts, 32 generated each. Only when the session refuses memory (the runtime's
-#             "RuntimeError: memory:" or a CUDA out-of-memory in the run's log) it falls back to K / 2 with that K's own
+#             "RuntimeError: memory:", a CUDA out-of-memory, or a SIGKILL = the host's OOM killer, which run_box.sh
+#             notes as "Killed (rc 137 ...)" in the run's log) it falls back to K / 2 with that K's own
 #             capture, plan and, under KEYS=bundle, keyspec + keygen (the bundle is made for exactly the plan that runs);
 #             any other failure stops the pipeline. Skipped when B_K < 2 (2.9B and above: the preset fits no batch)
 #   records   the FINAL_PLAN.md record per run (tools/rwkv7/run_records.py): s/token, top-1, relErrRms median/max,
@@ -50,7 +54,7 @@
 # RELU2 (m02 | abs), RELU2_REL (1e-4), DRY (1: stop before the GPU), SMOKE (1: tiny token counts for a CPU check of the
 # harness steps; SMOKE_TEXT = a text file standing in for every corpus), KEYS (inproc | bundle; default bundle on a full
 # run), LEVERS (unset | best), BLOCKS (unset = all), and the memory preset overrides POOL, STC_CACHE, POOL_PF, POOL_B,
-# STC_CACHE_B, B_K.
+# STC_CACHE_B, B_K, PF_T (B_K / PF_T set in the environment are used as given, not capped at 16).
 set -uo pipefail
 PTH=${1:?usage: size_pipeline.sh <pth> <tag> [steps]}; TAG=${2:?tag}; STEPS=${3:-all}
 [ -f "$PTH" ] || { echo "no checkpoint $PTH" >&2; exit 2; }
@@ -104,18 +108,29 @@ if want info || [ ! -f "$OUT/info.json" ]; then
     st info pyw "$PY" -m perseus.examples.rwkv7.ckpt_info "$PTH" --out "$OUT/info.json"
 fi
 eval "$(python3 - "$OUT/info.json" <<'PY'
-import json, sys
+import json, shlex, sys
 d = json.load(open(sys.argv[1]))
 for k, v in d["preset"].items():
-    print(f'P_{k}={v}')
-print(f'C={d["width"]}; NL={d["n_layer"]}; SH={d["shards"]}')
+    print(f'P_{k}={shlex.quote(" ".join(map(str, v)) if isinstance(v, list) else str(v))}')
+print(f'C={d["width"]}; NL={d["n_layer"]}; SH={d["shards"]}; AUTO_LANES={d.get("auto_lanes", 0)}')
 PY
 )"
+# LANES=0 (the default layout) when the preset keeps it, so these runs share run_box.sh's default names
+[ -z "${LANES:-}" ] && [ "$P_LANES" = "$AUTO_LANES" ] && P_LANES=0
 export LANES=${LANES:-$P_LANES} POOL=${POOL:-$P_POOL} STC_CACHE=${STC_CACHE:-$P_STC_CACHE} POOL_PF=${POOL_PF:-$P_POOL_PF}
-export POOL_B=${POOL_B:-$P_POOL_B} STC_CACHE_B=${STC_CACHE_B:-$P_STC_CACHE_B} B_K=${B_K:-$P_B_K}
-export PF_T=${PF_T:-$LANES}
+export POOL_B=${POOL_B:-$P_POOL_B} STC_CACHE_B=${STC_CACHE_B:-$P_STC_CACHE_B}
+# 0.4B and above start at T = 16 and K <= 16 (pod 3, 2026-11-05: the 0.4B T = 32 prefill and K = 32 batched sessions
+# were killed by the HOST out-of-memory killer at setup, ~185 GB of 181 with the GPU idle; ckpt_info.big / host_gb);
+# PF_T / B_K in the environment override it
+BIG=$( [ "$NL" -ge 24 ] || [ "$C" -gt 1024 ] && echo 1 )
+if [ -n "${B_K:-}" ]; then log "B_K=$B_K from the environment (preset $P_B_K)"
+else B_K=$P_B_K; [ -n "$BIG" ] && [ "$B_K" -gt 16 ] && B_K=16; fi
+if [ -n "${PF_T:-}" ]; then log "PF_T=$PF_T from the environment (preset $P_PF_T)"
+else PF_T=$P_PF_T; [ -n "$BIG" ] && [ "$PF_T" -gt 16 ] && PF_T=16; fi
+export B_K PF_T
 [ "$P_fits_one_card" = True ] || log "WARNING: the memory model puts this size over one card (${P_memory_decode_mb} MB decode; ANYSIZE_DESIGN.md §4)"
-log "width $C, $NL blocks, lanes $LANES, $SH shard(s); preset POOL=$POOL STC_CACHE=$STC_CACHE POOL_PF=$POOL_PF POOL_B=$POOL_B STC_CACHE_B=$STC_CACHE_B B_K=$B_K"
+log "width $C, $NL blocks, lanes $LANES, $SH shard(s); preset POOL=$POOL STC_CACHE=$STC_CACHE POOL_PF=$POOL_PF POOL_B=$POOL_B STC_CACHE_B=$STC_CACHE_B B_K=$B_K PF_T=$PF_T"
+log "host RAM model (GB, setup; cap ${P_host_cap_gb}): decode ${P_host_decode_gb}, batched K=$P_B_K ${P_host_batched_gb}, prefill T=$P_PF_T ${P_host_prefill_gb// / to } (ANYSIZE_DESIGN.md §4)"
 
 H() { ( cd "$HARNESS" && "$TP" "$@" ); }
 FINAL=$RUNS/coeffs_final.json
@@ -234,11 +249,16 @@ if want batch && [ -n "$BATCHED" ]; then
         # key bundle (run_box.sh names carry _k<K>), so the bundle is made for exactly the plan that runs
         if [ "$KEYS" != bundle ] && [ "$KEYS" != inproc ]; then
             log "STOP at batch: rc=$rc; KEYS=$KEYS is a fixed bundle made for K=$B_K's plan: no K/2 fallback"; exit $rc
-        elif grep -qE "RuntimeError: memory:|out of memory|CUDA_ERROR_OUT_OF_MEMORY" "$R_BATCH.log" 2>/dev/null && [ "$B_K" -ge 4 ]; then
-            H=$((B_K / 2)); HN=$(names B_K=$H) || { log "run_box.sh names failed"; exit 2; }
+        elif grep -qE "RuntimeError: memory:|out of memory|CUDA_ERROR_OUT_OF_MEMORY|^Killed" "$R_BATCH.log" 2>/dev/null \
+               && [ "$B_K" -ge 4 ]; then
+            # a memory refusal: the runtime's "RuntimeError: memory: ..." (the device), a CUDA out-of-memory, or the
+            # host's OOM killer (pod 3: no traceback, the GPU idle at setup; run_box.sh appends "Killed (rc 137 ...)"
+            # to the run's log when the process died of SIGKILL)
+            K2=$((B_K / 2)); HN=$(names B_K=$K2) || { log "run_box.sh names failed"; exit 2; }
             eval "$(printf '%s\n' "$HN" | grep -E '^(R_BATCH|KEYDIR_b)=' | sed 's/^/H_/')"
-            why=$(grep -m1 -oE 'RuntimeError: memory:.{0,160}|out of memory.{0,80}' "$R_BATCH.log")
-            log "batch K=$B_K refused memory ($why); K=$H"
+            why=$(grep -m1 -oE 'RuntimeError: memory:.{0,160}|out of memory.{0,80}|^Killed.*' "$R_BATCH.log")
+            log "batch K=$B_K refused memory (${why:-killed at setup with no traceback: the host OOM killer}); K=$K2"
+            H=$K2
             st capture_b_k$H env B_K=$H $RB capture_b
             st plan_b_k$H env B_K=$H $RB plan_b
             if [ "$KEYS" = bundle ]; then
