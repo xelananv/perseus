@@ -48,8 +48,113 @@ from .run_capture import model_kw
 from .session import make_model
 
 
+#: ``RWKV7_SHED_TWIN=1`` (default off): the twin sheds what its recorded probe tokens hold and no longer need
+#: (``Recorder``: ``shed``); the host-RAM cut of results/rwkv7-fhe-20261104/new_pod/HOST_RAM_20261105.md. The
+#: streams, the plaintext values and the objects' identities are unchanged.
+SHED_TWIN = os.environ.get("RWKV7_SHED_TWIN", "0") == "1"
+
+
+def _refs_of(d: dict, k) -> int:
+    return sys.getrefcount(d[k])
+
+
+#: what ``_refs_of`` reads for an object only a dict holds (2 on CPython 3.12: the dict's and the argument's),
+#: calibrated on this interpreter rather than assumed
+_SOLE_REFS = _refs_of({0: object()}, 0)
+
+
+def _sole_ref(d: dict, k, times: int = 1) -> bool:
+    """``d[k]`` is referenced by ``d`` alone, which holds it ``times`` times (an auto-bootstrapped ciphertext is the
+    same object under two names: ``anon_N`` and ``anon_N_auto_bootstrapped``, ``fakecap.maybe_bootstrap``)."""
+    return _refs_of(d, k) <= _SOLE_REFS + int(times) - 1
+
+
+#: shed twins' plaintext values, one read-only private copy per distinct (dtype, shape, bytes): shared by every block,
+#: probe token and twin of the process (the device store keeps one slot per distinct value and level the same way)
+_PT_INTERN: dict = {}
+
+
+def _intern_pt(v):
+    if not isinstance(v, np.ndarray) or v.size <= 1:
+        return v, False
+    a = np.ascontiguousarray(v)
+    key = (a.dtype.str, a.shape, digest(a))
+    hit = _PT_INTERN.get(key)
+    if hit is not None and np.array_equal(hit, a):
+        return hit, hit is not v
+    if hit is None:
+        c = np.array(a, copy=True)
+        c.flags.writeable = False
+        _PT_INTERN[key] = c
+        return c, True
+    return v, False                                     # a digest collision: keep the array as recorded
+
+
 class Recorder(SsmRecorder):
-    """The twin's recorder with values always on (PCMM's fake multiplies the slot vectors)."""
+    """The twin's recorder with values always on (PCMM's fake multiplies the slot vectors).
+
+    ``shed`` (default ``SHED_TWIN``), at each block's end and again at each token's end:
+
+    - the recorded ciphertext objects (``BlockRec.objs``) that nothing but the record references keep one slot of
+      their value vector (as ``CapCt.novec`` does); the object itself stays, because the driver reads ``objs`` only by
+      identity (``id(...)``, ``is``: ``PlannedRun.prepare``, ``shard_inputs``), never by value, and an object no one
+      else references is never read by the model again. Outputs, inputs and the carried state are referenced by the
+      model (or by ``r.x_in`` / ``r.out``) and keep their vectors;
+    - the recorded plaintext values (``BlockRec.pts``) are interned (``_intern_pt``): equal values share one
+      read-only copy across blocks, probe tokens and twins.
+
+    Unshed, a recorded block-token holds every intermediate's 256-512 KB vector and its own copy of every mask: 0.70
+    GB per block per probe token at 0.1B decode, about 4.75 GB at K = 32 or T = 32 (HOST_RAM_20261105.md), two probe
+    tokens per twin, for the session's whole life."""
+
+    def __init__(self, model, n_layers, lean=False, sink=None, shed=None):
+        super().__init__(model, n_layers, lean=lean, sink=sink)
+        self.shed = SHED_TWIN if shed is None else bool(shed)
+        self.shed_stats = {"vectors": 0, "bytes": 0, "kept": 0, "pts_shared": 0, "pt_bytes": 0}
+        if self.shed:
+            core = model.core
+            end = core.end_subgraph_capture
+
+            def shed_end(inf, b):
+                end(inf, b)
+                self._shed(self.blocks[b])
+
+            core.end_subgraph_capture = shed_end
+
+    def token(self, t, row, argmax=False):
+        blocks = super().token(t, row, argmax)
+        if self.shed:
+            for r in blocks.values():
+                self._shed(r, final=True)
+        return blocks
+
+    def _shed(self, r, final=False) -> None:
+        st = self.shed_stats
+        objs = r.objs or {}
+        times: dict = {}
+        for o in objs.values():
+            times[id(o)] = times.get(id(o), 0) + 1
+        o = None
+        for name in list(objs):
+            v = getattr(objs[name], "vec", None)
+            if not isinstance(v, np.ndarray) or v.ndim != 1 or v.shape[0] <= 1:
+                continue
+            if _sole_ref(objs, name, times[id(objs[name])]):
+                objs[name].vec = v[:1].copy()
+                st["vectors"] += 1
+                st["bytes"] += int(v.nbytes)
+            elif final:
+                st["kept"] += 1
+            del v
+        pts = r.pts or {}
+        for k in list(pts):
+            v = pts[k]
+            c, new = _intern_pt(v)
+            if new:
+                pts[k] = c
+                st["pts_shared"] += 1
+                st["pt_bytes"] += int(v.nbytes)
+            del v, c
 
     @property
     def values(self):
@@ -757,7 +862,10 @@ def keys_header(run, bundle_info=None) -> dict:
     return {"keys": run.key_mode(), "has_secret": bool(run.sess.has_secret),
             "input_encryption": "client" if run.client is not None else
             ("session-secret" if run.bundle is None else "session-public-key"),
-            "bundle_info": bundle_info}
+            "bundle_info": bundle_info,
+            # RWKV7_SHED_TWIN=1 only (the default header is unchanged): what the twin shed (HOST_RAM_20261105.md)
+            **({"shed_twin": dict(run.rec.shed_stats, pt_distinct=len(_PT_INTERN))}
+               if getattr(getattr(run, "rec", None), "shed", False) else {})}
 
 
 # ── continuous batching on the device (serve.py, SERVE_DESIGN.md) ──
