@@ -208,10 +208,12 @@ def test_prefill_session_prepare(tmp_path, monkeypatch):
     for k, v in HIGH.items():
         monkeypatch.setenv(k, v)
     T = 4
+    layout = os.environ.get("RWKV7_LAYOUT", "current")       # run_box.sh LAYOUT (FILLED_DESIGN.md)
+    tag = "" if layout == "current" else f"_{layout}"
     root = pathlib.Path(os.environ.get("RWKV7_PF_DIR", str(tmp_path))) / "session_prepare"
-    cap_d, plan_d = _cap_and_plan(root, "dec", [], HIGH)
-    cap_p, plan_p = _cap_and_plan(root, f"pf{T}", ["--prefill-chunk", str(T), "--shifts",
-                                                   str(cap_d / "pcmm_shifts.json")], HIGH)
+    cap_d, plan_d = _cap_and_plan(root, f"dec{tag}", ["--layout", layout], HIGH)
+    cap_p, plan_p = _cap_and_plan(root, f"pf{T}{tag}", ["--prefill-chunk", str(T), "--layout", layout, "--shifts",
+                                                       str(cap_d / "pcmm_shifts.json")], HIGH)
     import json
     shifts = json.load(open(cap_d / "pcmm_shifts.json"))
     P = ref.load_params(CKPT, 1)
@@ -221,9 +223,9 @@ def test_prefill_session_prepare(tmp_path, monkeypatch):
     _rf, st = common.prefix_state(P, COEFFS, ids, 1)
     cfg = session_config(str(plan_d))
     labels = ["block_0", "block_1"]
-    _f, _i, dm = make_model(P, co, capture=True, shifts=shifts)
+    _f, _i, dm = make_model(P, co, capture=True, shifts=shifts, layout=layout)
     dm.init_state = st
-    _f, _i, pm = make_model(P, co, capture=True, shifts=shifts, chunk=T)
+    _f, _i, pm = make_model(P, co, capture=True, shifts=shifts, chunk=T, layout=layout)
     pm.init_state = st
     dec = rp.Rwkv7PlannedRun(rp.Recorder(dm, 1), str(plan_d), cfg, labels, None, model=dm,
                              work_dir=str(root / "work_dec"))
@@ -237,6 +239,6 @@ def test_prefill_session_prepare(tmp_path, monkeypatch):
     outs = [r for b in pf.reg for _j, r in pf.reg[b]["out"]]
     print("decode kv regs", dregs, "prefill kv regs", pregs, "prefill out regs", outs, "total", both.n_regs,
           "prefill inputs", [x[:3] for x in pf.progs["block_0"].inputs])
-    assert dregs == pregs and len(dregs) == 4
+    assert dregs == pregs and len(dregs) == dm.L.M + 2           # the state cts (2 current, 1 filled) + 2 shifts
     assert min(outs) >= dec.n_regs and both.n_regs == dec.n_regs + len(outs)
     assert pf.progs["block_0"].label() == "pf_block_0" if callable(getattr(pf.progs["block_0"], "label", None)) else True

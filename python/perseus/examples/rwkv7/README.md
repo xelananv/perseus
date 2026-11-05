@@ -38,7 +38,11 @@ decode, prefill and batched passes on 2 blocks of the 0.1B checkpoint).
 `--keygen DIR --keyspec-file F` is the client role (a fresh secret, `DIR/keys.pckb`, `DIR/client_secret.bin`), and
 `--keys DIR` opens the session with `Session.from_bundle` (no secret: `has_secret false` in the header) while a
 separate `_pc.Client` encrypts every input and decrypts every reply as wire frames. `run_box.sh keyspec | keygen`
-(KEYMODE = decode | pf | b) and `KEYS=bundle` wrap it.
+(KEYMODE = decode | pf | b | s) and `KEYS=bundle` wrap it; `run_box.sh` requires `KEYS` for every device step (no
+default). **What the split is:** between objects in ONE process, as in fhe_ssm: the session object opens from the
+bundle and never holds the secret, but the client object that encrypts and decrypts runs in the same process and reads
+`client_secret.bin` (written mode 600) from the bundle directory. It shows the session needs no secret; it is not a
+two-machine deployment.
 
 ## The circuit
 
@@ -207,7 +211,8 @@ Planner, K = 32, block 0: **222 refreshes per pass**, against 32 × 31 = 992 for
 **47–60 s per pass**. That is 5.1–6.5× decode's aggregate throughput, at 4.9–6.3× its per-token latency
 (`BATCHED_DESIGN.md` §4; nothing has run on a GPU). `PLANOPT=b2` (`PLAN_B2.md`) removes the per-conversation update refreshes, a placer
 artefact: every conversation then pays its 2 carries per block; on P4's capture block 0 goes 209 → 80 refreshes in
-`Program.compile`'s count, estimated ≈ 28.4–30.0 s per pass against the 46.68 s measured on the base plan.
+`Program.compile`'s count. On the final coefficients with LEVERS=best the measured base pass is 29.87 s; b2 is
+estimated at ≈ 28.3–28.5 s (≈ 1.05×: about half the refreshes it removes were already paired; PLAN_B2.md §5).
 
 ## Continuous batching: prefill, then join the batch (`serve.py`, `SERVE_DESIGN.md`)
 
@@ -275,20 +280,20 @@ noise, no bootstrap error.
 
 ```bash
 cd /root/perseus-rwkv7
-BLOCKS=1 bash tools/rwkv7/run_box.sh all        # smoke: build, check, capture, plan, run on one block + tail
-bash tools/rwkv7/run_box.sh capture && bash tools/rwkv7/run_box.sh plan && bash tools/rwkv7/run_box.sh run   # 12 blocks
+KEYS=inproc BLOCKS=1 bash tools/rwkv7/run_box.sh all        # smoke: build, check, capture, plan, run on one block + tail
+KEYS=inproc bash tools/rwkv7/run_box.sh capture plan run   # 12 blocks
 TORCH_PY=/path/to/python-with-torch bash tools/rwkv7/run_box.sh crosscheck   # harness (torch) vs the numpy reference
 
 # prefill (T = 32 by default; reuses the decode capture's shifts and the decode plan)
 bash tools/rwkv7/run_box.sh pfcheck                          # once: the combined session's CPU half, 1 block, T = 4
-BLOCKS=1 bash tools/rwkv7/run_box.sh pf                      # smoke: capture, plan, capture_pf, plan_pf, run_pf
-bash tools/rwkv7/run_box.sh pf                               # 12 blocks: 70 prompt tokens = 2 passes + 6 decoded + 4 generated
-LEVERS=best bash tools/rwkv7/run_box.sh pf                   # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
-BLOCKS=1 CFTABLE=1 bash tools/rwkv7/run_box.sh run           # A/B the PCMM CF table against PCMM_CF=6 (decode smoke)
+KEYS=inproc BLOCKS=1 bash tools/rwkv7/run_box.sh pf                      # smoke: capture, plan, capture_pf, plan_pf, run_pf
+KEYS=inproc bash tools/rwkv7/run_box.sh pf                               # 12 blocks: 70 prompt tokens = 2 passes + 6 decoded + 4 generated
+KEYS=inproc LEVERS=best bash tools/rwkv7/run_box.sh pf                   # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
+KEYS=inproc BLOCKS=1 CFTABLE=1 bash tools/rwkv7/run_box.sh run           # A/B the PCMM CF table against PCMM_CF=6 (decode smoke)
 
 # the filled state layout (FILLED_DESIGN.md; every product gets the suffix _filled): batched under b2 + best
 B_K=4 LAYOUT=filled bash tools/rwkv7/run_box.sh bcheck
-LAYOUT=filled PLANOPT=b2 LEVERS=best B_K=32 B_GENERATE=32 POOL_B=1024 STC_CACHE_B=64 bash tools/rwkv7/run_box.sh b
+KEYS=inproc LAYOUT=filled PLANOPT=b2 LEVERS=best B_K=32 B_GENERATE=32 POOL_B=1024 STC_CACHE_B=64 bash tools/rwkv7/run_box.sh b
 
 # any size (ANYSIZE_DESIGN.md): the whole per-size pipeline (calibrate, fit, scan, gate, capture, plan, keys, runs)
 DRY=1 bash tools/rwkv7/size_pipeline.sh /root/d_models/RWKV-x070-World-1.5B-v3-20250127-ctx4096.pth 1.5b   # up to the GPU
@@ -301,16 +306,16 @@ KEYS=bundle bash tools/rwkv7/run_box.sh run
 # batched decode (B_K = 32 conversations, lane carries, tools/rwkv7/batch_prompts.txt, 16 generated each;
 # reuses the decode capture's shifts)
 bash tools/rwkv7/run_box.sh bcheck                           # once: the batched runner's CPU half, K = 4, 1 block
-BLOCKS=1 B_K=4 B_GENERATE=2 bash tools/rwkv7/run_box.sh b    # smoke: capture, plan, capture_b, plan_b, batch
-bash tools/rwkv7/run_box.sh b                                # 12 blocks, K = 32: --pool 192 --stc-cache 160
-LEVERS=best bash tools/rwkv7/run_box.sh b                    # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
-PLANOPT=b2 bash tools/rwkv7/run_box.sh b                     # no refresh inside any conversation's state work (PLAN_B2.md)
-B_K=16 STC_CACHE_B=80 bash tools/rwkv7/run_box.sh b          # if K = 32 runs out of memory
+KEYS=inproc BLOCKS=1 B_K=4 B_GENERATE=2 bash tools/rwkv7/run_box.sh b    # smoke: capture, plan, capture_b, plan_b, batch
+KEYS=inproc bash tools/rwkv7/run_box.sh b                                # 12 blocks, K = 32: --pool 192 --stc-cache 160
+KEYS=inproc LEVERS=best bash tools/rwkv7/run_box.sh b                    # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
+KEYS=inproc PLANOPT=b2 bash tools/rwkv7/run_box.sh b                     # no refresh inside any conversation's state work (PLAN_B2.md)
+KEYS=inproc B_K=16 STC_CACHE_B=80 bash tools/rwkv7/run_box.sh b          # if K = 32 runs out of memory
 
 # continuous batching (SERVE_DESIGN.md; tools/rwkv7/serve_arrivals.txt: 8 conversations, 3 longer than one pass)
 B_K=4 bash tools/rwkv7/run_box.sh scheck                     # once: the serve session's CPU half (1 block, T = 4, K = 4)
-BLOCKS=1 B_K=4 S_GENERATE=2 bash tools/rwkv7/run_box.sh s    # smoke: every capture and plan, then serve
-B_K=4 bash tools/rwkv7/run_box.sh s                          # 12 blocks, K = 4, T = 32, 8 generated each
+KEYS=inproc BLOCKS=1 B_K=4 S_GENERATE=2 bash tools/rwkv7/run_box.sh s    # smoke: every capture and plan, then serve
+KEYS=inproc B_K=4 bash tools/rwkv7/run_box.sh s                          # 12 blocks, K = 4, T = 32, 8 generated each
 ```
 
 `serve` writes `$OUT/serve4[_b1][_best].jsonl`: `"prefill"`, `"decode"`, `"join"`, `"leave"` and `"pass"` lines with

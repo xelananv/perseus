@@ -5,14 +5,15 @@
   * the unclamped eval equals the clamped one (wt ppl within 1e-4 relative, LAMBADA within 0.1 point): what the
     ciphertext computes (no clamp) is what was evaluated;
   * every number is finite and every scan has zero non-finite site inputs and zero inputs past a newton_const site's
-    convergence bound;
+    convergence bound; with --gen (gen_greedy.py's records of the unclamped poly model's own free-running text), every
+    generation ran to its full length with finite logits ("finite": true);
   * the coordinator's bars (FINAL_PLAN.md; the owner decides whether they are "reasonable quality"): ppl within 0.5 %
     of exact, LAMBADA within 0.5 points, top-1 vs exact >= 98 %.
 Every excursion is listed per site kind (tokens out of the accuracy range, worst excursion as a fraction of the
 interval width, the site). Exit 0 on PASS, 3 on FAIL.
 
     python tools/rwkv7/gate_verdict.py --eval EVAL.jsonl --exact-tag exact --clamp-tag C --unclamped-tag U \\
-        --scan scan_wiki.json --scan scan_lambada.json --scan scan_gen.json [--out verdict.json]
+        --scan scan_wiki.json --scan scan_lambada.json --scan scan_gen.json [--gen gen_final.jsonl] [--out verdict.json]
 """
 import argparse
 import json
@@ -39,6 +40,7 @@ def main(argv=None) -> int:
     ap.add_argument("--clamp-tag", required=True)
     ap.add_argument("--unclamped-tag", required=True)
     ap.add_argument("--scan", action="append", default=[])
+    ap.add_argument("--gen", action="append", default=[], help="gen_greedy.py records: FAIL on any finite false")
     ap.add_argument("--ppl-rel", type=float, default=0.005)
     ap.add_argument("--lambada-pts", type=float, default=0.5)
     ap.add_argument("--top1", type=float, default=0.98)
@@ -67,6 +69,13 @@ def main(argv=None) -> int:
                    "worst_site": k.get("worst_site")} for n, k in kinds.items() if k.get("tokens_out")}
         scans[p] = {"tokens": d.get("tokens"), "nonfinite": nonfin, "tokens_conv_out": conv, "excursions": exc}
     checks["scans_clean"] = all(s["nonfinite"] == 0 and s["tokens_conv_out"] == 0 for s in scans.values())
+    gens = {}
+    for p in a.gen:
+        recs = [json.loads(line) for line in open(p) if line.strip()]
+        bad = [r.get("i") for r in recs if r.get("finite") is not True]
+        gens[p] = {"generations": len(recs), "non_finite": bad}
+    if a.gen:
+        checks["generations_finite"] = all(g["generations"] > 0 and not g["non_finite"] for g in gens.values())
     verdict = "PASS" if all(checks.values()) else "FAIL"
     rep = {"verdict": verdict, "checks": checks,
            "exact": {k: ex.get(k) for k in ("wt_ppl", "lambada_acc")},
@@ -74,7 +83,8 @@ def main(argv=None) -> int:
            "unclamped": {k: un.get(k) for k in ("wt_ppl", "lambada_acc", "top1_agree", "kl_mean", "outside_frac_max")},
            "ppl_rel_vs_exact": (un["wt_ppl"] / ex["wt_ppl"] - 1) if checks["finite"] else None,
            "lambada_pts_vs_exact": 100 * (un["lambada_acc"] - ex["lambada_acc"]) if checks["finite"] else None,
-           "bars": {"ppl_rel": a.ppl_rel, "lambada_pts": a.lambada_pts, "top1": a.top1}, "scans": scans}
+           "bars": {"ppl_rel": a.ppl_rel, "lambada_pts": a.lambada_pts, "top1": a.top1}, "scans": scans,
+           "generations": gens}
     text = json.dumps(rep, indent=1)
     print(text)
     if a.out:

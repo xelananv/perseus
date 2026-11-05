@@ -30,9 +30,13 @@ polynomial operation on the ring, and the ring is fixed. So the encrypted cost o
 ciphertexts it touches**, not the number of channels.
 - **Token side** (LayerNorm, PCMM, every polynomial / Newton site, GroupNorm, the kk and bonus reductions): one
   operation per ciphertext of the vector. At width C that is ⌈C / D⌉ ciphertexts.
-- **State side**: a conversation's state is C × 64 values (H = C / 64 heads of 64 × 64) = C / 512 ciphertexts of
-  32,768 slots, **in every layout** (2 per 1,024 channels at t = 32; 4 for 2,048 channels at t = 16: the same 4).
-  The state update, its readout and the per-conversation lane moves therefore cost about the same in every layout.
+- **State side**: a conversation's state is C × 64 values (H = C / 64 heads of 64 × 64). In the current layout a
+  block holds it in ⌈C / D⌉ · 64 / t ciphertexts (S shards of D channels, M = 64 / t ciphertexts per shard), which is
+  C / 512 only when C is a multiple of D: 2 per 1,024 channels at t = 32 and 4 for 2,048 channels at t = 16 (the same
+  4), but 2 (not 1.5) for the 0.1B's 768 channels and 8 (not 5) for 2,560 at t = 8 (one padded 4,096-channel shard).
+  The filled layout (FILLED_DESIGN.md) holds two value groups per ciphertext, one on each axis: half of that
+  (⌈C / D⌉ · 32 / t; 1 at the 0.1B, 2 at 2,048). Between the current-layout options at the same padding, the state
+  update, its readout and the per-conversation lane moves therefore cost about the same.
 
 ## 3. The options, judged by encrypted cost (the planner's refreshes)
 
@@ -40,7 +44,7 @@ ciphertexts it touches**, not the number of channels.
 |---|---|---|---|---|
 | **channel shards** (`--lanes 32`): D = 1,024, S = ⌈C / 1,024⌉ shards | S | 2 S | 32 | yes |
 | **fewer lanes** (`--lanes 16 / 8`, **the default**: `layout.auto_lanes`, one ciphertext per vector) | 1 (up to 4,096) | 64 / t | t = 16 (C ≤ 2,048), 8 (C ≤ 4,096) | yes |
-| filled layout (two reals per complex slot, the conjugate split; `fhe_ssm`'s `pairs.py`) | — | — | 2× either | no (§7) |
+| filled layout (`--layout filled`: two value groups of the state per ciphertext, one on each axis; FILLED_DESIGN.md) | as either | half of either | as either | yes (B3; combines with both) |
 
 The brief recommended channel shards ("confirm by cost"). **The planner does not confirm it.** 2-block captures of the
 same synthetic width-2,048 checkpoint, the same coefficients, LANDING=high, refreshes per stage (`plan_cost.py`; the
@@ -50,12 +54,13 @@ census JSON lines under `.cache/rwkv7_any/`):
 |---|---|---|---|---|
 | 2 shards at t = 32 | 67 | 73 | 4.0 (block 1: 87 → 103) | 5,573 |
 | 1 ciphertext at t = 16 | **38** | **42** | 4.0 (block 1: 55 → 71) | 3,334 |
-| (the real 0.1B, final coefficients, t = 32) | 38 | 42 | 4.0 (block 1: 54 → 70) | 3,458 |
+| (the real 0.1B, final coefficients, t = 32, base plan) | 38 | 42 | 4.0 in block 1 (54 → 70), 2.0 in block 0: the min-cut prune artefact `PLANOPT=b2` removes (2.0 under b2, PLAN_B2.md); the synthetic 768 is 2.0 in both | 3,458 |
 
 **Mechanism.** The token side is ~30 of block 1's 42 refreshes (the norms' Newton chains, the PCMM outputs, the sites'
 depth). Two shards double it (each shard is its own ciphertext through every site, every PCMM output and every carry);
 one 2,048-channel ciphertext does not. The per-conversation cost is the same 4 refreshes per block in both, as §2
-predicts. So at K = 1 fewer lanes is **1.7× fewer refreshes per token** (42 vs 73 in block 1), and in a batched pass
+predicts: 4 state ciphertexts per conversation and block at width 2,048 in both layouts, one carry refresh each (the
+0.1B's 2.0 at t = 32 is its 2 state ciphertexts). So at K = 1 fewer lanes is **1.7× fewer refreshes per token** (42 vs 73 in block 1), and in a batched pass
 it saves the same token-side refreshes at every K. Shards only win where a run needs K or T above t (16 at 2,048), and
 §4 shows memory caps K at or below that anyway (1.5B: K = 16 at t = 16; as shards the model fits only K = 8). Prefill
 per prompt token is even: T = 32 tokens over 2 shards' token side, or T = 16 over one.
@@ -87,47 +92,78 @@ Two more decisions above one shard:
 
 ## 4. The per-size table (models, not measurements)
 
-Inputs, each named (R5):
-- **Refreshes**: the planner on 2-block (1-block for the widest) captures of synthetic checkpoints at each width in
-  the default layout, `refreshes/token = block_0 + (layers − 1) · block_1 + tail`, times the synthetic-to-real factor
-  (the real 0.1B with the final coefficients against the synthetic 768-wide one, same plans); batched: `block(K) =
-  block(8) + slope · (K − 8)` (linear in K, as the 0.1B planner showed: BATCHED_DESIGN.md §2).
-- **Seconds**: refreshes × the measured price per planned refresh on pod 3: decode 9.54 s / 478 = 19.96 ms
-  (new_pod/RESULTS.md P1–P3; the 478-refresh plan of README.md); batched 46.68 s / 2,063 = 22.63 ms
-  (r01b_batch/batch32.jsonl: `seconds_per_pass_median`, the header's compiled `n_bootstraps`). R6: another build than
-  this code's (f8138f78 / 87fe1ab2 on speedrun 85971fbd), the old coefficients, the same card. The price per refresh
-  includes everything else a token does (rotations, products, PCMM GEMMs) at the 0.1B's mix; the PCMM GEMM grows with
-  the parameters (the planes), refreshes with the ciphertext count, so at 7.2B the price is an underestimate.
-- **Memory** (`ckpt_info.memory_mb`): items transcribed from the pod-3 `mem_report_text` (r01b/run_P1, r04b/run_P1,
-  r01b_batch/batch32; the model reproduces their totals within +1.3 %, +1.1 %, +0.3 %): register 14.0 MB, pool slot
-  31.5 MB, StC-cache slot 205.2 MB, keys 8,437 MB, other 20.3 / 21.2 GB (decode / batched); PCMM planes exact (3 int8
-  planes per 1,024² block: 0.1B 930.0 MB, 0.4B 2,082.0 MB, both as reported); plaintext store 162 MB per block and
-  shard (0.1B; 0.4B measured 128). The card has 97,887 MiB; presets keep the model under 92 % of it. Batched pool
-  slots `min(2,048, 32 K S)` is an assumption (0.1B K = 32 exhausted 192 and ran at 1,024).
+Inputs, each named (R5). Re-derived 2026-11-05 after review lens 3 (findings 1-5, 14): the first version priced
+planner counts at a price per compiled refresh, scaled the batched slope ×2 with the b2 prune artefact, and checked
+against old-coefficient runs; its batched column was 35-58 % high and its "47.3 s vs 46.68 s measured" agreement was
+two errors cancelling.
+- **Refreshes** (all PLANNER counts, `summary.total_bootstraps`, never the device's compiled `n_bootstraps`, which is
+  smaller: the final batched plan is 1,424 planned, 1,257 compiled): the planner on 2-block (1-block for the widest)
+  captures of synthetic checkpoints at each width, `refreshes/token = f · (block_0 + (layers − 1) · block_1 + tail)`,
+  f = the real 0.1B with the final coefficients over the synthetic 768-wide one (same plans) = 1.0797; batched:
+  `refreshes/pass = refreshes/token + K · (slope_0 + (layers − 1) · slope_1)`, the slopes per conversation and block
+  from the synthetic K = 4 → 8 plans, **unscaled** (not × f, not × the real/synthetic slope ratio): the real 0.1B's 4
+  in block 1 was the prune artefact, and the synthetic slopes (2 at t = 32, 4 at t = 16) are b2-like. The pass column
+  is therefore a `PLANOPT=b2` plan's. The 2-block extrapolation `b0 + (L − 1) · b1` is confirmed for decode only (the checks
+  below, within 1–2.5 %). For the other modes the device's 12 blocks differ from it in both directions (review lens 3,
+  finding 3, in compiled sites: the base batched pass 1,760 extrapolated vs 1,257 on the device, its blocks 2–11
+  cheaper than block 1; prefill 867 vs 1,059 `pf_block_*` sites), so the pass column carries that uncertainty too.
+- **Seconds**: refreshes × the price per PLANNED refresh of pod 3's final-coefficient runs with `LEVERS=best`: decode
+  9.703 / 9.7283 / 9.7405 s per token over 497 planned refreshes (`r01b_final/run_best_P1-P3.jsonl`,
+  `seconds_per_token_median`; `r01b_final/plan_best.log`) and 19.7367 / 19.7413 / 19.7286 s over 1,011
+  (`r04b_final/...`) = **19.51–19.60 ms**; batched 29.8721 s per pass over 1,424 planned refreshes
+  (`r01b_final/batch32_best.jsonl`, `seconds_per_pass_median`; `r01b_final/plan_b32_best.log`) = **20.98 ms**.
+  `size_table.py --anchors new_pod/` re-derives all of them from the records. That batched anchor is a base plan (33
+  paired refreshes per block); b2 removes refreshes about half of which were paired, so its price per planned refresh
+  is higher and the s/pass column is **low for b2 plans** (0.1B: 26.6 s here, 28.3 s from the per-op model of review
+  lens 3; quote 26.6–28.3 s). R6: another build than this code's (f8138f78 / 87fe1ab2 on speedrun 85971fbd), the
+  same card. The price includes everything else a token does (rotations, products, PCMM GEMMs) at the 0.1B / 0.4B's
+  mix; the PCMM GEMM grows with the parameters, refreshes with the ciphertext count, so from 1.5B up the price is an
+  underestimate.
+- **Memory** (`ckpt_info.memory_mb`): items transcribed from the pod-3 `mem_report_text` of the final-coefficient runs
+  (r01b_final/run_best_P1 70,980.0 MB, r04b_final/run_best_P1 77,844.9, r01b_final/batch32_best 91,019.6; the model
+  reproduces them to +0.0 %, +0.8 %, +0.0 %; calibrated on the older reports it under-predicted all three by ≈ 2 %,
+  review lens 3, finding 5): register 14.0 MB, pool slot 31.5 MB, StC-cache slot 205.2 MB, keys 8,437.2 MB, other
+  21.43 / 22.53 GB (decode / batched); PCMM planes exact (3 int8 planes per 1,024² block: 0.1B 930.0 MB, 0.4B 2,082.0
+  MB, both as reported); plaintext store 205.3 MB per block and shard (the 0.1B final decode's; the 0.4B's 148.75 is
+  smaller, so this is an upper value). The card has 97,887 MiB; presets keep the model under 92 % of it (batched: the
+  largest K that fits with a 64-slot StC cache, else 32). Batched pool slots `min(2,048, 32 K S)` is an assumption
+  (0.1B K = 32 exhausted 192 and ran at 1,024).
 
-**Default layout** (one ciphertext per vector, `auto_lanes`; `tools/rwkv7/size_table.py`, its two header lines:
-- per-conversation slope factors (real / synthetic at 768): block 0 1.00 (2.0/2.0), block 1 2.00 (4.0/2.0)
-- synthetic-to-real factor 1.080 (real 0.1B 2-block decode 38/42/1, synthetic 768 34/39/1); 1-block widths: block_1 = block_0 x 1.132)
+**Default layout** (one ciphertext per vector, `auto_lanes`; `tools/rwkv7/size_table.py --census
+.cache/rwkv7_any/synth_{768_b2,1024_b2,2048_b2_t16} --real .cache/rwkv7_any/real_0.1b_b2 --estimate 2560:8:42:46:8
+4096:8:42:46:8 --anchors <new_pod>`, its header lines verbatim):
+- synthetic-to-real factor 1.0797 (real 0.1B 2-block decode 38/42/1, synthetic 768 34/39/1); 1-block widths: block_1 = block_0 x 1.132
+- per-conversation slopes: the synthetic plans' (K = 4 -> 8), unscaled and added to the decode count (not multiplied by the factor); the pass column is a b2 plan's
+- prices per PLANNED refresh (pod 3, final coefficients, LEVERS=best): decode 19.51-19.60 ms; batched 20.98 ms (a base plan; low for b2 plans, see below)
 
-| size | layers x width | lanes t | cts / vector | state cts / block / conv. | planned refreshes / block (b0, b1) | refreshes / token | s / token, K = 1 | K (memory) | refreshes / pass | s / pass | tok/s aggregate | memory decode / batched GB |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 0.1B | 12 x 768 | 32 | 1 | 2 | 34, 39 | 501 | 10.0 | 32 | 2090 | 47.3 | 0.677 | 69 / 89 |
-| 0.4B | 24 x 1024 | 32 | 1 | 2 | 35, 40 | 1032 | 20.6 | 16 | 2656 | 60.1 | 0.266 | 76 / 70 |
-| 1.5B | 24 x 2048 | 16 | 1 | 4 | 38, 42 | 1085 | 21.7 | 16 | 4333 | 98.0 | 0.163 | 83 / 87 |
-| 2.9B | 32 x 2560 | 8 | 1 | 8 | 42, 46 (estimate, not planned) | 1586 | 31.7 | 1 | - | - | 0.0316 | 92 / 86 (over the card) |
-| 7.2B | 32 x 4096 | 8 | 1 | 8 | 42, 46 (estimate, not planned) | 1586 | 31.7 | 1 | - | - | 0.0316 | 97 / 91 (over the card) |
-| 13.3B | 61 x 4096 | 8 | 1 | 8 | 42, 46 (estimate, not planned) | 3027 | 60.4 | 1 | - | - | 0.0166 | 146 / 140 (over the card) |
+| size | layers x width | lanes t | cts / vector | state cts / block / conv. | planned refreshes / block (b0, b1) | slope / conv. / block | refreshes / token | s / token, K = 1 | K (memory) | refreshes / pass | s / pass | tok/s aggregate | memory decode / batched GB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.1B | 12 x 768 | 32 | 1 | 2 | 34, 39 | 2 | 501 | 9.78-9.82 | 32 | 1269 | 26.6 | 1.202 | 71 / 84 |
+| 0.4B | 24 x 1024 | 32 | 1 | 2 | 35, 40 | 2 | 1032 | 20.14-20.23 | 16 | 1800 | 37.8 | 0.424 | 78 / 79 |
+| 1.5B | 24 x 2048 | 16 | 1 | 4 | 38, 42 | 4 | 1085 | 21.18-21.27 | 16 | 2621 | 55.0 | 0.291 | 85 / 89 |
+| 2.9B | 32 x 2560 | 8 | 1 | 8 | 42, 46 (estimate, not planned) | 8 | 1586 | 30.95-31.09 | 1 | - | - | 0.0322-0.0323 | 95 / 95 (over the 92 % margin) |
+| 7.2B | 32 x 4096 | 8 | 1 | 8 | 42, 46 (estimate, not planned) | 8 | 1586 | 30.95-31.09 | 1 | - | - | 0.0322-0.0323 | 99 / 100 (over the 92 % margin) |
+| 13.3B | 61 x 4096 | 8 | 1 | 8 | 42, 46 (estimate, not planned) | 8 | 3027 | 59.06-59.32 | 1 | - | - | 0.0169-0.0169 | 150 / 151 (over the 92 % margin) |
 
-**Channel shards at t = 32** (`--lanes 32`, the brief's option; same method):
+**Channel shards at t = 32** (`--lanes 32`, the brief's option; same method, `--census
+.cache/rwkv7_any/synth_{768_b2,1024_b2,2048_b2,2560_b1}`):
 
-| size | layers x width | lanes t | cts / vector | state cts / block / conv. | planned refreshes / block (b0, b1) | refreshes / token | s / token, K = 1 | K (memory) | refreshes / pass | s / pass | tok/s aggregate | memory decode / batched GB |
-|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 0.1B | 12 x 768 | 32 | 1 | 2 | 34, 39 | 501 | 10.0 | 32 | 2090 | 47.3 | 0.677 | 69 / 89 |
-| 0.4B | 24 x 1024 | 32 | 1 | 2 | 35, 40 | 1032 | 20.6 | 16 | 2656 | 60.1 | 0.266 | 76 / 70 |
-| 1.5B | 24 x 2048 | 32 | 2 | 4 | 67, 73 | 1887 | 37.7 | 8 | 3511 | 79.5 | 0.101 | 94 / 80 (over the card) |
-| 2.9B | 32 x 2560 | 32 | 3 | 6 | 92, 104 (b1 = b0 x ratio) | 3584 | 71.5 | 2 | 3991 | 90.3 | 0.022 | 98 / 86 (over the card) |
+| size | layers x width | lanes t | cts / vector | state cts / block / conv. | planned refreshes / block (b0, b1) | slope / conv. / block | refreshes / token | s / token, K = 1 | K (memory) | refreshes / pass | s / pass | tok/s aggregate | memory decode / batched GB |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 0.1B | 12 x 768 | 32 | 1 | 2 | 34, 39 | 2 | 501 | 9.78-9.82 | 32 | 1269 | 26.6 | 1.202 | 71 / 84 |
+| 0.4B | 24 x 1024 | 32 | 1 | 2 | 35, 40 | 2 | 1032 | 20.14-20.23 | 16 | 1800 | 37.8 | 0.424 | 78 / 79 |
+| 1.5B | 24 x 2048 | 32 | 2 | 4 | 67, 73 | 4 | 1887 | 36.83-36.99 | 8 | 2655 | 55.7 | 0.144 | 94 / 84 (over the 92 % margin) |
+| 2.9B | 32 x 2560 | 32 | 3 | 6 | 92, 104 (b1 = b0 x ratio) | 5.25 | 3584 | 69.93-70.23 | 1 | - | - | 0.0142-0.0143 | 103 / 91 (over the 92 % margin) |
 
-Columns: `cts / vector` = ciphertexts per width-C vector; `state cts` = per block and conversation; `K (memory)` = the largest K <= t the memory model fits under 92 % of the card (presets, `ckpt_info.preset`); refreshes per pass and seconds per pass at that K; `tok/s aggregate` = K / s per pass (K = 1: 1 / s per token). **Check against the measurements (old coefficients, R6 caveats above):** the 0.1B row predicts 10.0 s/token (measured 9.51-9.55 s with the 478-refresh plan; the final coefficients plan 497-501) and 47.3 s per K = 32 pass (measured 46.68 s); the 0.4B row predicts 20.6 s (measured 19.08-19.13 s).
+Columns: `cts / vector` = ciphertexts per width-C vector; `state cts` = per block and conversation (current layout;
+half in the filled one); `slope` = planned refreshes per conversation and block; `K (memory)` = the largest K <= t the
+memory model fits under 92 % of the card (presets, `ckpt_info.preset`); refreshes per pass and seconds per pass at
+that K; `tok/s aggregate` = K / s per pass (K = 1: 1 / s per token).
+
+**Checked against the measured final-coefficient runs (same build family, R6), stated tolerance ±3 % on decode:**
+- check 0.1B decode: 501 planned refreshes vs the final plan's 497 (+0.8 %); 9.78-9.82 s vs measured 9.70-9.74 s (+0.4 to +1.2 %): within the stated +/-3 %
+- check 0.4B decode: 1032 planned refreshes vs the final plan's 1011 (+2.1 %); 20.14-20.23 s vs measured 19.73-19.74 s (+2.0 to +2.5 %): within the stated +/-3 %
+- check 0.1B batched (K = 32): 1269 planned refreshes per pass for a b2 plan; no measured b2 pass exists. The real 0.1B's K = 32 b2 2-block plan (planner 100 / 103 for blocks 0 / 1, PLAN_B2.md) extrapolates to 100 + 11 x 103 + 1 = 1234; the measured BASE pass is 1424 planned / 29.87 s, i.e. the price anchor itself. 26.6 s here is low for b2: the per-op model gives 28.3 s (review lens 3)
 
 The 2,560 / 4,096 rows at t = 8 are **estimates, not plans**: the 1-block t = 8 captures exceeded this Mac's memory guard (11.5 GB footprint in the PCMM fake's 4,096-channel encodings), and so did the sharded 4,096 capture (swap growth). The estimate takes the planned 2,048-wide t = 16 counts (38, 42: one ciphertext per vector) plus 4 deliberate refreshes for the 4 extra state ciphertexts per block (M = 8 at t = 8), and 8 refreshes per conversation and block (twice the t = 16 slope: twice the state); one capture on the box replaces them.
 
@@ -135,10 +171,11 @@ Reading it:
 - **Decode time grows with blocks × ciphertexts per vector**, not parameters: 0.4B is 2× 0.1B (24 vs 12 blocks, one
   ciphertext each); 1.5B is again 24 blocks of one (2,048-channel) ciphertext, so it should cost about what 0.4B costs
   plus the larger PCMM GEMMs.
-- **The state** is C / 512 ciphertexts per block and conversation in every layout: it sets the per-conversation slope.
-- **Memory** stops the larger sizes, not time. 2.9B comes to 92 GB in the model even with the StC cache at 32 slots
-  (0.1B used 45 of 160: expect misses, i.e. slower refreshes): over the presets' 92 % margin, under the card's 97.9 GB,
-  so it is a try-and-see on the box; **7.2B and 13.3B do not fit one 98 GB card** in any layout (planes 34-44 / 64-85 GB,
+- **The state** is ⌈C / D⌉ · 64 / t ciphertexts per block and conversation (half in the filled layout): it sets the
+  per-conversation slope (one carry refresh per state ciphertext in a b2 plan).
+- **Memory** stops the larger sizes, not time. 2.9B comes to 95 GB in the model even with the StC cache at 32 slots
+  (0.1B used 45 of 160: expect misses, i.e. slower refreshes): over the presets' 92 % margin, 3 GB under the card's
+  97.9 GB, so it is a try-and-see on the box at best; **7.2B and 13.3B do not fit one 98 GB card** in any layout (planes 34-44 / 64-85 GB,
   the plaintext store, the registers). Levers, unbuilt: (1) the token-shift fold doubles every first linear's planes
   (x and x_prev both enter PCMM): mixing in the ciphertext instead (6 plaintext products per vector, one level) halves
   them; (2) 16-bit weights (2 planes, −33 %), an accuracy question; (3) streaming the planes from host memory (the
@@ -146,7 +183,14 @@ Reading it:
 
 ## 5. The per-size pipeline (`tools/rwkv7/size_pipeline.sh <pth> <tag> [steps]`)
 
-Every step logs its command, rc and seconds to `$OUT/pipeline.log`; the first failure stops it.
+Every step logs its command, rc and seconds to `$OUT/pipeline.log`; the first failure stops it. Each GPU step is named
+after its record (the record's basename), so `run_records.py` attaches the sampler window to every run. The harness
+steps write into `RUNS` (default `/root/vd/runs/<tag>_pipe`, never a gate's published directory) and refuse to
+overwrite an existing product (ranges, coefficients, generations, scans, evals) unless `FORCE=1`, which moves the old
+file to `<name>.prev-<UTC time>` first. Every capture and plan `run_box.sh` reuses, and every run step, is checked
+against the current settings first (`tools/rwkv7/capture_check.py`: the pth and coefficient sha256, lanes, layout,
+blocks, K, T, LoRA mode, shard landing, and the plan's graph md5); the names carry every setting that changes them
+(`run_box.sh names`).
 
 | step | what | product |
 |---|---|---|
@@ -159,8 +203,8 @@ Every step logs its command, rc and seconds to `$OUT/pipeline.log`; the first fa
 | capture, plan | `run_box.sh capture / plan` with this checkpoint and coefficients; `plan_cost.py` | plan, `plan_cost_decode.json` |
 | pf, b | the prefill (T = PF_T) and batched (K = B_K from the preset) captures and plans | plans |
 | *(DRY=1 stops here)* | | |
-| keys | `run_box.sh keyspec` + `keygen` for decode, pf, b (KEYS=bundle, the default on a full run) | `keys_<mode>/` |
-| run, run_pf, batch | decode P1–P3 + 32 generated; prefill on P3 and the long prompts (`PF_TEXTS`); batched K, 32 generated (falls back to K / 2) | `run_*.jsonl` |
+| keys | `run_box.sh keyspec` + `keygen` for decode, pf, b (KEYS=bundle, the default on a full run; b only when B_K ≥ 2) | `run_box.sh names`' `KEYDIR_<mode>` |
+| run, run_pf, batch | decode P1–P3 + 32 generated; prefill on P3 and the long prompts (`PF_TEXTS`); batched K, 32 generated. Only on a memory refusal (`RuntimeError: memory:` / CUDA out of memory in the run's log) the batched run falls back to K / 2, with that K's own capture, plan and (KEYS=bundle) key bundle; any other failure stops. Skipped when B_K < 2 | `run*.jsonl`, `batch*.jsonl` |
 | records | `run_records.py`: per run the FINAL_PLAN records and the sampler window (`sampler.sh` runs throughout) | `records.json` |
 
 `gate_verdict.py` on gate 3's own 0.1B records (gate/0.1b/eval_final.jsonl, the vector-d exact line, the two full
@@ -195,8 +239,8 @@ real 1.5B / 2.9B weights and their quality, the 4,096-wide plans (memory), every
 ## 7. Not built, by expected value
 
 1. The memory levers of §4 (fold-free token shift first: it is a circuit change the planner can price on the CPU).
-2. The filled layout (two reals per complex slot): 2× lanes at every width; at one ciphertext per vector it would give
-   t = 32 at width 2,048 with the cost of t = 16. The biggest structural lever left (REVIEW §5.B3).
+2. ~~The filled layout~~: built since (B3, `--layout filled`, FILLED_DESIGN.md): half the state ciphertexts per
+   block at every width (it does not double the lanes: the token side stays one value per slot).
 3. The 4,096-wide planner count on this Mac: the 1-block capture's recorder exceeded the memory guard (swap growth);
    §4's 4,096 rows extrapolate from 2,048 and 2,560 (marked). One capture on the box settles it.
 
@@ -211,8 +255,11 @@ export OUT=/root/out_any/1.5b RUNS=/root/vd/runs/1.5b HARNESS=/root/vd/harness T
 PYTHONPATH=python .venv/bin/python -m perseus.examples.rwkv7.ckpt_info $M      # shapes, lanes 16, the preset
 # 1. the CPU half and the quality gate (stops on a FAIL; RELU2=abs for REVIEW §5.A1's variant)
 DRY=1 bash tools/rwkv7/size_pipeline.sh $M 1.5b
-# 2. a 1-block smoke on the GPU with in-process keys (the t = 16 PCMM shape's first device run)
-env PTH=$M COEFFS=$RUNS/coeffs_final.json LANES=16 BLOCKS=1 TOKENS=4 bash tools/rwkv7/run_box.sh all
+# 2. a 1-block smoke on the GPU with in-process keys (the t = 16 PCMM shape's first device run). `check` runs the CPU
+#    suite on the 0.1B (CHECK_PTH / CHECK_COEFFS: the suite is written against it) and only the width-agnostic checks
+#    on $M; KEYS is required for every device step
+env PTH=$M COEFFS=$RUNS/coeffs_final.json LANES=16 BLOCKS=1 TOKENS=4 KEYS=inproc \
+    bash tools/rwkv7/run_box.sh check capture plan run
 # 3. the full runs with client keys (keyspec + keygen per mode, decode P1-P3, prefill, batched at the preset K = 16)
 bash tools/rwkv7/size_pipeline.sh $M 1.5b keys,run,run_pf,batch,records
 ```
@@ -227,8 +274,9 @@ bash tools/rwkv7/size_pipeline.sh $M 1.5b keys,run,run_pf,batch,records
    mirror each hold the folded matrices and the PCMM planes (1.5B: ≈ 8 GB of planes each, ≈ 18 GB of float64 layer
    weights in `ref.Params`); the batched twin records ≈ 16k-node graphs per block with values. Expect the 1.5B batched
    K = 16 run to exceed host RAM; run it last, at `B_K=8` first if the decode runs show > 100 GB.
-3. **Device memory.** The model puts 1.5B decode at 83 GB and batched K = 16 at 87 GB (92 % margin = 90 GB). Its least
-   certain items are the plaintext store (scaled from the 0.1B, 162 MB per block) and the batched pool (`32 K S` slots).
+3. **Device memory.** The model (recalibrated on the final runs) puts 1.5B decode at 85 GB and batched K = 16 at 89
+   GB with a 32-slot StC cache (92 % margin = 90 GB). Its least certain items are the plaintext store (205.3 MB per
+   block, the 0.1B's: the 0.4B's was 149) and the batched pool (`32 K S` slots).
    Fallbacks: `STC_CACHE` / `STC_CACHE_B` down (each slot 205 MB), `B_K=8`.
 4. **The key bundle.** `--keyspec` asks `Session.key_manifest` for the exact programs; the bundle is checked against the
    plan contract and the layout's rotation count before the session opens (`check_bundle`), and the run refuses a

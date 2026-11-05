@@ -222,6 +222,33 @@ def test_batched_mirror_2048(tmp_path_factory, K, carry, lanes):
     assert rel_rms(hb[0], hb[1]) > 1e-3
 
 
+@pytest.mark.parametrize("lanes", [0, 32])
+def test_filled_mirror_2048(tmp_path_factory, lanes):
+    """The filled state layout above width 1,024 (review lens 1, finding 4): at 2,048 as one t = 16 ciphertext
+    (lanes 0) and as two t = 32 shards, the filled mirror gives the current mirror's hidden states for 3 decode
+    steps and a K = 3 batched pass, with half the state ciphertexts per block (light: 2 blocks, 2^15 slots)."""
+    from perseus.examples.rwkv7.batched import BatchedMirror
+    P, cj, ids = synthetic(2048, 2, tmp_path_factory.getbasetemp())
+    co = load_coeffs(cj)
+    _rf, st = common.prefix_state(P, cj, [ids[0]], 1)
+    a, b = (Mirror(P, co, SLOTS, wbits=None, lanes=lanes, layout=x) for x in ("current", "filled"))
+    for m in (a, b):
+        m.reset(st)
+    assert len(b.state[0].S) * 2 == len(a.state[0].S)
+    errs = [rel_rms(b.step(P.emb[t])[0], a.step(P.emb[t])[0]) for t in ids[1:4]]
+    ba, bb = (BatchedMirror(P, co, SLOTS, 3, carry="lane", wbits=None, lanes=lanes, layout=x) for x in ("current", "filled"))
+    for m in (ba, bb):
+        m.reset(st)
+    rows = np.stack([P.emb[t] for t in ids[4:7]])
+    ya, _ = ba.step(rows)
+    yb, _ = bb.step(rows)
+    errs.append(rel_rms(yb, ya))
+    print(f"2048 filled vs current, lanes {lanes}: hidden rel max {max(errs):.1e}; state cts per block "
+          f"{len(a.state[0].S)} -> {len(b.state[0].S)}")
+    assert max(errs) < 1e-10
+    assert rel_rms(ya[0], ya[1]) > 1e-3
+
+
 @heavy
 def test_fake_prefill_and_batched_2048(tmp_path_factory):
     """The fake: a 4-token prefill pass + 1 decode step vs 5 decode steps; a K = 3 batched pass (lane carries) vs 3

@@ -338,8 +338,10 @@ def test_planopt_b2_keeps_the_planners_default_forbidden_steps():
     assert k == "FORBID_STEPS"
     assert steps[:len(PlanConfig.forbid_steps)] == list(PlanConfig.forbid_steps)
     assert steps[len(PlanConfig.forbid_steps):] == ["tm.state.bcast", "tm.state.update", "tm.state.readout"]
-    # decode / prefill / join scopes (model.py, serve.py) are not matched by any b2 substring
-    for scope in ("blk0.tm.state", "blk3.tm.kk", "blk1.tm.gn", "blk0.carry", "blk0.join", "tail", "blk2.tm.state.src"):
+    # decode / prefill / join scopes (model.py, prefill.py incl. the filled prefill's pf_* labels, serve.py) are not
+    # matched by any b2 substring
+    for scope in ("blk0.tm.state", "blk3.tm.kk", "blk1.tm.gn", "blk0.carry", "blk0.join", "tail", "blk2.tm.state.src",
+                  "blk1.tm.state.pf_xpose", "blk1.tm.state.pf_chain", "blk1.tm.state.pf_readout"):
         assert not any(s in scope for s in steps[len(PlanConfig.forbid_steps):]), scope
     with pytest.raises(subprocess.CalledProcessError):
         _planopt_env("nope")

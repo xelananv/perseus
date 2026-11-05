@@ -8,7 +8,8 @@
 #            tm.state.bcast, tm.state.update, tm.state.readout), so the cut must cover that work from shared values
 #            (the three token-side sources, the GroupNorm after the readout); the planner's default forbidden steps
 #            (.var, .mean, .qkv: perseus/plan/placer/planner.py PlanConfig.forbid_steps) are kept. Decode, prefill
-#            and join captures have none of these scopes: the variant leaves their plans as they are
+#            and join captures have none of these scopes (the filled prefill labels its own pf_xpose / pf_chain /
+#            pf_readout, which no b2 substring matches): the variant leaves their plans as they are
 # st         (experiment, PLAN_B2.md §4) no planned refresh anywhere in tm.state (decode's and prefill's whole
 #            state step; in a batched pass also the shared sources)
 PLANOPT_DEFAULT_FORBID=".var,.mean,.qkv"

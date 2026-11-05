@@ -82,11 +82,13 @@ def _mirror_alone(P, co, st, pick):
 
 
 @need
-@pytest.mark.parametrize("K,T", [(3, 4), (2, 1), (3, 0)])
-def test_mirror_serve_equals_alone(params2, K, T):  # noqa: F811
+@pytest.mark.parametrize("K,T,layout", [(3, 4, "current"), (2, 1, "current"), (3, 0, "current"), (3, 4, "filled")])
+def test_mirror_serve_equals_alone(params2, K, T, layout):  # noqa: F811
+    """The serve loop on the mirror; the filled layout (review lens 1, finding 4) against the same current-layout
+    alone runs: the two layouts compute the same numbers, so every check holds unchanged."""
     co = load_coeffs(COEFFS)
     st, arrivals, pick, idle_tok = _setup(params2)
-    srv = Server(MirrorBackend(params2, co, st, 1 << 15, K), K)
+    srv = Server(MirrorBackend(params2, co, st, 1 << 15, K, layout=layout), K)
     ev = []
     convs, idle = serve_loop(srv, arrivals, K=K, T=T, generate=GEN, emb=params2.emb, pick=pick, idle_token=idle_tok,
                              emit=ev.append)
@@ -108,12 +110,12 @@ def test_mirror_serve_equals_alone(params2, K, T):  # noqa: F811
     # non-vacuity: the conversations differ ...
     assert rel_rms(convs[0].hidden[1], convs[1].hidden[1]) > 1e-2
     # ... a join onto the wrong lane breaks the equality ...
-    bad = Server(MirrorBackend(params2, co, st, 1 << 15, K), K)
+    bad = Server(MirrorBackend(params2, co, st, 1 << 15, K, layout=layout), K)
     bad.mask_lane = lambda c: (c + 1) % K
     bconvs, _ = serve_loop(bad, arrivals, K=K, T=T, generate=GEN, emb=params2.emb, pick=pick, idle_token=idle_tok)
     assert max(rel_rms(a, b) for cv, bc in zip(convs, bconvs) for a, b in zip(cv.hidden, bc.hidden)) > 1e-3
     # ... and a leave that does not reset the lane breaks the idle check
-    nor = Server(MirrorBackend(params2, co, st, 1 << 15, K), K)
+    nor = Server(MirrorBackend(params2, co, st, 1 << 15, K, layout=layout), K)
     nor.leave_resets = False
     _c, nidle = serve_loop(nor, arrivals, K=K, T=T, generate=GEN, emb=params2.emb, pick=pick, idle_token=idle_tok)
     worst = 0.0

@@ -267,6 +267,32 @@ def test_filled_capture_and_plan(tmp_path, monkeypatch):
 
 
 @need
+def test_filled_prefill_scopes_escape_b2(tmp_path, monkeypatch):
+    """A 1-block filled prefill capture (T = 4) labels its transforms and readout pf_xpose / pf_chain / pf_readout, and
+    no step of it contains one of PLANOPT=b2's forbidden substrings (review lens 1, finding 1: they were
+    tm.state.readout & co., so b2_plan.sh on a filled prefill capture would have forbidden its readout refreshes)."""
+    import json
+
+    from perseus.examples.rwkv7 import run_capture
+    from perseus.examples.rwkv7.tests.conftest import CKPT
+    from perseus.examples.rwkv7.tests.test_batched import _planopt_env
+    from perseus.examples.rwkv7.tests.test_capture import HIGH
+    from perseus.examples.rwkv7.tests.test_ref import HARNESS
+    for k, v in HIGH.items():
+        monkeypatch.setenv(k, v)
+    cap = tmp_path / "cap_pf4_filled"
+    assert run_capture.main(["--pth", CKPT, "--coeffs", COEFFS, "--harness", HARNESS, "--blocks", "1",
+                             "--prefill-chunk", "4", "--layout", "filled", "--out", str(cap)]) == 0
+    (kv,) = _planopt_env("b2")
+    b2 = [x for x in kv.split("=", 1)[1].split(",") if x.startswith("tm.state")]
+    steps = {n.get("step") or "" for n in json.load(open(cap / "block_0" / "graph.json"))["nodes"]}
+    for lab in ("pf_xpose", "pf_chain", "pf_readout"):
+        assert any(s.endswith(f"tm.state.{lab}") for s in steps), lab
+    hit = sorted({s for s in steps for f in b2 if f in s})
+    assert not hit, hit
+
+
+@need
 @pytest.mark.parametrize("mode,capture", [("prefill", False), ("batched", False), ("batched", True)])
 def test_fake_filled_passes(params2, mode, capture):  # noqa: F811
     """A prefill pass (T = 4) and batched passes (K = 3) on the fake / recorder: the filled layout gives the current

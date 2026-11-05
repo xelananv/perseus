@@ -4,13 +4,18 @@ they imply, and the device-memory model of ANYSIZE_DESIGN.md §4 with the run pr
 
     python -m perseus.examples.rwkv7.ckpt_info M.pth [--out info.json]
 
-The memory model is transcribed from the pod-3 session reports (``mem_report_text`` of
-results/rwkv7-fhe-20261104/new_pod/r01b/run_P1.jsonl, r04b/run_P1.jsonl, r01b_batch/batch32.jsonl): a carried
-ciphertext (register) 14.0 MB, a pool slot 31.5 MB, an StC-first cache slot 205.2 MB, keys 8,437 MB (43 rotation
-keys + the refresh keys), every other item 19.4-21.1 GB ("other": workspaces, the dense bootstrap tables, replay slabs
-and side buffers, PCMM scratch); the PCMM planes are exact (24-bit weights = 3 int8 planes per 1,024 x 1,024 block:
-3 MiB), the plaintext store is scaled from the 0.1B / 0.4B reports (162 / 128 MB per block at one shard) by the shard
-count. The card: 97,887 MiB (RTX PRO 6000 Workstation, new_pod/RESULTS.md).
+The memory model is transcribed from the pod-3 session reports of the FINAL-coefficient runs (``mem_report_text`` of
+results/rwkv7-fhe-20261104/new_pod/r01b_final/run_best_P1.jsonl (total 70,980.0 MB), r04b_final/run_best_P1.jsonl
+(77,844.9), r01b_final/batch32_best.jsonl (91,019.6); recalibrated after review lens 3, finding 5: the older
+r01b / r04b / r01b_batch reports had a smaller plaintext store and replay slab, and the model calibrated on them
+under-predicted every final session by about 2 %): a carried ciphertext (register) 14.0 MB, a pool slot 31.5 MB, an
+StC-first cache slot 205.2 MB, keys 8,437.2 MB (43 rotation keys + the refresh keys); the PCMM planes are exact
+(24-bit weights = 3 int8 planes per 1,024 x 1,024 block: 3 MiB); the plaintext store 205.3 MB per block and shard
+(0.1B final decode 2,463.5 / 12; the 0.4B's 3,570.0 / 24 = 148.75 and the batched 2,245.0 / 12 = 187.1 are smaller, so
+the store is an upper value); "other" (workspaces, the dense bootstrap tables, replay slabs and side buffers, PCMM
+scratch) = the report's total minus the items above: decode 21,428.6 (0.1B) / 20,813.9 (0.4B, at 205.3 MB per block),
+batched 22,531.0, taken as 21,430 / 22,530 (the larger, so the model reproduces 0.1B decode and batched to +0.0 % and
+0.4B decode to +0.8 %). The card: 97,887 MiB (RTX PRO 6000 Workstation, new_pod/RESULTS.md).
 """
 from __future__ import annotations
 
@@ -21,8 +26,8 @@ import zipfile
 
 D = 1024
 REG_MB, POOL_MB, STC_MB, KEYS_MB = 14.0, 31.5, 205.2, 8437.2
-OTHER_MB = {"decode": 20300.0, "batched": 21150.0}   # total - (the items modelled here): 19,442 / 20,284 (0.1B / 0.4B decode), 21,113 (batched)
-PT_MB_PER_BLOCK_SHARD = 162.0
+OTHER_MB = {"decode": 21430.0, "batched": 22530.0}   # total - (the items modelled here), final runs: see the docstring
+PT_MB_PER_BLOCK_SHARD = 205.3
 CARD_MB = 97887.0
 
 
@@ -134,17 +139,22 @@ def preset(m: dict, lanes: int = 0) -> dict:
 
 def _preset(m: dict, lanes: int = 0) -> dict:
     """LANES / POOL / STC_CACHE / POOL_PF / POOL_B / STC_CACHE_B / B_K for this size: the measured 0.1B / 0.4B settings
-    at one ciphertext per vector of 1,024 channels (0.4B batched: the model puts K = 32 at 103 GB, so K = 16); above,
-    the largest StC cache (<= 160) and K <= t (a power of two) that the memory model fits under 92 % of the card."""
+    at one ciphertext per vector of 1,024 channels; above, the largest StC cache (<= 160) and K <= t (a power of two)
+    that the memory model fits under 92 % of the card. Batched: the largest K that fits with an StC cache of 64
+    slots (both measured batched runs used 64), else of 32; at each K the 64-slot cache is tried first, so halving K
+    restores it (review lens 3, finding 6)."""
     t = _lanes(m, lanes)
     S = -(-int(m["width"]) // (32768 // t))
     cap = 0.92 * CARD_MB
     K, stc_b = t, 64
-    while K > 1 and memory_mb(m, K=K, pool=pool_b(K, S), stc=stc_b, lanes=t)["total"] > cap:
-        if stc_b > 32:
-            stc_b = 32
-            continue
+    while K > 1:
+        fit = [c for c in (64, 32) if memory_mb(m, K=K, pool=pool_b(K, S), stc=c, lanes=t)["total"] <= cap]
+        if fit:
+            stc_b = fit[0]
+            break
         K //= 2
+    if K <= 1:
+        stc_b = 64
     stc = 160
     while stc > 32 and memory_mb(m, pool=128 * S, stc=stc, lanes=t)["total"] > cap:
         stc -= 16

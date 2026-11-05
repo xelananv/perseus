@@ -4,11 +4,15 @@
 - **Batched pass, K = 32, PLANOPT=b2:** `Program.compile`'s count goes from **87 / 89 to 55 / 57 refreshes** in
   blocks 0 / 1, exactly one fewer per conversation and block. Rotations go from 3,480 to 2,328 per block, ct × ct
   products from 650 to 490 and plaintext products from 4,268 to 2,188.
-- **Estimated pass (12 blocks):** **≈ 17.5–18.9 s instead of ≈ 27.4–29.6 s** on the same model and price, with
-  LEVERS=best on both sides. That is ≈ 1.5× the aggregate throughput of `LEVERS=best` + b2 on the current layout
-  (§1; an estimate, R6).
-- **Decode:** 25 / 28 → 24 / 26 refreshes per block, ≈ 3–5 % per token.
-- **Prefill (T = 32): worse.** 52 / 74 → 84 / 104 refreshes, ≈ +19 % per pass with LEVERS=best. The planner's placement causes it,
+- **Estimated pass (12 blocks), anchored on the measured 29.87 s K = 32 pass (review lens 3, finding 8):**
+  **≈ 18.1–19.4 s instead of ≈ 28.3–28.5 s**, LEVERS=best + b2 on both sides: **≈ 1.47–1.57×** the aggregate
+  throughput (≈ 1.65–1.77 tok/s against ≈ 1.12–1.13), latency per conversation ≈ 28 → ≈ 18–19 s per token (§1; an
+  estimate, R6). The first version (≈ 17.5–18.9 vs ≈ 27.4–29.6 s, then ≈ 20.5–22.4 vs ≈ 30.4–33.1 s with a decode
+  remainder, ≈ 1.45–1.5×) is withdrawn: it scaled by the old decode anchor and added a remainder that was that
+  anchor's own unit error.
+- **Decode:** 25 / 28 → 24 / 26 refreshes per block, ≈ 3–5 % per token (≈ 9.2 s against the measured 9.70–9.74 s).
+- **Prefill (T = 32): worse.** 52 / 74 → 84 / 104 refreshes, ≈ +19 % per pass with LEVERS=best: on the measured
+  24.1–24.5 s per pass that is ≈ 28.7–29.2 s (+4.6–4.7 s). The planner's placement causes it,
   not the circuit (§3).
 - **Opt-in and default off.** The token side, `z = h + i·v_first` and the three broadcast pairs do not move. The
   current layout's op stream is unchanged.
@@ -58,26 +62,32 @@ are the device's own shape, so nothing below is scaled from K = 16.
 - **12-block refreshes:** block 0 + 11 × block 1 + the tail, counting a pair as one refresh.
 - **Op counts:** from the compile check's census (`compile_check.json` `limbs`).
 - **Price:** P4's model (BATCHED_DESIGN.md §4). Published per-op times are used as ratios: refresh 28.77 ms,
-  rotation or conjugation 0.214 ms, ct × ct 0.203 ms, ct × pt 0.072 ms, add 0.033 ms. They are scaled by 0.574–0.621
-  to this port's measured decode. **These are estimates, R6:** another card and another build.
+  rotation or conjugation 0.214 ms, ct × ct 0.203 ms, ct × pt 0.072 ms, add 0.033 ms ("model, published s"). The
+  **anchored** column scales each mode by its own measured final-coefficient run with LEVERS=best: decode by the
+  measured 9.70–9.74 s over the "decode, current +best" row; prefill by the measured 24.12–24.53 s per pass
+  (`r01b_final/run_pf32_best_L*.jsonl`) over the "prefill, current +best" row; batched by the measured 29.87 s over
+  50.40 published s, the model of that run's own device block mix (scale 0.593, inside the old 0.574–0.621, no
+  remainder), the other end of the range a fixed 3.3 s + 0.527 × the model fitted to the same anchor. The old column
+  (× 0.574–0.621 of the old decode anchor) is kept for reference. **These are estimates, R6:** another card and
+  another build for the per-op ratios.
 - **+best:** LEVERS=best's plan environment (PAIR=1, `PC_EM_FUSE_RESCALE=1`, siblings schedule).
 - **Batched rows** are under PLANOPT=b2.
 
-| plan | sites b0 / b1 | pairs b0 / b1 | rotations + conj. b0 / b1 | ct × ct b0 / b1 | ct × pt b0 / b1 | 12-block refreshes | 12-block rotations + conj. | est. s per pass |
-|---|---|---|---|---|---|---|---|---|
-| decode, current | 25 / 28 | 0 / 0 | 211 / 215 | 340 / 371 | 142 / 142 | 334 | 2,576 | 6.8–7.3 |
-| decode, current +best | 25 / 28 | 1 / 3 | 211 / 215 | 340 / 371 | 142 / 142 | 300 | 2,576 | 6.2–6.7 |
-| decode, **filled** | 24 / 26 | 0 / 0 | 175 / 179 | 335 / 366 | 77 / 77 | 311 | 2,144 | 6.3–6.8 |
-| decode, **filled** +best | 24 / 26 | 1 / 2 | 175 / 179 | 335 / 366 | 77 / 77 | 288 | 2,144 | 5.9–6.4 |
-| prefill T = 32, current | 52 / 74 | 0 / 0 | 3,494 / 3,498 | 650 / 681 | 4,274 / 4,274 | 867 | 41,972 | 24.3–26.3 |
-| prefill T = 32, current +best | 52 / 74 | 8 / 17 | 3,494 / 3,498 | 650 / 681 | 4,274 / 4,274 | 672 | 41,972 | 21.1–22.8 |
-| prefill T = 32, **filled** | 84 / 104 | 0 / 0 | 2,342 / 2,346 | 490 / 521 | 2,194 / 2,194 | 1,229 | 28,148 | 26.7–28.9 |
-| prefill T = 32, **filled** +best | 84 / 104 | 9 / 8 | 2,342 / 2,346 | 490 / 521 | 2,194 / 2,194 | 1,132 | 28,148 | 25.1–27.2 |
-| prefill T = 32, filled, forbid xpose + readout (§3) | 75 / 103 | 0 / 0 | 2,342 / 2,346 | 490 / 521 | 2,194 / 2,194 | 1,209 | 28,148 | 26.4–28.5 |
-| batched K = 32, b2, current | 87 / 89 | 0 / 0 | 3,480 / 3,484 | 650 / 681 | 4,268 / 4,268 | 1,067 | 41,804 | 27.6–29.8 |
-| batched K = 32, b2, current +best | 87 / 89 | 1 / 1 | 3,480 / 3,484 | 650 / 681 | 4,268 / 4,268 | 1,055 | 41,804 | 27.4–29.6 |
-| batched K = 32, b2, **filled** | **55 / 57** | 0 / 0 | 2,328 / 2,332 | 490 / 521 | 2,188 / 2,188 | **683** | 27,980 | **17.7–19.1** |
-| batched K = 32, b2, **filled** +best | **55 / 57** | 1 / 1 | 2,328 / 2,332 | 490 / 521 | 2,188 / 2,188 | **671** | 27,980 | **17.5–18.9** |
+| plan | sites b0 / b1 | pairs b0 / b1 | rotations + conj. b0 / b1 | ct x ct b0 / b1 | ct x pt b0 / b1 | 12-block refreshes (sites - pairs) | 12-block rotations + conj. | model, published s | old est. s per pass | anchored s per pass |
+|---|---|---|---|---|---|---|---|---|---|---|
+| decode, current | 25 / 28 | 0 / 0 | 211 / 215 | 340 / 371 | 142 / 142 | 334 | 2,576 | 11.81 | 6.8-7.3 | 10.58-10.62 |
+| decode, current +best | 25 / 28 | 1 / 3 | 211 / 215 | 340 / 371 | 142 / 142 | 300 | 2,576 | 10.83 | 6.2-6.7 | 9.7-9.74 |
+| decode, filled | 24 / 26 | 0 / 0 | 175 / 179 | 335 / 366 | 77 / 77 | 311 | 2,144 | 10.96 | 6.3-6.8 | 9.81-9.85 |
+| decode, filled +best | 24 / 26 | 1 / 2 | 175 / 179 | 335 / 366 | 77 / 77 | 288 | 2,144 | 10.29 | 5.9-6.4 | 9.22-9.26 |
+| prefill T = 32, current | 52 / 74 | 0 / 0 | 3,494 / 3,498 | 650 / 681 | 4,274 / 4,274 | 867 | 41,972 | 42.36 | 24.3-26.3 | 27.8-28.28 |
+| prefill T = 32, current +best | 52 / 74 | 8 / 17 | 3,494 / 3,498 | 650 / 681 | 4,274 / 4,274 | 672 | 41,972 | 36.75 | 21.1-22.8 | 24.12-24.53 |
+| prefill T = 32, filled | 84 / 104 | 0 / 0 | 2,342 / 2,346 | 490 / 521 | 2,194 / 2,194 | 1,229 | 28,148 | 46.55 | 26.7-28.9 | 30.55-31.07 |
+| prefill T = 32, filled +best | 84 / 104 | 9 / 8 | 2,342 / 2,346 | 490 / 521 | 2,194 / 2,194 | 1,132 | 28,148 | 43.76 | 25.1-27.2 | 28.72-29.21 |
+| prefill T = 32, filled, forbid pf_xpose + pf_readout | 75 / 103 | 0 / 0 | 2,342 / 2,346 | 490 / 521 | 2,194 / 2,194 | 1,209 | 28,148 | 45.97 | 26.4-28.5 | 30.18-30.69 |
+| batched K = 32, b2, current | 87 / 89 | 0 / 0 | 3,480 / 3,484 | 650 / 681 | 4,268 / 4,268 | 1,067 | 41,804 | 48.06 | 27.6-29.8 | 28.49-28.63 |
+| batched K = 32, b2, current +best | 87 / 89 | 1 / 1 | 3,480 / 3,484 | 650 / 681 | 4,268 / 4,268 | 1,055 | 41,804 | 47.72 | 27.4-29.6 | 28.28-28.45 |
+| batched K = 32, b2, filled | 55 / 57 | 0 / 0 | 2,328 / 2,332 | 490 / 521 | 2,188 / 2,188 | 683 | 27,980 | 30.79 | 17.7-19.1 | 18.25-19.53 |
+| batched K = 32, b2, filled +best | 55 / 57 | 1 / 1 | 2,328 / 2,332 | 490 / 521 | 2,188 / 2,188 | 671 | 27,980 | 30.45 | 17.5-18.9 | 18.05-19.35 |
 
 **Per conversation and block (K = 32, filled against current).** The plan's differences are exactly the kernel
 counts of §2, times 32:
@@ -100,17 +110,22 @@ layouts.
 - So the filled layout's gain on this pass is additive to `LEVERS=best`: 1,055 → 671 refreshes per pass.
 - On decode and prefill, PAIR=1 pairs token-side real siblings, about equally in both layouts.
 
-**What the pass prices say, and how far to trust them.**
-- The model omits PCMM's GEMM, `mult_const`, `rescale` and host time. On decode it predicts 6.2–6.7 s against the
-  measured 9.70–9.74 s per token with LEVERS=best on the final coefficients (`r01b_final/run_best_P*.jsonl`). That
-  leaves ≈ 3.0–3.5 s per pass of fixed work the model does not see.
-- The batched current b2 row (27.6–29.8 s) matches B2's refresh-only estimate (28.7–30.5 s, PLAN_B2.md §5).
-- Adding the decode-calibrated remainder to both sides:
-  - current + best + b2: ≈ 30.4–33.1 s per K = 32 pass, ≈ 0.97–1.05 tok/s;
-  - filled + best + b2: ≈ 20.5–22.4 s, ≈ 1.43–1.56 tok/s.
-- **Expected gain over LEVERS=best + b2 on the batched pass: ≈ 1.45–1.5× aggregate throughput.** The latency per
-  conversation drops with it, ≈ 21 s instead of ≈ 31 s per token. **An estimate (R6).** Only a device run measures it.
-- **Decode:** ≈ 0.3 s per token in model units (5.9–6.4 against 6.2–6.7), ≈ 3–5 % of the measured 9.7 s.
+**What the pass prices say, and how far to trust them** (re-anchored after review lens 3, finding 8).
+- The model omits PCMM's GEMM, `mult_const`, `rescale` and host time; anchoring each mode on its own measured run
+  absorbs them as a scale. Applied to the measured batched configuration's own device block mix (the record's
+  compiled sites, base + best) the model gives 50.40 published s for the measured 29.87 s, a scale of 0.593: inside
+  the old 0.574–0.621, so **the batched pass needs no decode remainder**. The old 3.0–3.5 s "remainder" was the
+  decode scale's own units: it had been calibrated on decode's planner count (461–478) and applied to compiled sites
+  (334); decode anchored on its compiled sites scales by 0.896–0.899.
+- Anchored (the table's last column), LEVERS=best + b2 on both sides:
+  - current: ≈ 28.3–28.5 s per K = 32 pass, ≈ 1.12–1.13 tok/s (≈ 1.05× the measured base pass; review lens 3,
+    finding 10: about half of the refreshes b2 removes were already paired);
+  - filled: ≈ 18.1–19.4 s, ≈ 1.65–1.77 tok/s.
+- **Expected gain over LEVERS=best + b2 on the batched pass: ≈ 1.47–1.57× aggregate throughput** (scale-only model
+  28.28 → 18.05 s, 1.567×; the remainder model 28.45 → 19.35 s, 1.47×). The latency per conversation drops with it,
+  ≈ 18–19 s instead of ≈ 28 s per token. **An estimate (R6).** Only a device run measures it.
+- **Decode:** ≈ 0.5 s per token (9.22–9.26 against the measured 9.70–9.74 s), ≈ 3–5 %.
+- **Prefill:** ≈ 28.7–29.2 s per T = 32 pass against the measured 24.1–24.5 s (+19 %, +4.6–4.7 s).
 
 **Memory (estimate).** At 12 blocks and K = 32 the batched state is 12 × (32 + 2) = 408 carried registers instead of
 12 × (64 + 2) = 792. At ≈ 14.2 MB per register at the landing (BATCHED_DESIGN.md §4) that saves ≈ 5.5 GB on the card
@@ -182,8 +197,9 @@ The current layout keeps its float64 path.
   the filled prefill: 146 → 128 per 4-token pass, 2 blocks (`test_fake_filled_passes`).
 - The magnitudes are the same: |S| ≈ 1.10 in both, coefficient magnitude 3–4 × 10⁻⁴ (`output_max_abs`,
   `output_max_coeff` of the S adds).
-- Forbidding the transforms (`FORBID_STEPS=…,tm.state.xpose,tm.state.readout`; filled-only scopes in
-  `prefill.py`) moves only 9 refreshes into the chain (84 → 75 in block 0).
+- Forbidding the transforms (`FORBID_STEPS=…,tm.state.pf_xpose,tm.state.pf_readout`; filled-only scopes in
+  `prefill.py`, measured when they were still named `xpose` / `readout`: renamed `pf_*` so that `PLANOPT=b2`'s
+  `tm.state.readout` substring cannot match them) moves only 9 refreshes into the chain (84 → 75 in block 0).
 - **Leading hypothesis, unverified:** the real-route entry (48 against the complex route's 46), plus the planner's
   per-site pricing (`placer/refresh.py` `_build`, `real=` only for real-tagged values), make the S cut cheaper for the
   min-cut in the current layout.
@@ -193,8 +209,8 @@ The current layout keeps its float64 path.
 **Consequence for sessions.** Decode, prefill, batched and join programs hand the same state registers over
 (B4's serve session). So one session runs one layout:
 - **batched-only or decode + batched sessions:** use `filled`;
-- **serve sessions with prefill:** today's choice trades the batched gain (≈ −10 s per pass) against the prefill
-  regression (≈ +4.0–4.4 s per 32-token pass with LEVERS=best).
+- **serve sessions with prefill:** today's choice trades the batched gain (≈ −9.1 to −10.2 s per pass) against the
+  prefill regression (≈ +4.6–4.7 s per 32-token pass with LEVERS=best, on the measured 24.1–24.5 s).
 
 A cheaper route exists and is not built: run prefill in the current layout and convert at the hand-over.
 - current → filled is `S_0 + i·S_1`, an add and a `mult_i`, with no level and no key switch;
@@ -249,14 +265,14 @@ peaked at 94.9 of 97.9 GB), and it doubles the time a batch waits for a reading 
 ```bash
 export OUT=... PTH=.../RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth COEFFS=.../coeffs_final.json
 B_K=4 LAYOUT=filled bash tools/rwkv7/run_box.sh bcheck            # once: the filled registers through Program.compile
-LAYOUT=filled PLANOPT=b2 LEVERS=best B_K=32 B_GENERATE=32 POOL_B=1024 STC_CACHE_B=64 bash tools/rwkv7/run_box.sh b
+KEYS=inproc LAYOUT=filled PLANOPT=b2 LEVERS=best B_K=32 B_GENERATE=32 POOL_B=1024 STC_CACHE_B=64 bash tools/rwkv7/run_box.sh b
 # the A/B anchor on the same box and build (R6): the same line with LAYOUT unset
 ```
 
 - `LAYOUT` (`current` | `filled`) adds `--layout` to every step, and the suffix `_filled` to every capture, plan, key
   bundle and record, so a filled run never reuses a current-layout plan.
 - It combines with `LEVERS`, `PLANOPT`, `B_K` and `PF_T`.
-- For decode alone: `LAYOUT=filled LEVERS=best bash tools/rwkv7/run_box.sh capture plan run`.
+- For decode alone: `KEYS=inproc LAYOUT=filled LEVERS=best bash tools/rwkv7/run_box.sh capture plan run` (run_box.sh takes several steps in order).
 
 ## 7. Reproduce (CPU, under `tools/memguard.sh 6`, one process at a time)
 

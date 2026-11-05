@@ -11,7 +11,9 @@ python/perseus/examples/rwkv7/ANYSIZE_DESIGN.md comes from these JSON lines.
     # a synthetic one (synth.py; this Mac): --width W makes DIR/ckpt.npz and DIR/coeffs.json first
     PYTHONPATH=python python tools/rwkv7/plan_sizes.py --width 2048 --blocks 2 --modes decode,b4 --out DIR
 
-Writes DIR/sizes.jsonl: one line per mode {width, shards, blocks, mode, stages: {block_b: {refreshes, ...}}}.
+Writes DIR/sizes.jsonl: one line per mode {width, shards, blocks, mode, stages: {block_b: {refreshes, ...}}}. The counts
+are PLANNER counts (plan_cost.py: the plan's refreshes per stage, ``summary.total_bootstraps`` summed), not the
+device's compiled ``n_bootstraps`` (fewer: the compile merges sites); size_table.py prices them per planned refresh.
 """
 from __future__ import annotations
 
@@ -49,7 +51,8 @@ def main(argv=None) -> int:
     ap.add_argument("--lora", default="auto")
     ap.add_argument("--extra", default="", help="more run_capture flags (e.g. --no-shard-land)")
     ap.add_argument("--planenv", default="", help="extra plan env, e.g. 'PAIR=1'")
-    ap.add_argument("--memguard-gb", default=os.environ.get("MEMGUARD_GB", "10"))
+    ap.add_argument("--memguard-gb", default=os.environ.get("MEMGUARD_GB", "6"),
+                    help="tools/memguard.sh ceiling per capture (6: a 2,048-wide 1-block capture reached 5.4 GB on a 16 GB Mac)")
     ap.add_argument("--out", required=True)
     a = ap.parse_args(argv)
     out = pathlib.Path(a.out)

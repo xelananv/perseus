@@ -4,7 +4,8 @@
 "Records for each run"): per-token (or per-pass) seconds, top-1 against the poly model, logits relErrRms median and
 max (R3), the tokens whose plaintext poly reference left a site's interval, setup seconds, the keys (insecure-inproc
 or bundle, has_secret), the generated ids, and the sampler's window (GPU util, power, VRAM, CPU busy, RAM) between the
-step's start and end lines in pipeline.log.
+step's start and end lines in pipeline.log (size_pipeline.sh names each GPU step after its record: the record's
+basename; older logs fall back to matching the tag's last token).
 
     python tools/rwkv7/run_records.py OUT [--sampler OUT/sampler.csv] [--out OUT/records.json]
 """
@@ -80,10 +81,11 @@ def main(argv=None) -> int:
     a = ap.parse_args(argv)
     win = windows(os.path.join(a.out, "pipeline.log"))
     recs = []
-    for f in sorted(glob.glob(os.path.join(a.out, "run*.jsonl")) + glob.glob(os.path.join(a.out, "batch*.jsonl"))):
+    files = [f for p in ("run*.jsonl", "batch*.jsonl", "serve*.jsonl") for f in glob.glob(os.path.join(a.out, p))]
+    for f in sorted(files):
         r = record(f)
         tag = re.sub(r"\.jsonl$", "", os.path.basename(f))
-        step = next((s for s in win if s.lower().endswith(tag.split("_")[-1].lower())), None)
+        step = tag if tag in win else next((s for s in win if s.lower().endswith(tag.split("_")[-1].lower())), None)
         r["step"] = step
         if step:
             r["window"] = win[step]

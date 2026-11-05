@@ -75,12 +75,14 @@ class PrefillCircuit(Circuit):
                 Q = acc if Q is None else ops.add(ops.rotate(Q, 1), acc)
                 continue
             # filled (FILLED_DESIGN.md §2): the same ops, the transforms and the readout labelled, so a plan option
-            # can keep refreshes on the state chain itself
-            with self._scope("xpose"):
+            # can keep refreshes on the state chain itself. The labels carry a pf_ prefix: PLANOPT=b2's forbidden
+            # substrings (tm.state.bcast / update / readout, the batched pass's per-conversation scopes) must not
+            # match a prefill scope (review lens 1, finding 1)
+            with self._scope("pf_xpose"):
                 V = L.transpose(ops, vt)
-            with self._scope("chain"):
+            with self._scope("pf_chain"):
                 S, Ps = self.state_step(S, wt, kkt, bbt, ktt, rt, V)
-            with self._scope("readout"):
+            with self._scope("pf_readout"):
                 acc = L.untranspose_lane0(ops, Ps)
                 Q = acc if Q is None else ops.add(ops.rotate(Q, 1), acc)
         st.S[j * M:(j + 1) * M] = S

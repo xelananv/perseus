@@ -26,6 +26,15 @@ def model_kw(a) -> dict:
             "lanes": getattr(a, "lanes", 0), "layout": getattr(a, "layout", "current")}
 
 
+def _ckpt_depth(path):
+    """The checkpoint's own depth (its blocks.N keys, read without loading tensors), whatever --blocks loaded."""
+    try:
+        from .ckpt_info import model_shapes, shapes
+        return int(model_shapes(shapes(path))["n_layer"])
+    except Exception:                                   # noqa: BLE001 (a format the shape reader does not know)
+        return None
+
+
 def batch_probe(P, ids, K: int, n_passes: int):
     """Public batched passes: pass i, lane c reads ``ids[s c + i]`` (each conversation its own window of the public
     text, stride s <= 7). Returns (the passes' row matrices (K, C), the token ids [[pass 0's K ids], ...])."""
@@ -163,7 +172,7 @@ def main(argv=None) -> int:
             "batch": K, "batch_carry": a.batch_carry if K > 1 else None, "batch_hoist": a.batch_hoist if K > 1 else None,
             "prefix": a.prefix,
             "pth_sha256": common.sha256(a.pth), "coeffs_sha256": common.sha256(a.coeffs), "wbits": a.wbits,
-            "fuse_l1": a.fuse_l1, "pcmm_shift": a.pcmm_shift, "width": P.C, "n_layer_ckpt": P.n_layer,
+            "fuse_l1": a.fuse_l1, "pcmm_shift": a.pcmm_shift, "width": P.C, "blocks_loaded": P.n_layer, "n_layer_ckpt": _ckpt_depth(a.pth),
             "shards": model.L.S, "lanes": model.L.t, "channels_per_ct": model.L.D, "layout": model.L.layout, "lora": model.W[0].lora if model.W else None, "shard_land": model.shard_land,
             "state_names": model.state_names(), "environment": common.environment()}
     with open(os.path.join(a.out, "rwkv7_capture.json"), "w") as f:

@@ -5,8 +5,11 @@
 that ran on the device. The circuit is unchanged: same capture, same fake, same recorder. Only the plan moves.
 - On the capture whose plan ran on the device (K = 32): block 0 goes **209 → 80** and block 1 **153 → 88** in
   `Program.compile`'s count. That count reproduces the device's `n_bootstraps` exactly (§2).
-- Estimated 12-block pass: **≈ 1,040 refreshes instead of 2,063**, so **≈ 28.4–30.0 s per pass instead of the
-  measured 46.68 s** (≈ 1.07–1.13 tokens/s at 32 lanes against 0.6855). This is an estimate, §5.
+- Estimated 12-block pass on the final coefficients with LEVERS=best: **≈ 28.3–28.5 s per pass against the measured
+  29.87 s** of the base plan (≈ 1.12–1.13 tokens/s against 1.07; ≈ 1.05×; 26.5–26.8 s only if a paired refresh costs
+  two singles). This is an estimate, §5, re-anchored after review lens 3 (findings 10, 11): the first estimate here
+  (≈ 28.4–30.0 s "instead of the measured 46.68 s") credited b2 with the whole drop from 46.68 s, which came mostly
+  from the final coefficients' capture and from pairing.
 - On the box: `PLANOPT=b2 bash tools/rwkv7/run_box.sh b` (§6).
 
 Every number below is from the files named beside it. Plans and captures are under `.cache/rwkv7_b2plan/`
@@ -179,6 +182,22 @@ run_box.sh.
 
 ## 5. What it should cost (an estimate, not a measurement)
 
+**Re-anchored, 2026-11-05 (review lens 3, findings 10 and 11; supersedes the table below).** The anchor is the
+measured final-coefficient pass with LEVERS=best on the BASE plan: 29.8721 s per K = 32 pass
+(`new_pod/r01b_final/batch32_best.jsonl`), 1,424 planned refreshes (`r01b_final/plan_b32_best.log`), 1,257 compiled
+sites (the record header's `n_bootstraps`). Two things already moved between the old 46.68 s run and that one: the
+final coefficients' capture plans nine of the twelve blocks b2-like already (the device shows slope 4 only in blocks
+1, 5, 11), and PAIR=1 merges sibling refreshes. b2 removes ≈ 189 sites from blocks 1, 5, 11, but about 96 of them
+were paired (base block 1: 33 pairs, b2: 1; the device record 112 pairs), i.e. ≈ 96 refresh launches, not 189. With
+the per-op model anchored on the measured pass (scale 0.593; FILLED_DESIGN.md §1): b2 = 29.87 − 3 × (4,872.5 −
+3,980.6) published ms × 0.593 = **28.28 s**; the remainder model gives 28.45 s; **b2 ≈ 28.3–28.5 s per pass**
+(1.12–1.13 tok/s, ≈ 1.05× the measured pass), 26.5–26.8 s only if a paired refresh costs two singles. b2's own
+increment is ≈ 1.4–1.6 s. The old method below, applied to the measured configuration, misses it (46.68 − 806 ×
+16.5–17.9 ms = 32.3–33.4 s against 29.87 s) because pairing is unpriced. The ≈ 25.5 s once written for b2 in
+new_pod/RESULTS.md is withdrawn there for the same reason.
+
+**The first estimate (old coefficients, old anchor; kept for the record, superseded above).**
+
 **Anchor** (measured):
 - 46.68 s per pass, 12 blocks, K = 32, old coefficients (`new_pod/RESULTS.md` § batched; `r01b_batch/batch32.jsonl`);
 - `n_bootstraps` per program 209, 153, 153, 216, 153, 215, 154, 150, 217, 148, 147, 147, 1, which sums to **2,063**.
@@ -217,17 +236,19 @@ run_box.sh.
 ## 6. On the box
 
 ```bash
-# the batched run on the b2 plan (own plan dir plan_rwkv7_b32_b2, records batch32_b2.jsonl, key bundle keys_b_b2)
+# the batched run on the b2 plan (own plan dir plan_rwkv7_k32_pob2, records batch_k32_pob2.jsonl, key bundle
+# keys_b_k32_pob2; `run_box.sh names` prints them all)
 export OUT=... PTH=.../RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth COEFFS=.../coeffs_final.json
-B_K=32 B_GENERATE=32 POOL_B=1024 STC_CACHE_B=64 PLANOPT=b2 bash tools/rwkv7/run_box.sh b
+KEYS=inproc B_K=32 B_GENERATE=32 POOL_B=1024 STC_CACHE_B=64 PLANOPT=b2 bash tools/rwkv7/run_box.sh b
 # with the PAIR + fused-EvalMod levers (b2 leaves ~1 pair per block to take): the brief's form
-PLANOPT=b2 LEVERS=best bash tools/rwkv7/run_box.sh b
+KEYS=inproc PLANOPT=b2 LEVERS=best bash tools/rwkv7/run_box.sh b
 ```
 
 `PLANOPT` (`base` | `b2`; `tools/rwkv7/planopt.sh`) changes only these:
 - `plan_b` passes the variant's environment to `make_plan.sh`;
-- `BPLAN`, the `batch` / `serve` record names and the `b` / `s` key bundle directories gain the suffix `_b2`, so a b2
-  run never reuses a base plan or overwrites a base record.
+- `BPLAN`, the `batch` / `serve` record names and the `b` / `s` key bundle directories gain the suffix `_pob2`, so a
+  b2 run never reuses a base plan or overwrites a base record (and, since every setting has its own name token, a
+  2-block base smoke no longer shares a name with the full-depth b2 run: `_blk2` vs `_pob2`, review lens 2, finding 1).
 
 Decode, prefill and join plans are not affected. The capture is the same, so `capture_b` is reused.
 `tools/rwkv7/b2_plan.sh CAP ROOT NAME [PLANOPT]` re-plans one capture on the CPU and prints its census

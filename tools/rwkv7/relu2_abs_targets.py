@@ -3,7 +3,8 @@
 """ReLU^2 targets in absolute terms (REVIEW_20261105.md §5.A1): per block, E = REL x max|relu^2| over the site's
 margin-M0 interval [m - M0 w, M + M0 w] (w = M - m, from the calibration ranges), printed as fit.py flags
 ``--site-target 'blocks\\.B\\.ffn\\.relu2$=E:abs'``, one per line. Fitting the wide interval (margin 0.5) with these
-targets keeps ReLU^2's absolute error where gate 3's margin-0.1 fit had it, whatever the margin.
+targets keeps ReLU^2's absolute error where the margin-0.1 fit had it (the pre-gate-2 mixed fit REVIEW §5.A1 anchors to;
+gate 3 itself fitted ReLU^2 at margin 0.2), whatever the margin.
 
 Why: fit.py's ``rel`` metric divides by max|f| over the fitted interval, and for relu^2 that maximum grows with the
 square of the interval's top, so widening the interval from margin 0.1 to 0.5 loosened the absolute error ~2.8x (top-1

@@ -151,11 +151,14 @@ def test_serve_session_prepare(tmp_path, monkeypatch):
     for k, v in HIGH.items():
         monkeypatch.setenv(k, v)
     T, Kb = 4, 4
+    layout = os.environ.get("RWKV7_LAYOUT", "current")       # run_box.sh LAYOUT (FILLED_DESIGN.md); the join is
+    tag = "" if layout == "current" else f"_{layout}"         # layout-free (token-shift carries only)
     root = pathlib.Path(os.environ.get("RWKV7_B_DIR", str(tmp_path))) / "serve_prepare"
-    cap_d, plan_d = _cap_and_plan(root, "dec", [], HIGH)
+    lay = ["--layout", layout]
+    cap_d, plan_d = _cap_and_plan(root, f"dec{tag}", lay, HIGH)
     sh = ["--shifts", str(cap_d / "pcmm_shifts.json")]
-    _c, plan_p = _cap_and_plan(root, f"pf{T}", ["--prefill-chunk", str(T), *sh], HIGH)
-    _c, plan_b = _cap_and_plan(root, f"b{Kb}", ["--batch", str(Kb), *sh], HIGH)
+    _c, plan_p = _cap_and_plan(root, f"pf{T}{tag}", ["--prefill-chunk", str(T), *lay, *sh], HIGH)
+    _c, plan_b = _cap_and_plan(root, f"b{Kb}{tag}", ["--batch", str(Kb), *lay, *sh], HIGH)
     _c, plan_j = _cap_and_plan(root, f"join{Kb}", ["--join", "--batch", str(Kb)], HIGH)
     shifts = json.load(open(cap_d / "pcmm_shifts.json"))
     P = ref.load_params(CKPT, 1)
@@ -165,9 +168,10 @@ def test_serve_session_prepare(tmp_path, monkeypatch):
     _rf, st = common.prefix_state(P, COEFFS, ids, 1)
     cfg = session_config(str(plan_d))
     labels = ["block_0", "block_1"]
-    _f, _i, dm = make_model(P, co, capture=True, shifts=shifts)
-    _f, _i, pm = make_model(P, co, capture=True, shifts=shifts, chunk=T)
-    _f, _i, bm = make_model(P, co, capture=True, shifts=shifts, batch=Kb, batch_carry="lane", prefill_keys=T)
+    _f, _i, dm = make_model(P, co, capture=True, shifts=shifts, layout=layout)
+    _f, _i, pm = make_model(P, co, capture=True, shifts=shifts, chunk=T, layout=layout)
+    _f, _i, bm = make_model(P, co, capture=True, shifts=shifts, batch=Kb, batch_carry="lane", prefill_keys=T,
+                            layout=layout)
     _f, _i, jm = make_join(P, Kb, capture=True)
     for m in (dm, pm, bm):
         m.init_state = st

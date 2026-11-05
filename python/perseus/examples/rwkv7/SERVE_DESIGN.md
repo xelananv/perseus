@@ -118,6 +118,17 @@ instead of the register), and the carries take the prefix carry through the join
 
 ## 5. What a serve pass costs over a plain batched pass (an estimate, not a measurement)
 
+**Re-priced 2026-11-05 on the final-coefficient runs (review lens 3, finding 12; supersedes the numbers below, whose
+conclusion stands).** The join's 24 refreshes are planner refreshes, and the batched scale does not fit a small
+latency-bound program; priced with the decode-anchored scale instead, **a join or leave run costs ≈ 0.41–0.71 s, 1.4–2.4
+% of the measured 29.87 s K = 32 pass** (`new_pod/r01b_final/batch32_best.jsonl`). A prefill pass is measured now:
+**24.1–24.5 s** per T = 32 pass with LEVERS=best (`r01b_final/run_pf32_best_L*.jsonl`), a decode step 9.70–9.74 s
+(`run_best_P1-P3.jsonl`). The default arrivals file then costs: 3 prefill passes 72–74 s, 88 remainder decode steps
+854–857 s, joins + leave 3.7–6.4 s, 17 K = 4 passes 187–255 s, **total ≈ 1,117–1,192 s**; the remainder decode steps
+are **72–77 %** of the loop. The join is still not where the time goes; the remainder rule is.
+
+**The first estimate (old anchors, kept for the record):**
+
 **Units** (the method of `BATCHED_DESIGN.md` §4, R6: published per-op times as ratios only, scaled by this port's
 measured decode on the 600 W card, 9.54 s per token, scale 0.574–0.621):
 - **one join or leave run:** 24 × 28.77 ms (refresh) + 48 × 0.072 ms (ct × pt) + 24 × 0.033 ms (add) = 694.7 ms
@@ -196,9 +207,9 @@ zero. The fake has no CKKS noise. The non-vacuity checks show the equality is no
 ```bash
 cd /root/perseus-rwkv7
 B_K=4 bash tools/rwkv7/run_box.sh scheck                     # once: the serve session's CPU half (1 block, T = 4, K = 4)
-BLOCKS=1 B_K=4 S_GENERATE=2 bash tools/rwkv7/run_box.sh s    # smoke: every capture and plan, then serve
-B_K=4 bash tools/rwkv7/run_box.sh s                          # 12 blocks, K = 4, T = 32, 8 generated each
-LEVERS=best B_K=4 bash tools/rwkv7/run_box.sh s              # on PAIR=1 + fused-EvalMod plans, siblings schedule
+KEYS=inproc BLOCKS=1 B_K=4 S_GENERATE=2 bash tools/rwkv7/run_box.sh s    # smoke: every capture and plan, then serve
+KEYS=inproc B_K=4 bash tools/rwkv7/run_box.sh s              # 12 blocks, K = 4, T = 32, 8 generated each
+KEYS=inproc LEVERS=best B_K=4 bash tools/rwkv7/run_box.sh s  # on PAIR=1 + fused-EvalMod plans, siblings schedule
 KEYMODE=s B_K=4 bash tools/rwkv7/run_box.sh keyspec && KEYMODE=s B_K=4 bash tools/rwkv7/run_box.sh keygen
 KEYS=bundle B_K=4 bash tools/rwkv7/run_box.sh serve          # the client's keys
 ```
