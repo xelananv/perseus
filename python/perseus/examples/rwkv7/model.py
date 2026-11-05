@@ -32,7 +32,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 from dataclasses import dataclass
 
 import numpy as np
@@ -161,17 +160,6 @@ class LayerW:
 
 #: the raise drops the runtime builds dense-route variants for (make_plan.sh FIDESLIB_BTS_RAISE_DROPS=1,3,5)
 CARRY_DROPS = (0, 1, 3, 5)
-
-
-def state_levers(carry_drop=None, state_entry=None) -> tuple[int, int]:
-    """(carry_drop, state_entry) from the arguments, else RWKV7_CARRY_DROP / RWKV7_STATE_ENTRY (default 0, 0)."""
-    d = int(carry_drop if carry_drop is not None else os.environ.get("RWKV7_CARRY_DROP", "0") or 0)
-    e = int(state_entry if state_entry is not None else os.environ.get("RWKV7_STATE_ENTRY", "0") or 0)
-    if d not in CARRY_DROPS:
-        raise ValueError(f"RWKV7_CARRY_DROP={d}: the runtime builds the drop variants {CARRY_DROPS[1:]}")
-    if e < 0:
-        raise ValueError(f"RWKV7_STATE_ENTRY={e}")
-    return d, e
 
 
 def state_names(Sh: int, M: int) -> list[str]:
@@ -463,8 +451,8 @@ class Rwkv7Fhe(ImplModel):
 
     def __init__(self, inf, P: Params, coeffs: dict, *, core=None, n_layers=None, unit=None, wbits=24,
                  fuse_l1=False, shifts=None, carry=True, chunk=0, prefill_keys=0, batch=0, batch_carry="decode",
-                 batch_hoist=0, lora="auto", shard_land=True, lanes=0, layout="current", carry_drop=None,
-                 state_entry=None):
+                 batch_hoist=0, lora="auto", shard_land=True, lanes=0, layout="current", carry_drop=0,
+                 carry_skip_s=False):
         super().__init__(inf, core=core, unit=unit)
         self.P = P
         self.n_layers = int(P.n_layer if n_layers is None else n_layers)
@@ -483,21 +471,20 @@ class Rwkv7Fhe(ImplModel):
         # loads a T-token pass's rotation keys while decoding (a session that serves both)
         self.prefill_keys = int(prefill_keys)
         self.batch, self.batch_carry, self.batch_hoist = 0, str(batch_carry), int(batch_hoist)
-        # the carried state's refresh levers (SPEEDUP_MAP_20261105.md S1 / S2; capture-side, default off):
-        #   RWKV7_CARRY_DROP=d   the S carries (and S's landing in start()) refresh under raise drop d (1, 3 or 5: the
-        #                        runtime's built variants): the capture recorder lands them 2 d units deeper
-        #                        (impl/fakecap.py inner_bootstrap, CapFhe.raise_drop), the compiled program takes the
-        #                        dropped route; xa / xf keep drop 0
-        #   RWKV7_STATE_ENTRY=L  after every landing of S (start() and each carry) the capture drops S to level L
-        #                        (a level_reduce): the graph then shows S entering every block at L, as it would on the
-        #                        second pass of a two-pass carry cycle (pass A leaves S unrefreshed at 32), so the
-        #                        planner's acceptance of that pass can be read on the CPU. Capture recorder only.
-        #   RWKV7_CARRY_SKIP_S=1 the two-pass cycle's schedule: at odd positions the carry refreshes xa / xf only and
-        #                        leaves S unrefreshed (pass A: S in at the landing, out 6 units deeper), at even
-        #                        positions S is refreshed (pass B); start() still lands S. A capture at tick 1 records
-        #                        pass A with S entering at the landing
-        self.carry_drop, self.state_entry = state_levers(carry_drop, state_entry)
-        self.carry_skip_s = bool(int(os.environ.get("RWKV7_CARRY_SKIP_S", "0") or 0))
+        # the carried state's refresh levers (SPEEDUP_MAP_20261105.md S1 / S2): run_capture's --carry-drop and
+        # --carry-skip-s set them on the capture model only (recorded in rwkv7_capture.json; run_planned refuses a
+        # capture that carries one: the driver has no two-program cycle), default off:
+        #   carry_drop=d     the S carries (and S's landing in start()) refresh under raise drop d (1, 3 or 5: the
+        #                    runtime's built variants): the capture recorder lands them 2 d units deeper
+        #                    (impl/fakecap.py inner_bootstrap, CapFhe.raise_drop); xa / xf keep drop 0
+        #   carry_skip_s     the two-pass cycle's schedule: at odd positions the carry refreshes xa / xf only and
+        #                    leaves S unrefreshed (pass A: S in at the landing, out 6 units deeper), at even
+        #                    positions S is refreshed (pass B: S in 6 units deeper, out at the landing); start()
+        #                    still lands S. A capture at tick 1 records pass A, at tick 2 pass B
+        self.carry_drop = int(carry_drop)
+        if self.carry_drop not in CARRY_DROPS:
+            raise ValueError(f"carry_drop={self.carry_drop}: the runtime builds the drop variants {CARRY_DROPS[1:]}")
+        self.carry_skip_s = bool(carry_skip_s)
         self.set_chunk(chunk)
         if batch:
             self.set_batch(batch)
@@ -610,20 +597,14 @@ class Rwkv7Fhe(ImplModel):
             fhe.raise_drop = old
 
     def land_state(self, st, skip_s=False):
-        """The carry refresh of one block's state: S under the drop (then at the entry level), xa / xf plain;
-        ``skip_s`` leaves S unrefreshed (the two-pass cycle's pass A)."""
+        """The carry refresh of one block's state: S under the drop, xa / xf plain; ``skip_s`` leaves S unrefreshed
+        (the two-pass cycle's pass A)."""
         ops = self.rt.ops
         s_cts = st.s_cts()
         if not skip_s:
             with self._carry_drop():
                 for c in s_cts:
                     ops.bootstrap(c)
-        if self.state_entry and not skip_s:
-            # the capture recorder records a level_reduce (impl/fakecap.py drop_to_level); the plain fake, which
-            # run_capture runs first for the PCMM shifts, has none and ops.level_drop is a no-op there
-            for c in s_cts:
-                if ops.level(c) < self.state_entry:
-                    ops.level_drop(c, self.state_entry)
         for c in st.cts()[len(s_cts):]:
             ops.bootstrap(c)
 

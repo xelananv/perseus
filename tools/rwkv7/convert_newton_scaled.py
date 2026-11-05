@@ -125,16 +125,19 @@ def main(argv=None) -> int:
     with open(a.out, "w") as f:
         json.dump(out, f, indent=1)
     for r in rows:
+        calib = "n/a" if r["rel_calib"] is None else f"{r['rel_calib']:.2e}"
         print(f"{r['name']:28s} const {r['const_steps']:2d} st d{r['const_depth']:2d}  ->  scaled {r['steps']:2d} st "
-              f"d{r['depth']:2d}  ratio {r['ratio']:.3g}  rel {r['rel']:.2e} (calib {r['rel_calib']:.2e})  "
-              f"blow_at {r['blow_at']}")
+              f"d{r['depth']:2d}  ratio {r['ratio']:.3g}  rel {r['rel']:.2e} (calib {calib})  blow_at {r['blow_at']}")
     s = summary(rows)
     print(json.dumps(s, indent=1))
     tot_c = sum(v["const_depth"][2] for v in s.values())
     tot_s = sum(v["depth"][2] for v in s.values())
     print(f"mean depth of the four chains per block: {tot_c:.1f} -> {tot_s:.1f} levels ({tot_s - tot_c:+.1f})")
+    calibs = [r["rel_calib"] for r in rows if r["rel_calib"] is not None]
+    blows = [r["blow_at"] for r in rows if r["blow_at"] is not None]
     print(f"max rel err: accuracy range {max(r['rel'] for r in rows):.3e}, calibrated range "
-          f"{max(r['rel_calib'] for r in rows):.3e}; blow_at min {min(r['blow_at'] for r in rows if r['blow_at'])}")
+          f"{max(calibs):.3e}" if calibs else "n/a (no calib_min / calib_max)", end="; ")
+    print(f"blow_at min {min(blows)}" if blows else "no overflow below 1.5 x conv_hi")
     print(f"wrote {a.out}: {len(rows)} sites converted")
     return 0
 

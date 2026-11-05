@@ -171,23 +171,20 @@ a resident plaintext store far beyond the card.
     programs; still untimed. Lower `POOL_B` / `POOL_PF` to take the saving (`tests/test_lean_prefix.py`;
     `results/rwkv7-fhe-20261104/new_pod/DEVICE_MEM_20261105.md`). `RWKV7_POOL_TRACE=1` records the lowest free pool
     count (`pool_free_min`) so the pool can be sized from a measurement.
-  * `RWKV7_CARRY_DROP=d` (default 0; capture side, the speed-up map's S2): the carried state's own refreshes (S, not
-    xa / xf) and S's landing in `start()` run under raise drop d (1, 3 or 5: the runtime's built dense variants). The
-    capture recorder lands them 2 d units deeper (26 → 26 + 2 d), so the compiled program takes the cheaper dropped
-    route and S enters every block at that level; the state chain still fits the 46 cap (S leaves the update 6 units
-    above its entry, the readout 4 more). Recorded in `rwkv7_capture.json` (`carry_drop`); the plan and keys follow the
-    capture. **Blocked on this runtime for the filled layout** (`tests/test_state_levers.py`, 2026-11-05): the planner
-    accepts the deeper landing, but the compile check refuses a complex deliberate refresh landing at 32 ("no route
-    lands at (32, 2) from (38, 2)"): the compiler's landing table has drop variants of the real StC-first route
-    (`dense_stcf_real@32`) and none of the complex one. A runtime change (the complex route's drop variants, a
-    rebuild) or the current layout's real carries would unblock it.
-  * `RWKV7_STATE_ENTRY=L` (default 0; capture recorder only, the map's S1): after every landing of S the capture drops
-    S to level L (a `level_reduce` node), so the recorded graph shows S entering every block at L, as it would on the
-    second pass (B) of a two-pass carry cycle. `RWKV7_CARRY_SKIP_S=1` (default 0) runs the cycle's schedule on the
-    capture: at odd positions the carry refreshes xa / xf only and S leaves the block unrefreshed, 6 units deeper
-    (pass A), at even positions S is refreshed (pass B); a capture at tick 1 records pass A. Both make the planner's
-    acceptance of the cycle readable on the CPU (`tests/test_state_levers.py`); a device run of the cycle needs the
-    driver's two program sets per block (not built), and its quality bar is in the map's §2.2.
+  * **The carried state's refresh levers are flags of `run_capture`, not of a run** (the speed-up map's S1 / S2;
+    `tests/test_state_levers.py`): `--carry-drop d` refreshes S's carries (and S's landing in `start()`) under raise
+    drop d (1, 3, 5: the runtime's built dense variants), so the recorder lands them 2 d units deeper and S enters every
+    block at 26 + 2 d; `--carry-skip-s` runs the two-pass cycle's schedule (S unrefreshed at odd positions: a capture at
+    `--capture-tick 1` records pass A, S in at 26 and out at 32 with no S carry; at `--capture-tick 2` pass B, S in at
+    32, refreshed 38 → 26). Both are recorded in `rwkv7_capture.json` (`carry_drop`, `carry_skip_s`); the model's
+    kwargs default off and read no environment; **`run_planned` refuses a capture that carries one** (its plan has S
+    at other levels than the driver's twin carries, and the driver has no two-program cycle). Status (2026-11-06,
+    CPU): both passes of the cycle plan and compile with no extra placed refresh and matching hand-over levels (A out
+    32 = B in, B out 26 = A in); the dropped carries are refused by the compile check — the compiler resolves a
+    deliberate refresh by its captured landing through `route_for_landing` (`crates/pc-program/src/compile/mod.rs:
+    176-190`), which tries each slot count's base route at the default raise drop and never the built drop variants
+    (real or complex alike; the device builds them, `crates/pc-gpu/src/bts/dense.rs:110`), so S2 needs a compiler
+    change (a rebuild) before any device run.
 
 ## Prefill: T prompt tokens per pass (`prefill.py`, `PREFILL_DESIGN.md`)
 

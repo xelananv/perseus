@@ -91,6 +91,12 @@ def main(argv=None) -> int:
                     help="do not stop on a site input out of its interval / non-finite (model.SiteGuard)")
     ap.add_argument("--site-guard-tol", type=float, default=0.0,
                     help="the guard's slack, relative to each interval's width (default 0)")
+    ap.add_argument("--carry-drop", type=int, default=0, choices=(0, 1, 3, 5),
+                    help="the carried state's refreshes under this raise drop (SPEEDUP_MAP_20261105.md S2; a "
+                    "capture-side experiment: run_planned refuses the capture)")
+    ap.add_argument("--carry-skip-s", action="store_true",
+                    help="the two-pass carry cycle's schedule (the map's S1): S unrefreshed at odd positions; "
+                    "--capture-tick 1 records pass A, 2 pass B (run_planned refuses the capture)")
     ap.add_argument("--join", action="store_true",
                     help="capture the JOIN program instead (serve.py, SERVE_DESIGN.md): every block's lane-form carries "
                     "joined with one conversation's natural-form carries on lane 0 of a --batch K pass, one refresh each")
@@ -137,6 +143,7 @@ def main(argv=None) -> int:
     T = int(a.prefill_chunk)
     K = int(a.batch)
     fhe, _inf, model = make_model(P, co, capture=True, fuse_l1=a.fuse_l1, wbits=a.wbits, shifts=shifts, chunk=T,
+                                  carry_drop=a.carry_drop, carry_skip_s=a.carry_skip_s,
                                   batch=K, batch_carry=a.batch_carry, batch_hoist=a.batch_hoist, **model_kw(a))
     model.set_capture(a.out)
     guard = None
@@ -174,8 +181,7 @@ def main(argv=None) -> int:
             "pth_sha256": common.sha256(a.pth), "coeffs_sha256": common.sha256(a.coeffs), "wbits": a.wbits,
             "fuse_l1": a.fuse_l1, "pcmm_shift": a.pcmm_shift, "width": P.C, "blocks_loaded": P.n_layer, "n_layer_ckpt": _ckpt_depth(a.pth),
             "shards": model.L.S, "lanes": model.L.t, "channels_per_ct": model.L.D, "layout": model.L.layout, "lora": model.W[0].lora if model.W else None, "shard_land": model.shard_land,
-            "state_names": model.state_names(), "carry_drop": model.carry_drop, "state_entry": model.state_entry,
-            "carry_skip_s": model.carry_skip_s,
+            "state_names": model.state_names(), "carry_drop": model.carry_drop, "carry_skip_s": model.carry_skip_s,
             "environment": common.environment()}
     with open(os.path.join(a.out, "rwkv7_capture.json"), "w") as f:
         json.dump(meta, f, indent=1)
