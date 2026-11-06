@@ -51,14 +51,21 @@ def main(argv=None) -> int:
     with open(a.out, "w") as out, open(a.text_out, "w") as txt:
         for i, text in enumerate(prompts):
             ids, gen, t0 = tok.encode(text), [], time.time()
+            nonfinite = eos = False
             with torch.no_grad():
                 for _ in range(a.n):
                     logits = model(torch.tensor([ids + gen], device=dev))[0, -1]
                     if not torch.isfinite(logits).all():
+                        nonfinite = True
                         break
-                    gen.append(int(torch.argmax(logits)))
+                    t = int(torch.argmax(logits))
+                    if t == 0:          # the World vocabulary's end-of-text id has no bytes: the generation ended (finite)
+                        eos = True
+                        break
+                    gen.append(t)
             rec = {"i": i, "mode": mode, "coeffs": a.coeffs, "prompt": text, "prompt_ids": ids, "generated_ids": gen,
-                   "generated_text": tok.decode(gen), "finite": len(gen) == a.n, "seconds": round(time.time() - t0, 1)}
+                   "generated_text": tok.decode(gen), "finite": not nonfinite, "eos": eos, "n_generated": len(gen),
+                   "seconds": round(time.time() - t0, 1)}
             out.write(json.dumps(rec, ensure_ascii=False) + "\n")
             out.flush()
             txt.write(text + tok.decode(gen) + "\n\n")
