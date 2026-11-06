@@ -836,7 +836,7 @@ def doc(n: int, toks: _Tokens, T: int, readers: int, passes: int = 3) -> list[Pa
 
 
 def mixed(n: int, toks: _Tokens) -> list[PassConfig]:
-    """The owner's mix on 64 lane-slots. Pass 0: seq A home ``[0, 32)`` ``q0`` 0 fresh; seq B home ``[32, 42)`` ``q0`` 33
+    """The mixed example on 64 lane-slots. Pass 0: seq A home ``[0, 32)`` ``q0`` 0 fresh; seq B home ``[32, 42)`` ``q0`` 33
     (9 positions, 1 padding) fresh; conversations on ``[42, 64)`` fresh. Pass 1: A, B carried; the conversations
     carried but lane-slots 45, 50, 61 (new conversations, fresh). Pass 2: A finished, 32 readers ``RA<k>`` on
     ``[0, 32)`` (the hand-over); lane-slots 32, 33 two new conversations (fresh); B on home ``[34, 42)`` ``q0`` 34

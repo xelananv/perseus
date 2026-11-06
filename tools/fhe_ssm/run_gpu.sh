@@ -123,10 +123,10 @@ resolve_data() {   # WEIGHTS / SEEDS / CONFIG, else the first match of each in D
 # ones (every configuration's magnitudes), the per-configuration ones beside them as <capname>__<label>. cfg-pcmm24-tick
 # shares cfg-pcmm24's capture flags but its plan was cut on <capname>__tick alone (a pure-kernel control): shipped only.
 # The cfg-best* arms are best's capture flags under the pass kernels; their captures and plans are cut on the Mac (an
-# eleven-configuration max_each merge: the six above plus five passes of the owner scenario) and shipped, never cut here
+# eleven-configuration max_each merge: the six above plus five passes of the custom (own) scenario) and shipped, never cut here
 # (results BEST_ADDON_PLAN_20261102.md §2, §7-§9). cfg-best-k3 is that capture's plan at kappa 3 (PLAN_MAG_SAFETY=3),
 # cfg-best-em the same placements with PC_EM_FUSE_RESCALE=1 on the runtime= line, cfg-served cfg-best without per-site
-# (the served norms), cfg-pcmm24-own cfg-pcmm24's capture flags with a plan cut on the six plus the owner captures.
+# (the served norms), cfg-pcmm24-own cfg-pcmm24's capture flags with a plan cut on the six plus the custom-scenario captures.
 BESTCAP="--newton-form depth2 --newton-sites per-site --pack-stats halves --linear pcmm --pcmm-wbits 24 --pass-kernels on"
 ARMS="ref depth2 persite packstats high pair sbk16 emfuse pcmmtrunk24 pcmm24 best lockstep2 lockstep4 cfg-pcmm24 cfg-pcmm24-tick cfg-ref cfg-best cfg-best-k3 cfg-best-em cfg-served cfg-pcmm24-own"
 arm() {   # sets CAP, PLANENV, RUNF, NOTE, DEVICE, PLANCAP (the suffix of the capture its plan was cut from), SHIPPED
@@ -167,7 +167,7 @@ arm() {   # sets CAP, PLANENV, RUNF, NOTE, DEVICE, PLANCAP (the suffix of the ca
         cfg-pcmm24-own)
                     CAP="--linear pcmm --pcmm-wbits 24 --pass-kernels on"; PLANENV="LANDING=high"; RUNF="$PASSF"
                     PLANCAP="__own"; SHIPPED=1
-                    NOTE="cfg-pcmm24's kernels, plan cut on the six configurations plus the owner scenario's captures (shipped, never cut here); compare with cfg-pcmm24" ;;
+                    NOTE="cfg-pcmm24's kernels, plan cut on the six configurations plus the custom scenario's captures (shipped, never cut here); compare with cfg-pcmm24" ;;
         *) die "unknown arm $1 (arms: $ARMS)" ;;
     esac
     case "$PLANENV" in *LANDING=high*) CAPENV="FIDESLIB_BTS_STC_FIRST=2 FIDESLIB_BTS_STC_FIRST_ROUTES=dense FIDESLIB_BTS_STC_FIRST_CF=13 FIDESLIB_BTS_RAISE_DROP=512:1 AUTO_BTS_LEVEL=44" ;;
