@@ -361,7 +361,7 @@ step_keygen() {
     log "keygen $KEYMODE (the client role) -> $d/keys.pckb"
     pyrun env CUDA_VISIBLE_DEVICES=$GPU "$PY" -m perseus.examples.rwkv7.run_planned --keygen "$d" --keyspec-file "$d/keyspec.json" \
         --threads "${KEYGEN_THREADS:-8}" > "$d/keygen.log" 2>&1 || { tail -20 "$d/keygen.log"; die "keygen failed ($d/keygen.log)"; }
-    # the secret stays with the client role: owner-only permissions (the split is between objects in one process)
+    # the secret stays with the client role: mode 0600 (the split is between objects in one process)
     [ -f "$d/client_secret.bin" ] && chmod 600 "$d/client_secret.bin"
     tail -1 "$d/keygen.log" | cut -c1-400 | tee -a "$OUT/session.log"
 }

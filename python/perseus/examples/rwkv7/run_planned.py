@@ -906,7 +906,7 @@ def keygen_main(argv) -> int:
     cl = _pc.Client(secret, complex=True)
     t0 = time.time()
     st = dict(cl.keygen(json.dumps(spec), str(out / "keys.pckb"), threads=a.threads))
-    # owner-only from creation (review lens 2, finding 12): the secret is the client's, never world-readable
+    # mode 0600 from creation (review lens 2, finding 12): the secret is the client's, never world-readable
     sp = out / "client_secret.bin"
     fd = os.open(str(sp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as f:

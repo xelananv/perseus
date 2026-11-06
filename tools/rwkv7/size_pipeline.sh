@@ -191,7 +191,7 @@ if want gate; then
     rc=$?; cat "$OUT/gate.txt" | tee -a "$LOG"
     if [ $rc != 0 ]; then
         if [ -n "$SMOKE" ]; then log "gate FAIL under SMOKE (tiny corpora: the verdict is not meaningful); continuing"
-        else log "STOP: the gate failed ($RUNS/verdict_final.json); the owner decides"; exit 3; fi
+        else log "STOP: the gate failed ($RUNS/verdict_final.json); review the verdict before going on"; exit 3; fi
     fi
 fi
 

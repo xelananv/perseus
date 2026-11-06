@@ -281,7 +281,7 @@ real 1.5B / 2.9B weights and their quality, the 4,096-wide plans (memory), every
 ## 8. The 1.5B on the box (pod 3; the commands, in order)
 
 ```bash
-cd /root/perseus-rwkv7 && git fetch && git switch fhe-ssm-rwkv7-any        # once the coordinator has committed it
+cd /root/perseus-rwkv7 && git fetch && git switch fhe-ssm-rwkv7-any        # once the branch tip is committed
 export PATH=/root/.local/bin:/root/.cargo/bin:$PATH                           # uv / cargo (the 0 s failures of 11-04)
 bash tools/rwkv7/run_box.sh build
 M=/root/d_models/RWKV-x070-World-1.5B-v3-20250127-ctx4096.pth

@@ -7,7 +7,7 @@
   * every number is finite and every scan has zero non-finite site inputs and zero inputs past a newton_const site's
     convergence bound; with --gen (gen_greedy.py's records of the unclamped poly model's own free-running text), every
     generation ran to its full length with finite logits ("finite": true);
-  * the coordinator's bars (FINAL_PLAN.md; the owner decides whether they are "reasonable quality"): ppl within 0.5 %
+  * the project's quality bars (not an external standard): ppl within 0.5 %
     of exact, LAMBADA within 0.5 points, top-1 vs exact >= 98 %.
 Every excursion is listed per site kind (tokens out of the accuracy range, worst excursion as a fraction of the
 interval width, the site). Exit 0 on PASS, 3 on FAIL.

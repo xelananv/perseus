@@ -239,4 +239,4 @@ position, the summary) beside its log.
 
 ## 9. Not in scope
 
-A client-side health check or lane reset on bad logits (the owner holds it; `PROJECT_BACKLOG.md`).
+A client-side health check or lane reset on bad logits (deferred).
