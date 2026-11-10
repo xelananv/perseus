@@ -384,3 +384,9 @@ and a summary line; `run*.log`, `capture*.log`, `plan*.log` and `session.log` si
 `python/perseus/plan/placer/planner.py`: the per-stage summary's log formatted `predicted_rel_err` with `:.3g`, which
 fails when a stage has no placed refresh (the tail here). Now it prints `-` in that case. The log line only; no
 planning logic changed.
+
+## License
+
+This directory and `tools/rwkv7/` are under the MIT license (`LICENSE` here; each file carries `SPDX-License-Identifier: MIT`).
+Any commercial use of these files as part of Perseus (github.com/gladia-research-group/perseus) requires prior written
+permission from Alessandro Zirilli or Davide Marincione, under Perseus's Business Source License 1.1; on their own the files are MIT.

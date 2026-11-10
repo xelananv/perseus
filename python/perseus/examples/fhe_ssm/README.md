@@ -654,5 +654,6 @@ ladders run plain on both routes (the fake would otherwise hoist radix groups th
 
 ## License
 
-This directory is under the MIT license (`LICENSE` here; each file carries `SPDX-License-Identifier: MIT`).
-It runs on Perseus, whose own license (the repository's) applies to running this example on it.
+This directory and `tools/fhe_ssm/` are under the MIT license (`LICENSE` here; each file carries `SPDX-License-Identifier: MIT`).
+Any commercial use of these files as part of Perseus (github.com/gladia-research-group/perseus) requires prior written
+permission from Alessandro Zirilli or Davide Marincione, under Perseus's Business Source License 1.1; on their own the files are MIT.
