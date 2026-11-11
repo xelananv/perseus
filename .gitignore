@@ -55,6 +55,7 @@ bootstrap_placements/_*/
 !Cargo.lock
 !python/**/*.json
 !crates/**/*.json
+!tools/fhe_ssm/configs/**/*.json
 
 # Llama captures ship as a release artifact (graphs/RELEASE.txt), not in the repository
 graphs/llama31_8b_*
