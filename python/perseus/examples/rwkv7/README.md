@@ -1,18 +1,126 @@
 # RWKV-7 under CKKS on `perseus.impl`: encrypted decode, prefill, batched decode and continuous batching, any RWKV-x070-World size
 
-`python/perseus/examples/rwkv7/` runs RWKV-7 (x070, `RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth`: 12 blocks, width
-768, 12 heads of 64, d_ffn 3,072) one token per step, every block on ciphertexts. The client decrypts the last
-block's hidden state and applies `ln_out` and the head in the clear. Every non-polynomial operation is the polynomial
-of `coeffs_mixed.json` (the research harness's `poly` mode, `results/vector-d-20261104/harness/rwkv7_model.py`).
-**Status:**
-- Decode is verified on the CPU (numpy fake with the runtime's level rules, capture recorder, planner) and ran on a
-  GPU on 2026-11-04: 12 blocks, top-1 12/12, 13.05 s per token on a 300 W card
-  (`results/rwkv7-fhe-20261104/README.md`).
-- Prefill (below) is verified on the CPU only.
+`python/perseus/examples/rwkv7/` runs RWKV-7 (x070 — e.g. 0.1B `v2.8`: 12 blocks, width 768, 12 heads of 64, d_ffn 3,072; 0.4B `v2.9`: 24 blocks, width 1,024, 16 heads of 64, d_ffn 4,096) under CKKS, reading dimensions directly from the checkpoint. The client decrypts the final block's hidden state and applies `ln_out` and the output head in plaintext. Every non-polynomial operation uses pre-calibrated Chebyshev polynomials and constant-seed Newton inverse-square-root iterations from `tools/rwkv7/coeffs/` evaluated identically by the research harness (`tools/rwkv7/harness/`).
 
-`tools/rwkv7/run_box.sh` is the box procedure; `tools/rwkv7/size_pipeline.sh` takes any `RWKV-x070-World-*` checkpoint
-from its `.pth` through calibration, the final fit, the scans and the quality gate to the encrypted runs
-(`ANYSIZE_DESIGN.md`).
+## Status & Measured GPU Results (2026-11-05, 1× RTX PRO 6000 Blackwell 600 W, 97,887 MiB, CUDA 13.2)
+
+Everything listed below has been built, verified end-to-end on GPU, and scored against the plaintext polynomial model (`top1_agree`, `logits_relErrRms`) and circuit mirror:
+
+| Model | Mode / Configuration | Keys | Speed | Throughput (full lanes / realised) | Fidelity (top-1 vs poly) | Host / Device Peak |
+|---|---|---|---|---|---|---|
+| **0.1B** | Decode (`P1`–`P3`, `LEVERS=best`) | `bundle` (`has_secret: false`) | **9.74–9.76 s/tok** | 0.103 tok/s | 141 / 141 (`0` out of range) | 41.1 GB / 72,712 MiB |
+| **0.1B** | 148-step free run (`P1`) | `bundle` (`has_secret: false`) | **9.77 s/tok** | 0.102 tok/s | 155 / 155 (`0` out of range) | — |
+| **0.1B** | Prefill `T=32` (`L1,L5,L9,L25`, `LEVERS=best`) | `bundle` (`has_secret: false`) | **24.2–24.6 s/pass** (**0.76 s/prompt tok**) | **12.8× decode** | 409 / 416 prefill + 198 / 201 decode | 177.6 GB / 82,080 MiB |
+| **0.1B** | Batched `K=32` (`filled`, `PLANOPT=b2`, `LEVERS=best`) | `bundle` (`has_secret: false`) | **19.36 s/pass** (0.61 s/tok) | **1.653 tok/s** full / **1.11 tok/s** realised (`16.1×` decode) | 1,300 / 1,306 (`0` out of range) | 100.9 GB / 86,670 MiB (unflagged) |
+| **0.1B** | Batched `K=32` (`b2`, `SHED_TWIN=1`, `LEAN_PREFIX=1`) | `bundle` (`has_secret: false`) | **27.99 s/pass** | 1.143 tok/s full / 0.77 tok/s realised | 1,291 / 1,297 (`52/61` passes) | **26.3 GB / 67,448 MiB** |
+| **0.1B** | Continuous batching `serve` (`K=4`, `T=32`, 8 convs) | `inproc` (`has_secret: true`) | 14.18 s batch / 29.77 s prefill / 3 ms join | 0.176 tok/s incl. prompt | 245 / 248 | 41.0 GB / 85,900 MiB |
+| **0.4B** | Decode (`P1`–`P3`, `LEVERS=best`) | `inproc` (`has_secret: true`) | **19.73–19.74 s/tok** | 0.051 tok/s | 141 / 141 (`0` out of range) | 74.5 GB / 80,810 MiB |
+| **0.4B** | Prefill `T=32` (`L1,L5`, `SHED_TWIN=1`, `LEAN_PREFIX=1`) | `bundle` (`has_secret: false`) | **48.8–49.9 s/pass** (**1.53–1.54 s/prompt tok**) | **12.8× decode** | 223 / 224 prefill + 90 / 90 decode | 57.9 GB / 79,920 MiB |
+| **0.4B** | Batched `K=32` (`filled`, `b2`, `SHED_TWIN=1`, `LEAN_PREFIX=1`) | `bundle` (`has_secret: false`) | **39.08 s/pass** (1.22 s/tok) | **0.819 tok/s** full / **0.548 tok/s** realised (`16.1×` decode) | 1,302 / 1,306 (`0` out of range) | **39.5 GB / 75,904 MiB** |
+| **0.4B** | Continuous batching `serve` (`K=8`, `T=32`, `filled`, `b2`) | `inproc` (`has_secret: true`) | 30.88 s batch / 57.32 s prefill / 5 ms join | 0.086 tok/s incl. prompt | 247 / 248 (`K=32` OOM at CUDA graph init, 97.2 GB) | 75.5 GB / 89,356 MiB |
+| **1.5B** | Plaintext fp64 polynomial gate (`coeffs_final.json`) | — | — | — | WikiText PPL **9.618 → 9.800 (+1.89%)**, top-1 **93.07%** | Gate **FAIL** — held before GPU |
+
+> On **1.5B**: unclamped evaluation stays finite (`0` non-finite, `0` convergence escapes), and `coeffs_final.json` equals clamped mode, but 5 sites (`blocks.{6,15,21,22}.att.w_tanh`, `blocks.23.att.a_sigmoid`) miss the 1e-3 Chebyshev target at degree 255, failing the 98% top-1 and ≤ 0.5% perplexity gate bars.
+
+## How to Run (Quickstart)
+
+This branch (`fhe-ssm-rwkv7-any`) bundles everything needed except the Apache-2.0 `.pth` weights:
+- **Tokenizer, harness & PyTorch gate scripts:** `tools/rwkv7/harness/` and `tools/rwkv7/raw/`
+- **Verified coefficients & range JSONs (0.1B, 0.4B, 1.5B):** `tools/rwkv7/coeffs/`
+- **Benchmark prompts & arrivals:** `tools/rwkv7/batch_prompts.txt`, `tools/rwkv7/longrun_prompts64.txt`, `tools/rwkv7/serve_arrivals.txt`
+- **Checkpoint & dataset downloader:** `tools/rwkv7/fetch_data.py`
+
+### 1. Clone and Build
+
+Requires Python ≥ 3.10, Rust (`rust-toolchain.toml` pins `1.99.1`), `uv`, and for GPU runs an NVIDIA GPU with CUDA 13.2+ toolkit (`nvcc` on `PATH`).
+
+```bash
+git clone -b fhe-ssm-rwkv7-any https://github.com/xelananv/perseus.git
+cd perseus
+bash tools/rwkv7/run_box.sh build
+```
+
+This creates `.venv`, installs `[hf,examples,dev]` dependencies, and builds the CUDA extension `perseus._pc` via `maturin develop --release`.
+
+### 2. Download Weights and Run CPU Verification
+
+```bash
+# Download and SHA-256 verify the 0.1B checkpoint into .cache/rwkv7/ (adds ~382 MB)
+bash tools/rwkv7/run_box.sh fetch
+# Optional: also fetch 0.4B (~900 MB) and WikiText-103 + LAMBADA datasets:
+# MODELS=0.1b,0.4b WITH_DATA=1 bash tools/rwkv7/run_box.sh fetch
+
+# Run the CPU test suite and checkpoint shape/coefficient verification (~1 min)
+bash tools/rwkv7/run_box.sh check
+```
+
+To run the full pytest CPU test suite directly (without a GPU):
+
+```bash
+PYTHONPATH=python .venv/bin/python -m pytest -q python/perseus/examples/rwkv7/tests
+# Also run the standalone harness unit tests (uses torch if installed in a Python env):
+python tools/rwkv7/harness/tests/run_without_pytest.py
+```
+
+### 3. Single-Conversation Encrypted Decode on GPU (`0.1B` / `0.4B`)
+
+```bash
+# Default PTH is 0.1B in .cache/rwkv7/; COEFFS auto-selects tools/rwkv7/coeffs/0.1b/coeffs_final.json
+export LEVERS=best STC_CACHE=160 KEYS=bundle
+
+# Capture (CPU) -> Plan (CPU) -> Keyspec (CPU/Device check) -> Keygen (Client) -> GPU Decode Run
+bash tools/rwkv7/run_box.sh capture plan
+KEYMODE=decode bash tools/rwkv7/run_box.sh keyspec keygen
+TEXT=$'\n\nThe scientists discovered a new species of' TOKENS=64 RUN_EXTRA="--generate 32" RUN_TAG=P1 \
+  bash tools/rwkv7/run_box.sh run
+```
+
+Outputs land in `$OUT` (`$PWD/.cache/rwkv7_out` by default when `/root/out_rwkv7` does not exist): JSONL per-token scores (`run_best_P1.jsonl`) and logs (`run_best_P1.log`, `session.log`). For an interactive timing-only run without separate client keygen, set `KEYS=inproc` (`has_secret: true`).
+
+To run **0.4B** instead:
+```bash
+MODELS=0.4b bash tools/rwkv7/run_box.sh fetch
+export PTH=.cache/rwkv7/RWKV-x070-World-0.4B-v2.9-20250107-ctx4096.pth
+# COEFFS automatically resolves to tools/rwkv7/coeffs/0.4b/coeffs_final.json
+```
+
+### 4. Encrypted Chunked Prefill (`T = 32`) + Decode Tail
+
+```bash
+export LEVERS=best STC_CACHE=160 KEYS=bundle PF_GENERATE=32
+bash tools/rwkv7/run_box.sh capture_pf plan_pf pfcheck
+KEYMODE=pf bash tools/rwkv7/run_box.sh keyspec keygen
+POOL_PF=256 bash tools/rwkv7/run_box.sh run_pf
+```
+
+### 5. Headline Batched Decode (`K = 32`, Filled Layout, `b2`, Low Memory)
+
+```bash
+export LEVERS=best STC_CACHE=160 KEYS=bundle LAYOUT=filled PLANOPT=b2 B_K=32 B_GENERATE=32
+bash tools/rwkv7/run_box.sh capture_b plan_b bcheck
+KEYMODE=b bash tools/rwkv7/run_box.sh keyspec keygen
+RWKV7_SHED_TWIN=1 RWKV7_LEAN_PREFIX=1 POOL_B=160 STC_CACHE_B=1 bash tools/rwkv7/run_box.sh batch
+```
+
+For **0.4B** on a 96 GB card, `RWKV7_SHED_TWIN=1 RWKV7_LEAN_PREFIX=1 POOL_B=160 STC_CACHE_B=1` is required so the 32-conversation session fits inside 70.7 GB VRAM and 39.5 GB host RAM.
+
+### 6. Continuous Batching (`serve`)
+
+```bash
+B_K=4 bash tools/rwkv7/run_box.sh scheck
+RWKV7_SHED_TWIN=1 B_K=4 KEYS=inproc S_GENERATE=8 POOL_S=256 bash tools/rwkv7/run_box.sh s
+```
+
+### 7. Full Any-Size Pipeline (`size_pipeline.sh`)
+
+```bash
+# Dry run up to GPU (calibration, fit, scan, quality gate, captures, plans):
+DRY=1 bash tools/rwkv7/size_pipeline.sh .cache/rwkv7/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth 0.1b
+# Full end-to-end GPU run:
+bash tools/rwkv7/size_pipeline.sh .cache/rwkv7/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth 0.1b
+```
+
+For a quick reference of every helper script in `tools/rwkv7/`, see [`tools/rwkv7/README.md`](../../../tools/rwkv7/README.md).
 
 ## Any size (`ANYSIZE_DESIGN.md`)
 
@@ -202,14 +310,11 @@ and the norms (their reductions stay inside a lane) are the decode step's code a
 A pass therefore ends with exactly the state a decode step carries, and decoding continues from it on the same
 registers. The chunk is the client's T rows. Lanes past a short chunk repeat its last row and are never read.
 
-**Planned cost** (CPU plans, LANDING=high):
+**Planned cost** (0.1B, CPU plans, LANDING=high):
 - block 0: 62 refreshes per 32-token pass against 31 per decode token;
 - block 1: 100 against about 40.
 
-Priced with the published per-op ratios and scaled to this port's measured 13.05 s per decode token, that is
-**≈ 42–46 s per 32-token pass, ≈ 1.3–1.4 s per prompt token (9–10× faster than decoding the prompt)**. This is an
-estimate; nothing has run on a GPU (`PREFILL_DESIGN.md` §4). The WY / chunked form was rejected on encrypted
-cost (§2 there).
+**Measured GPU performance (`T = 32`, `coeffs_final.json`, `LEVERS=best`, `KEYS=bundle`):** **24.2–24.6 s per 32-token pass (0.76 s per prompt token, 12.8× faster than decoding the prompt)** on 0.1B, and **48.8–49.9 s per pass (1.53–1.54 s per prompt token, 12.8×)** on 0.4B. The WY / chunked form was rejected on encrypted cost (`PREFILL_DESIGN.md` §2).
 
 **Device path:**
 - `run_planned.py --prefill-chunk T --pf-plan PLAN_PF` opens **one session** for the decode programs and the prefill
@@ -243,12 +348,7 @@ Positions are per lane:
   prefix prepended if missing), then free-runs `--generate` steps;
 - the client decrypts all K picks and feeds c's back to lane c.
 
-Planner, K = 32, block 0: **222 refreshes per pass**, against 32 × 31 = 992 for 32 decode steps. Estimate at K = 32:
-**47–60 s per pass**. That is 5.1–6.5× decode's aggregate throughput, at 4.9–6.3× its per-token latency
-(`BATCHED_DESIGN.md` §4; nothing has run on a GPU). `PLANOPT=b2` (`PLAN_B2.md`) removes the per-conversation update refreshes, a placer
-artefact: every conversation then pays its 2 carries per block; on P4's capture block 0 goes 209 → 80 refreshes in
-`Program.compile`'s count. On the final coefficients with LEVERS=best the measured base pass is 29.87 s; b2 is
-estimated at ≈ 28.3–28.5 s (≈ 1.05×: about half the refreshes it removes were already paired; PLAN_B2.md §5).
+Planner, K = 32, block 0: **222 refreshes per pass**, against 32 × 31 = 992 for 32 decode steps. `PLANOPT=b2` (`PLAN_B2.md`) removes the per-conversation update refreshes, a placer artefact: every conversation then pays its 2 carries per block; combined with `LAYOUT=filled` and `LEVERS=best` on `coeffs_final.json` (`KEYS=bundle`), measured GPU pass latency at `K = 32` is **19.36 s/pass (1.653 tok/s full-lane / 1.11 tok/s realised, 16.1× decode)** on 0.1B and **39.08 s/pass (0.819 tok/s full-lane / 0.548 tok/s realised, 16.1× decode)** on 0.4B.
 
 ## Continuous batching: prefill, then join the batch (`serve.py`, `SERVE_DESIGN.md`)
 
@@ -302,23 +402,15 @@ batched one: `pytest tests/test_batched.py -k capture_and_plan -s --rwkv7-plan -
 --rwkv7-b-dir DIR` (also `--rwkv7-b-carry decode`, `--rwkv7-b-hoist B`, `--rwkv7-b-planenv PAIR=1`). It prints where
 the refreshes sit (`plan_census`).
 
-The 12-block numbers come from the fake. That is float64 arithmetic with the runtime's level accounting: no CKKS
-noise, no bootstrap error.
+The 12-block CPU counts above come from the fake (float64 arithmetic with runtime level accounting). Device execution across single-conversation decode, chunked prefill (`T = 32`), batched decode (`K = 32` filled + `b2`), continuous batching (`serve`), and client-keyed bundles (`KEYS=bundle`) is verified in the 2026-11-05 GPU measurements summarized in the Status table above.
 
-**Not verified:**
-* everything on the device: the session, the compile of these graphs (`_pc.Program.compile`; the CPU `compile_check`
-  binary was not built here), PCMM's band shift and correction factor on these magnitudes, the eager refresh of the
-  prefix state, and every timing;
-* whether this runtime's bootstraps carry the complex `z` correctly (the planner routes by the recorder's field tags,
-  which never flagged an unsound tag in these captures).
-
-## Box commands
+## Additional Box Commands
 
 ```bash
-cd /root/perseus-rwkv7
+# Default checkout directory (works after `run_box.sh fetch` + `run_box.sh build`)
 KEYS=inproc BLOCKS=1 bash tools/rwkv7/run_box.sh all        # smoke: build, check, capture, plan, run on one block + tail
 KEYS=inproc bash tools/rwkv7/run_box.sh capture plan run   # 12 blocks
-TORCH_PY=/path/to/python-with-torch bash tools/rwkv7/run_box.sh crosscheck   # harness (torch) vs the numpy reference
+TORCH_PY=python3 bash tools/rwkv7/run_box.sh crosscheck    # harness (torch) vs the numpy reference
 
 # prefill (T = 32 by default; reuses the decode capture's shifts and the decode plan)
 bash tools/rwkv7/run_box.sh pfcheck                          # once: the combined session's CPU half, 1 block, T = 4
@@ -329,33 +421,27 @@ KEYS=inproc BLOCKS=1 CFTABLE=1 bash tools/rwkv7/run_box.sh run           # A/B t
 
 # the filled state layout (FILLED_DESIGN.md; every product gets the suffix _filled): batched under b2 + best
 B_K=4 LAYOUT=filled bash tools/rwkv7/run_box.sh bcheck
-KEYS=inproc LAYOUT=filled PLANOPT=b2 LEVERS=best B_K=32 B_GENERATE=32 POOL_B=1024 STC_CACHE_B=64 bash tools/rwkv7/run_box.sh b
+KEYS=inproc LAYOUT=filled PLANOPT=b2 LEVERS=best B_K=32 B_GENERATE=32 RWKV7_SHED_TWIN=1 RWKV7_LEAN_PREFIX=1 POOL_B=160 STC_CACHE_B=1 bash tools/rwkv7/run_box.sh b
 
 # any size (ANYSIZE_DESIGN.md): the whole per-size pipeline (calibrate, fit, scan, gate, capture, plan, keys, runs)
-DRY=1 bash tools/rwkv7/size_pipeline.sh /root/d_models/RWKV-x070-World-1.5B-v3-20250127-ctx4096.pth 1.5b   # up to the GPU
-bash tools/rwkv7/size_pipeline.sh /root/d_models/RWKV-x070-World-1.5B-v3-20250127-ctx4096.pth 1.5b keys,run,run_pf,batch,records
+DRY=1 bash tools/rwkv7/size_pipeline.sh .cache/rwkv7/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth 0.1b   # up to the GPU
 
 # client-separated keys for any run (KEYMODE = decode | pf | b), then KEYS=bundle on run / run_pf / batch
 KEYMODE=decode bash tools/rwkv7/run_box.sh keyspec && KEYMODE=decode bash tools/rwkv7/run_box.sh keygen
 KEYS=bundle bash tools/rwkv7/run_box.sh run
 
-# batched decode (B_K = 32 conversations, lane carries, tools/rwkv7/batch_prompts.txt, 16 generated each;
-# reuses the decode capture's shifts)
+# batched decode (B_K = 32 conversations, lane carries, tools/rwkv7/batch_prompts.txt)
 bash tools/rwkv7/run_box.sh bcheck                           # once: the batched runner's CPU half, K = 4, 1 block
 KEYS=inproc BLOCKS=1 B_K=4 B_GENERATE=2 bash tools/rwkv7/run_box.sh b    # smoke: capture, plan, capture_b, plan_b, batch
-KEYS=inproc bash tools/rwkv7/run_box.sh b                                # 12 blocks, K = 32: --pool 192 --stc-cache 160
-KEYS=inproc LEVERS=best bash tools/rwkv7/run_box.sh b                    # the same on PAIR=1 + fused-EvalMod plans, siblings schedule
+KEYS=inproc bash tools/rwkv7/run_box.sh b                                # 12 blocks, K = 32
+KEYS=inproc LEVERS=best bash tools/rwkv7/run_box.sh b                    # PAIR=1 + fused-EvalMod plans, siblings schedule
 KEYS=inproc PLANOPT=b2 bash tools/rwkv7/run_box.sh b                     # no refresh inside any conversation's state work (PLAN_B2.md)
-KEYS=inproc B_K=16 STC_CACHE_B=80 bash tools/rwkv7/run_box.sh b          # if K = 32 runs out of memory
-# 0.4B (24 blocks): K = 32 and prefill T = 32 were killed by the HOST OOM killer at setup on pod 3 (~185 GB of 181), and
-# K = 16 at POOL_B 1,024 was refused by the device 2 GB short: the preset (ckpt_info.py, ANYSIZE_DESIGN.md §4) is
-KEYS=inproc B_K=16 POOL_B=768 STC_CACHE_B=64 bash tools/rwkv7/run_box.sh b      # 0.4B batched (PTH / COEFFS of the 0.4B)
-KEYS=inproc PF_T=16 bash tools/rwkv7/run_box.sh pf                              # 0.4B prefill (host 123-210 GB in the model)
+# 0.4B (24 blocks): use RWKV7_SHED_TWIN=1 RWKV7_LEAN_PREFIX=1 with filled + b2 + POOL_B=160 STC_CACHE_B=1 (see Quickstart)
 
 # continuous batching (SERVE_DESIGN.md; tools/rwkv7/serve_arrivals.txt: 8 conversations, 3 longer than one pass)
 B_K=4 bash tools/rwkv7/run_box.sh scheck                     # once: the serve session's CPU half (1 block, T = 4, K = 4)
 KEYS=inproc BLOCKS=1 B_K=4 S_GENERATE=2 bash tools/rwkv7/run_box.sh s    # smoke: every capture and plan, then serve
-KEYS=inproc B_K=4 bash tools/rwkv7/run_box.sh s                          # 12 blocks, K = 4, T = 32, 8 generated each
+RWKV7_SHED_TWIN=1 KEYS=inproc B_K=4 bash tools/rwkv7/run_box.sh s        # 12 blocks, K = 4, T = 32, 8 generated each
 ```
 
 `serve` writes `$OUT/serve4[_b1][_best].jsonl`: `"prefill"`, `"decode"`, `"join"`, `"leave"` and `"pass"` lines with
@@ -375,7 +461,7 @@ conversation's poly model, `hidden_relErrRms_vs_mirror` against the mirror run o
 - one `"kind": "token"` line per position (`"mode": "prefill"` or `"decode"`);
 - a summary with `prefill_seconds_per_token`, `top1_agree_prefill` and the decode median.
 
-Products land in `$OUT` (default `/root/out_rwkv7`): `run[_b1].jsonl` holds one line per token (`top1_agree`,
+Products land in `$OUT` (default `$PWD/.cache/rwkv7_out`, or `/root/out_rwkv7` if present): `run[_b1].jsonl` holds one line per token (`top1_agree`,
 `logits_relErrRms`, `hidden_relErrRms_vs_poly`, `hidden_relErrRms_vs_mirror`, `seconds`, `poly_sites_out_of_range`)
 and a summary line; `run*.log`, `capture*.log`, `plan*.log` and `session.log` sit beside it.
 

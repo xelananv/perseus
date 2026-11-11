@@ -62,8 +62,24 @@ PTH=$(cd "$(dirname "$PTH")" && pwd)/$(basename "$PTH")           # every step r
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=$(git -C "$HERE" rev-parse --show-toplevel)
 PY=${PY:-$W/.venv/bin/python}
-OUT=${OUT:-/root/out_any/$TAG}; RUNS=${RUNS:-/root/vd/runs/${TAG}_pipe}; FORCE=${FORCE:-}
-HARNESS=${HARNESS:-/root/vd/harness}; TP=${TP:-/root/venv_d/bin/python}; DATA=${DATA:-/root/d_data}
+if [ -z "${OUT:-}" ]; then
+    if [ -d /root/out_any ] || { [ -w /root ] && [ -d /root/d_models ]; }; then OUT=/root/out_any/$TAG
+    else OUT=$W/.cache/rwkv7_any/$TAG; fi
+fi
+if [ -z "${RUNS:-}" ]; then
+    if [ -d /root/vd/runs ] || { [ -w /root ] && [ -d /root/d_models ]; }; then RUNS=/root/vd/runs/${TAG}_pipe
+    else RUNS=$W/.cache/rwkv7_runs/${TAG}_pipe; fi
+fi
+FORCE=${FORCE:-}
+if [ -z "${HARNESS:-}" ]; then
+    [ -f "$HERE/harness/rwkv_tokenizer.py" ] && HARNESS=$HERE/harness || HARNESS=/root/vd/harness
+fi
+if [ -z "${TP:-}" ]; then
+    [ -x /root/venv_d/bin/python ] && TP=/root/venv_d/bin/python || TP=$PY
+fi
+if [ -z "${DATA:-}" ]; then
+    [ -f /root/d_data/wiki.test.raw ] && DATA=/root/d_data || DATA=$W/.cache/rwkv7/data
+fi
 RELU2=${RELU2:-m02}; RELU2_REL=${RELU2_REL:-1e-4}; DRY=${DRY:-}; SMOKE=${SMOKE:-}
 mkdir -p "$OUT" "$RUNS"
 LOG=$OUT/pipeline.log

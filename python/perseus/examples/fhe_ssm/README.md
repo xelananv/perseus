@@ -11,9 +11,27 @@ the fhe-ssm repository's (`pbd430a_weights.npz` sha256 `3ec3f1d8…784b`, `pbd43
 `pbd430a_config.json`; also on Hugging Face, `xelananv/fhe-ssm-pbd430a`).
 
 By default it serves 64 conversations per ciphertext at ring 2^16: the filled layout with one conversation
-on each axis of a complex slot (`--layout filled --payload pairs --pair-route split`). It runs on the numpy
-fake (CPU, no GPU, the runtime's level accounting) and on the capture recorder (graphs for the planner);
-a planned device run is the next step (below, "What needs a GPU").
+on each axis of a complex slot (`--layout filled --payload pairs --pair-route split`). It is verified end-to-end
+on CPU and GPU (`tools/fhe_ssm/run_gpu.sh`, `tools/fhe_ssm/RUNSHEET_GPU.md`): on 1× RTX PRO 6000 Blackwell (97,887 MiB,
+CUDA 13.2), the `cfg-best-em` publication run achieves **8.856 s per pass across 64 lanes (7.23 tok/s aggregate)**
+with client-held evaluation keys (`KEYS=bundle`, `has_secret: false`). Config, seed, lane-scenario, and PCMM CF table
+files live in `tools/fhe_ssm/configs/`.
+
+## Quickstart (GPU)
+
+Download `pbd430a_weights.npz` (1.8 GB, `xelananv/fhe-ssm-pbd430a` on Hugging Face) into `/root/data` (or `$DATA`) alongside `tools/fhe_ssm/configs/pbd430a_config.json` and `tools/fhe_ssm/configs/pbd430a_seeds.json`, then:
+
+```bash
+export DATA=/root/data   # holds pbd430a_weights.npz (+ pbd430a_config.json, pbd430a_seeds.json)
+bash tools/fhe_ssm/run_gpu.sh build
+bash tools/fhe_ssm/run_gpu.sh verify
+bash tools/fhe_ssm/run_gpu.sh capture cfg-best-em && bash tools/fhe_ssm/run_gpu.sh plan cfg-best-em
+LANE_CONFIG=tools/fhe_ssm/configs/own.passes.json bash tools/fhe_ssm/run_gpu.sh keyspec cfg-best-em
+bash tools/fhe_ssm/run_gpu.sh keygen cfg-best-em
+KEYS=bundle FHE_SSM_KEYS=$OUT/keys_cfg-best-em LANE_CONFIG=tools/fhe_ssm/configs/own.passes.json \
+  RUN_EXTRA="--stc-cache 160 --pcmm-cf 8 --pcmm-cf-table tools/fhe_ssm/configs/t_mildall.json" \
+  bash tools/fhe_ssm/run_gpu.sh run cfg-best-em
+```
 
 ## The model
 
@@ -317,14 +335,13 @@ pinned, and a PCMM capture whose every finish names its linear.
    them (`tools/fhe_ssm/make_plan.sh`). The reference capture at the default settings and `--levels preset`
    (research record `runs_A/cap_ref_preset/`, 25 stages, 716,245 nodes) holds the fake's counts to the op:
    1,968 refreshes (808/808/142/40/88/48/34), 345,265 ct×pt, 14,372 rotations, 265 conjugations, 4,294 ct×ct;
-   the recorder takes 538 s per tick against the fake's 29 s. Nothing here has run on a device: the magnitudes
-   in a fake capture are the fake's float64 values, and the landing convention is the fake's.
+   the recorder takes 538 s per tick against the fake's 29 s.
 2. **A planned run.** The device path on this branch is `impl.driver.PlannedRun` / `Recorder`
    (`driver.py:444-598`): every stage recorded once on the CPU twin, compiled with its plan, replayed;
    `FheSsmModel` supplies the stages (`token_stages`), its carried state is named for the planner
    (`cache.<name>-lvl=<level>`) and handed over as its K/V (`stage_caches`), `rotation_audit` lists the
-   keys the band must hold. The driver is `run_planned.py` / `planned.py` (next section); its setup is
-   CPU-verified, its session is not.
+   keys the band must hold. The driver is `run_planned.py` / `planned.py` (next section); both the CPU
+   pipeline and full-model GPU runs are verified (`tools/fhe_ssm/run_gpu.sh`).
 3. **PCMM's landing, cap and band shift**, and the refresh landing of this runtime, are measured there;
    until then every level in the table is the fake's.
 4. **The planned refresh counts per axis** (the question the axes exist for) are plan outputs, not eager
@@ -578,7 +595,7 @@ captures. The plans of the merged captures keep today's counts (`cfg_pcmm24_high
 routes) and grow the compile check's launches: 20,976 against 15,190 on PCMM-24 (+38.1 %), 720,418 against 714,610 on
 the diagonal arm (+0.81 %). The tick configuration reproduces `--pass-kernels off`'s replies bit for bit (64, 10 and 1
 conversations); every scenario at the synthetic shape matches `ref.ExactModel.pass_` per live lane-slot to ≤ 4.72e-16.
-Time on a device: unmeasured.
+Full-model GPU verification uses `tools/fhe_ssm/configs/own.passes.json` (`8.856 s/pass`, `7.23 tok/s`).
 
 **The flags.** `run_fake.py --pass-kernels on --scenario NAME | --lane-config FILE [--inject-from-exact HISTORY]`: the
 passes on the fake or the capture recorder, scored per live lane-slot against `ExactModel.pass_` and the mirror, the

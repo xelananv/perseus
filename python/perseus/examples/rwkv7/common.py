@@ -79,10 +79,18 @@ def add_args(ap, n_tokens=12):
                     "the next block at the compiled exit, checked before the session opens)")
 
 
-def tokenizer(harness, vocab=None):
+def default_harness() -> str | None:
+    import pathlib
+    p = pathlib.Path(__file__).resolve().parents[4] / "tools" / "rwkv7" / "harness"
+    return str(p) if (p / "rwkv_tokenizer.py").is_file() else None
+
+
+def tokenizer(harness=None, vocab=None):
+    harness = harness or default_harness()
     if harness is None:
         return None
-    sys.path.insert(0, harness)
+    if harness not in sys.path:
+        sys.path.insert(0, harness)
     from rwkv_tokenizer import RWKVTokenizer
     return RWKVTokenizer(vocab) if vocab else RWKVTokenizer()
 

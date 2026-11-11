@@ -16,14 +16,19 @@ import numpy as np
 import pytest
 
 from perseus.examples.rwkv7 import common, ref
-from perseus.examples.rwkv7.tests.conftest import CACHE, CKPT
+from perseus.examples.rwkv7.tests.conftest import CACHE, CKPT, ROOT, TOOLS_COEFFS
 from perseus.examples.rwkv7.tests.test_ref import HARNESS, tokenizer
 
 RES = pathlib.Path(HARNESS).parents[1]                     # results/
-MODELS = {"0.1b": pathlib.Path(CACHE),
-          "0.4b": RES / "rwkv7-fhe-20261104/new_pod/vd_runs_0.4b"}
-OUT = pathlib.Path(HARNESS) / "nc_coeffs"
-NC_01B = pathlib.Path(CACHE) / "coeffs_mixed_nc.json"
+MODELS = {
+    "0.1b": pathlib.Path(CACHE) if (pathlib.Path(CACHE) / "coeffs_mixed.json").exists() else TOOLS_COEFFS / "0.1b",
+    "0.4b": (RES / "rwkv7-fhe-20261104/new_pod/vd_runs_0.4b"
+             if (RES / "rwkv7-fhe-20261104/new_pod/vd_runs_0.4b/coeffs_mixed.json").exists()
+             else TOOLS_COEFFS / "0.4b"),
+}
+NC_01B = (pathlib.Path(CACHE) / "coeffs_mixed_nc.json"
+          if (pathlib.Path(CACHE) / "coeffs_mixed_nc.json").exists()
+          else TOOLS_COEFFS / "0.1b" / "coeffs_mixed_nc.json")
 R, TOL = 10.0, 1e-3
 
 
@@ -34,18 +39,17 @@ def _convert():
 
 
 @pytest.mark.parametrize("tag", sorted(MODELS))
-def test_convert(tag):
+def test_convert(tag, tmp_path):
     d = MODELS[tag]
     if not (d / "coeffs_mixed.json").exists():
         pytest.skip(f"no {d}/coeffs_mixed.json")
     cv = _convert()
     old = json.load(open(d / "coeffs_mixed.json"))
     new, rows = cv.convert(old, json.load(open(d / "ranges_ctx4096.json")), R, (), TOL)
-    (OUT / tag).mkdir(parents=True, exist_ok=True)
-    json.dump(new, open(OUT / tag / "coeffs_mixed_nc.json", "w"), indent=1)
-    json.dump({"rows": rows, "summary": cv.summary(rows)}, open(OUT / tag / "convert_report.json", "w"), indent=1)
-    if tag == "0.1b":
-        json.dump(new, open(NC_01B, "w"), indent=1)
+    out_dir = tmp_path / "nc_coeffs" / tag
+    out_dir.mkdir(parents=True, exist_ok=True)
+    json.dump(new, open(out_dir / "coeffs_mixed_nc.json", "w"), indent=1)
+    json.dump({"rows": rows, "summary": cv.summary(rows)}, open(out_dir / "convert_report.json", "w"), indent=1)
     print(json.dumps(cv.summary(rows), indent=1))
     n_old = sum(s.get("method") == "newton" for s in old["sites"].values())
     assert len(rows) == n_old and n_old > 0
@@ -101,7 +105,7 @@ def test_plan_cost_old_vs_nc(tmp_path, monkeypatch):
         monkeypatch.setenv(k, v)
     root = pathlib.Path(os.environ.get("RWKV7_NC_DIR", str(tmp_path)))
     res = {}
-    for tag, co in (("old", pathlib.Path(CACHE) / "coeffs_mixed.json"), ("nc", NC_01B)):
+    for tag, co in (("old", MODELS["0.1b"] / "coeffs_mixed.json"), ("nc", NC_01B)):
         cap = root / f"cap_{tag}"
         if not (cap / "capture_config.json").exists():
             assert run_capture.main(["--pth", CKPT, "--coeffs", str(co), "--harness", HARNESS, "--blocks", "1",

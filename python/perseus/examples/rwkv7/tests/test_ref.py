@@ -9,7 +9,10 @@ import pytest
 from perseus.examples.rwkv7 import ref
 from perseus.examples.rwkv7.tests.conftest import CKPT, COEFFS, ROOT
 
-HARNESS = os.environ.get("RWKV7_HARNESS", str(ROOT.parents[1] / "results" / "vector-d-20261104" / "harness"))
+_DEF_HARNESS = ROOT / "tools" / "rwkv7" / "harness"
+if not (_DEF_HARNESS / "rwkv_tokenizer.py").exists():
+    _DEF_HARNESS = ROOT.parents[1] / "results" / "vector-d-20261104" / "harness"
+HARNESS = os.environ.get("RWKV7_HARNESS", str(_DEF_HARNESS))
 need = pytest.mark.skipif(not (os.path.exists(CKPT) and os.path.exists(COEFFS)), reason="no checkpoint")
 
 

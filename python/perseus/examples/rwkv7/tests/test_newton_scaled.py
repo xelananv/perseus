@@ -19,10 +19,12 @@ import numpy as np
 import pytest
 
 from perseus.examples.rwkv7 import ref
-from perseus.examples.rwkv7.tests.conftest import CACHE, CKPT, COEFFS, ROOT
+from perseus.examples.rwkv7.tests.conftest import CACHE, CKPT, COEFFS, ROOT, TOOLS_COEFFS
 from perseus.examples.rwkv7.tests.test_ref import HARNESS
 
-FINAL = pathlib.Path(CACHE) / "coeffs_final.json"             # the 0.1B gate-3 coefficients (newton_const sites)
+FINAL = (pathlib.Path(CACHE) / "coeffs_final.json"
+         if (pathlib.Path(CACHE) / "coeffs_final.json").exists()
+         else TOOLS_COEFFS / "0.1b" / "coeffs_final.json")  # the 0.1B gate-3 coefficients (newton_const sites)
 TOL = 1e-3
 
 

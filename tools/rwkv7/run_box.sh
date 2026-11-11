@@ -4,10 +4,12 @@
 #
 #   KEYS=inproc bash tools/rwkv7/run_box.sh all            build, check, crosscheck, capture, plan, run (BLOCKS unset = all)
 #   KEYS=inproc BLOCKS=1 bash tools/rwkv7/run_box.sh all   one block + the tail (the smoke: same steps, own directories)
-#   bash tools/rwkv7/run_box.sh STEP [STEP ...]           steps in order: build | check | crosscheck | capture | plan | run ...
+#   bash tools/rwkv7/run_box.sh STEP [STEP ...]           steps in order: fetch | build | check | crosscheck | capture | plan | run ...
 #   bash tools/rwkv7/run_box.sh names                     every product name of these settings, KEY=VALUE (no side effect)
 #
 # Steps (every product under $OUT; a step reuses what an earlier one left):
+#   fetch       tools/rwkv7/fetch_data.py: download + SHA-256 verify MODELS (default 0.1b; e.g. MODELS=0.1b,0.4b
+#               WITH_DATA=1) into .cache/rwkv7
 #   build       tools/fhe_ssm/run_gpu.sh build (uv venv, pip install -e .[hf,examples,dev], maturin develop --release)
 #   check       the device classes of perseus._pc, the planner's imports (networkx, scipy), the CPU tests of the port
 #               (on PTH when it is the 768-wide 0.1B, else on CHECK_PTH / CHECK_COEFFS, the 0.1B: the suite is written
@@ -115,10 +117,29 @@ set -uo pipefail
 HERE=$(cd "$(dirname "$0")" && pwd)
 W=$(git -C "$HERE" rev-parse --show-toplevel)
 PY=${PY:-$W/.venv/bin/python}
-OUT=${OUT:-/root/out_rwkv7}
-PTH=${PTH:-/root/d_models/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth}
-COEFFS=${COEFFS:-/root/vd/runs/0.1b/coeffs_mixed.json}
-HARNESS=${HARNESS:-/root/vd/harness}
+if [ -z "${OUT:-}" ]; then
+    if [ -d /root/out_rwkv7 ] || { [ -w /root ] && [ -d /root/d_models ]; }; then OUT=/root/out_rwkv7
+    else OUT=$W/.cache/rwkv7_out; fi
+fi
+if [ -z "${PTH:-}" ]; then
+    if [ -f /root/d_models/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth ]; then
+        PTH=/root/d_models/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth
+    else
+        PTH=$W/.cache/rwkv7/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth
+    fi
+fi
+if [ -z "${COEFFS:-}" ]; then
+    case "$(basename "$PTH")" in
+        *0.4B*) _sz=0.4b ;;
+        *1.5B*) _sz=1.5b ;;
+        *) _sz=0.1b ;;
+    esac
+    if [ -f "$HERE/coeffs/$_sz/coeffs_final.json" ]; then COEFFS=$HERE/coeffs/$_sz/coeffs_final.json
+    else COEFFS=/root/vd/runs/$_sz/coeffs_mixed.json; fi
+fi
+if [ -z "${HARNESS:-}" ]; then
+    if [ -f "$HERE/harness/rwkv_tokenizer.py" ]; then HARNESS=$HERE/harness; else HARNESS=/root/vd/harness; fi
+fi
 TOKENS=${TOKENS:-12}; BLOCKS=${BLOCKS:-}; GPU=${GPU:-0}; PCMM_SHIFT=${PCMM_SHIFT:-calib}; PCMM_CF=${PCMM_CF:-6}
 TEXT=${TEXT:-$'\n\nThe Eiffel tower is in the city of Paris, which is the capital of France and'}
 LAYOUT=${LAYOUT:-current}; LORA=${LORA:-auto}; SHARD_LAND=${SHARD_LAND:-1}; LANES=${LANES:-0}
@@ -210,14 +231,28 @@ capcheck() {
     [ "${PIPESTATUS[0]}" = 0 ] || die "capture_check refused $cap${plan:+ / $plan}"
 }
 
+step_fetch() {
+    local fpy=$PY; [ -x "$fpy" ] || fpy=$(command -v python3)
+    "$fpy" "$HERE/fetch_data.py" --models "${MODELS:-0.1b}" --model-dir "${MODEL_DIR:-$W/.cache/rwkv7}" \
+        --data-dir "${DATA_DIR:-$W/.cache/rwkv7/data}" ${WITH_DATA:+--with-data} || die "fetch failed"
+}
+
 step_build() { OUT=$OUT bash "$W/tools/fhe_ssm/run_gpu.sh" build || die "build failed"; }
 
 # The CPU suite is written against the 0.1B (test_mirror's padding check at C = 768, K = 32 and T = 32 at t = 32;
 # review lens 2, finding 3): it runs on $PTH only when $PTH is 768 wide, else on CHECK_PTH / CHECK_COEFFS (the 0.1B
 # and its final coefficients on the box); $PTH itself gets the width-agnostic checks (shapes, the layout and preset,
 # a coefficient site for every block).
-CHECK_PTH=${CHECK_PTH:-/root/d_models/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth}
-CHECK_COEFFS=${CHECK_COEFFS:-/root/vd/runs/0.1b/coeffs_final.json}
+if [ -z "${CHECK_PTH:-}" ]; then
+    [ -f /root/d_models/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth ] \
+        && CHECK_PTH=/root/d_models/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth \
+        || CHECK_PTH=$W/.cache/rwkv7/RWKV-x070-World-0.1B-v2.8-20241210-ctx4096.pth
+fi
+if [ -z "${CHECK_COEFFS:-}" ]; then
+    [ -f "$HERE/coeffs/0.1b/coeffs_final.json" ] \
+        && CHECK_COEFFS=$HERE/coeffs/0.1b/coeffs_final.json \
+        || CHECK_COEFFS=/root/vd/runs/0.1b/coeffs_final.json
+fi
 step_check() {
     for f in "$PTH" "$COEFFS" "$HARNESS/rwkv_tokenizer.py"; do [ -f "$f" ] || die "missing $f"; done
     pyrun "$PY" -c "from perseus import _pc; miss=[n for n in ('Session','Program','KeySource','PtStore') if not hasattr(_pc,n)]; print('device classes missing:', miss or 'none'); raise SystemExit(1 if miss else 0)" \
@@ -505,7 +540,7 @@ step_run() {
 
 run_cmd() {
     case "$1" in
-        build|check|crosscheck|capture|plan|run|capture_pf|plan_pf|pfcheck|run_pf|capture_b|plan_b|bcheck|batch|keyspec|keygen) "step_$1" ;;
+        fetch|build|check|crosscheck|capture|plan|run|capture_pf|plan_pf|pfcheck|run_pf|capture_b|plan_b|bcheck|batch|keyspec|keygen) "step_$1" ;;
         capture_j|plan_j|scheck|serve) "step_$1" ;;
         all) step_build; step_check; step_crosscheck; step_capture; step_plan; step_run ;;
         pf) step_capture; step_plan; step_capture_pf; step_plan_pf; step_run_pf ;;

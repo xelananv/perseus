@@ -231,7 +231,7 @@ position, the summary) beside its log.
    fine). Fallback: K compiled join programs with baked masks.
 4. **Pool exhaustion.** The K = 32 batched run needed `POOL_B=1024 STC_CACHE_B=64`. Serve uses `POOL_S` (256); raise it.
 5. **One lane's out-of-interval value spoils all lanes** (measured, K = 32, pass 18). Idle lanes are kept in range, but a
-   conversation's own text can still leave an interval. The client-side lane health check is held (`PROJECT_BACKLOG.md`).
+   conversation's own text can still leave an interval. A client-side lane health check is deferred (§9).
 6. **The register table:** single programs write into every lane's S registers through `bind_lane`; `reg_levels` covers
    those writes. A miss shows as a register-size error on the first prefill of a lane other than 0.
 7. **Setup time:** four twins record their probes (decode, T = 32 prefill, K-lane batched, join) before the session
