@@ -14,7 +14,7 @@ bash tools/rwkv7/run_box.sh fetch
 # 3. Verify _pc bindings, planner dependencies, and CPU test suite
 bash tools/rwkv7/run_box.sh check
 
-# 4. Run 0.1B encrypted decode on GPU with client-held keys
+# 4. Run 0.1B encrypted decode on GPU with no secret key in the server session (KEYS=bundle)
 export LEVERS=best STC_CACHE=160 KEYS=bundle
 bash tools/rwkv7/run_box.sh capture plan
 KEYMODE=decode bash tools/rwkv7/run_box.sh keyspec keygen

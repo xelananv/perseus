@@ -13,8 +13,8 @@ the fhe-ssm repository's (`pbd430a_weights.npz` sha256 `3ec3f1d8…784b`, `pbd43
 By default it serves 64 conversations per ciphertext at ring 2^16: the filled layout with one conversation
 on each axis of a complex slot (`--layout filled --payload pairs --pair-route split`). It is verified end-to-end
 on CPU and GPU (`tools/fhe_ssm/run_gpu.sh`, `tools/fhe_ssm/RUNSHEET_GPU.md`): on 1× RTX PRO 6000 Blackwell (97,887 MiB,
-CUDA 13.2), the `cfg-best-em` publication run achieves **8.856 s per pass across 64 lanes (7.23 tok/s aggregate)**
-with client-held evaluation keys (`KEYS=bundle`, `has_secret: false`). Config, seed, lane-scenario, and PCMM CF table
+CUDA 13.2), the `cfg-best-em` publication run achieves **8.857 s per pass across 64 lanes (7.23 tok/s aggregate)**
+with no secret key in the server session (`KEYS=bundle`, `has_secret: false`; the client role ran on the same machine). Config, seed, lane-scenario, and PCMM CF table
 files live in `tools/fhe_ssm/configs/`.
 
 ## Quickstart (GPU)
@@ -595,7 +595,7 @@ captures. The plans of the merged captures keep today's counts (`cfg_pcmm24_high
 routes) and grow the compile check's launches: 20,976 against 15,190 on PCMM-24 (+38.1 %), 720,418 against 714,610 on
 the diagonal arm (+0.81 %). The tick configuration reproduces `--pass-kernels off`'s replies bit for bit (64, 10 and 1
 conversations); every scenario at the synthetic shape matches `ref.ExactModel.pass_` per live lane-slot to ≤ 4.72e-16.
-Full-model GPU verification uses `tools/fhe_ssm/configs/own.passes.json` (`8.856 s/pass`, `7.23 tok/s`).
+Full-model GPU verification uses `tools/fhe_ssm/configs/own.passes.json` (`8.857 s/pass`, `7.23 tok/s`).
 
 **The flags.** `run_fake.py --pass-kernels on --scenario NAME | --lane-config FILE [--inject-from-exact HISTORY]`: the
 passes on the fake or the capture recorder, scored per live lane-slot against `ExactModel.pass_` and the mirror, the
