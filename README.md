@@ -1,3 +1,44 @@
+> [!NOTE]
+> **This is a fork branch, not upstream Perseus.** `fhe-ssm-rwkv7-any` runs **RWKV-7 World 0.1B and 0.4B** under CKKS
+> on Perseus's Rust + CUDA runtime: the public checkpoints, with every non-polynomial operation replaced by a fitted
+> polynomial. **Start here: [`python/perseus/examples/rwkv7/README.md`](python/perseus/examples/rwkv7/README.md)**
+> ([quick start](python/perseus/examples/rwkv7/README.md#how-to-run-quickstart)). Below the line is upstream's speedrun
+> README, unchanged from this branch's base.
+
+## RWKV-7 on Perseus: what this branch measured
+
+One RTX PRO 6000 Blackwell (600 W), ring 2^16, 32 conversations per pass (`K = 32`, filled layout). The server session
+held no secret key; the client ran in the same process on that machine. A recurrent state replaces the KV cache, so the
+cost and memory of a step do not grow with the conversation.
+
+| | 0.1B | 0.4B |
+|---|---|---|
+| Pass, 32 conversations | 19.36 s | 39.08 s |
+| Aggregate throughput, 32 active lanes | 1.65 tok/s | 0.82 tok/s |
+| … realised, as conversations finish | 1.11 tok/s | 0.55 tok/s |
+| Top-1 against the plaintext polynomial model | 1,300 / 1,306 | 1,302 / 1,306 |
+| WikiText-103 perplexity, polynomial (exact) | 19.414 (19.404) | 13.748 (13.753) |
+| LAMBADA, polynomial (exact) | 48.96 % (48.98 %) | 58.33 % (58.49 %) |
+
+- **Long runs.** 0.1B ran 148 free-running steps at 9.68–9.77 s per token, top-1 155 / 155.
+- **Intervals.** Each polynomial is fitted on a calibrated interval. A scan of the WikiText-103 and LAMBADA test sets
+  (700,659 tokens per model) found no non-finite value, but an input outside the intervals is not excluded
+  mathematically.
+- **Keys.** Chain `n32`; the lattice estimator prices the key set at 2^131.28 (classical).
+- **Records.** Run logs, the quality gate and the key estimates are in
+  [xelananv/fhe-ssm](https://github.com/xelananv/fhe-ssm) ([`docs/RESULTS.md`](https://github.com/xelananv/fhe-ssm/blob/main/docs/RESULTS.md)).
+- **The 405M recurrent model** (trained for the circuit; 64 conversations per 8.86 s pass, 7.2 tok/s aggregate;
+  WikiText-103 perplexity 28.55): its measured port is on branch
+  [`fhe-ssm-speedrun`](https://github.com/xelananv/perseus/tree/fhe-ssm-speedrun).
+- **Base.** Upstream `speedrun` at
+  [`d97a6f7`](https://github.com/gladia-research-group/perseus/tree/d97a6f70a6c7f07b637f2d58331eb44faa3a838e)
+  (2026-10-28). GitHub's ahead/behind banner compares with upstream `main`, which this branch does not follow. Upstream
+  files this branch changes: [`tools/fhe_ssm/UPSTREAM_CHANGES.md`](tools/fhe_ssm/UPSTREAM_CHANGES.md).
+- **Licence.** The files this branch adds are MIT. Commercial use of them as part of Perseus needs prior written
+  permission from the licensors under Perseus's Business Source License 1.1; each added `LICENSE` carries the notice.
+
+---
+
 # Encrypted GPT-2 Speedrun
 
 > **Can we run encrypted transformer inference as fast as plaintext inference?**
