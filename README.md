@@ -1,3 +1,35 @@
+> [!NOTE]
+> **This is a fork branch, not upstream Perseus.** `fhe-ssm-speedrun` runs fhe-ssm, a 405M-parameter recurrent
+> language model trained for the circuit, under CKKS on Perseus's Rust + CUDA runtime, 64 conversations per pass.
+> **Start here: [`python/perseus/examples/fhe_ssm/README.md`](python/perseus/examples/fhe_ssm/README.md)**
+> ([quick start](python/perseus/examples/fhe_ssm/README.md#quickstart-gpu)). RWKV-7 World 0.1B / 0.4B run on branch
+> [`fhe-ssm-rwkv7-any`](https://github.com/xelananv/perseus/tree/fhe-ssm-rwkv7-any). Below the line is upstream's
+> speedrun README, unchanged from this branch's base.
+
+## fhe-ssm on Perseus: what this branch measured
+
+One RTX PRO 6000 Blackwell (600 W), ring 2^16, chain `n32`; the lattice estimator prices the key set at 2^131.28
+(classical). A recurrent state replaces the KV cache, so the cost and memory of a step do not grow with the
+conversation.
+
+- **Generation.** Each pass advances 64 conversations by one token: 8.857 s per pass on average over the 16 generation
+  passes of the publication run, 7.2 tok/s aggregate. In that run the server session held no secret key and encrypted
+  the inputs with the public key; the client role ran on the same machine.
+- **Reading.** A pass can instead read 64 positions of one document: 8.793 s per pass on average.
+- **148 free-running steps.** 8.929 s per step (unfenced mean over 74 steps); top-1 against the plaintext model
+  9,462 / 9,472; one device-memory value over the whole run. This run held the secret in the session.
+- **Quality.** The model is small and trained for the circuit: WikiText-103 perplexity 28.55, LAMBADA 9 %.
+- **Records.** Run logs and the key estimates are in [xelananv/fhe-ssm](https://github.com/xelananv/fhe-ssm)
+  ([`docs/RESULTS.md`](https://github.com/xelananv/fhe-ssm/blob/main/docs/RESULTS.md)).
+- **Base.** Upstream `speedrun` at
+  [`d97a6f7`](https://github.com/gladia-research-group/perseus/tree/d97a6f70a6c7f07b637f2d58331eb44faa3a838e)
+  (2026-10-28). GitHub's ahead/behind banner compares with upstream `main`, which this branch does not follow. Upstream
+  files this branch changes: [`tools/fhe_ssm/UPSTREAM_CHANGES.md`](tools/fhe_ssm/UPSTREAM_CHANGES.md).
+- **Licence.** The files this branch adds are MIT. Commercial use of them as part of Perseus needs prior written
+  permission from the licensors under Perseus's Business Source License 1.1; each added `LICENSE` carries the notice.
+
+---
+
 # Encrypted GPT-2 Speedrun
 
 > **Can we run encrypted transformer inference as fast as plaintext inference?**
